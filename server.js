@@ -103,21 +103,30 @@ app.get('/imbalance', async (req, res) => {
   const warnings = [];
 
   async function fetchOds(ds, s, e) {
-    const where = 'datetime >= "' + fmtIso(s) + '" AND datetime < "' + fmtIso(e) + '"';
+    const startStr = fmtIso(s);
+    const endStr = fmtIso(e);
     const allResults = [];
     let offset = 0;
-    const pageSize = 100;
+    const limit = 100;
+
     while (true) {
-      const params = new URLSearchParams({ where, select: 'datetime,imbalanceprice', order_by: 'datetime ASC', limit: String(pageSize), offset: String(offset) });
-      const url = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets/' + ds + '/records?' + params.toString();
+      const whereEnc = encodeURIComponent('datetime >= "' + startStr + '" AND datetime < "' + endStr + '"');
+      const url = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets/' + ds
+        + '/records?where=' + whereEnc
+        + '&select=datetime%2Cimbalanceprice'
+        + '&order_by=datetime%20ASC'
+        + '&limit=' + limit
+        + '&offset=' + offset;
+
       const r = await httpGet(url);
-      if (r.status !== 200) throw new Error(ds + ' HTTP ' + r.status + ': ' + r.body.substring(0, 200));
+      if (r.status !== 200) throw new Error(ds + ' HTTP ' + r.status + ': ' + r.body.substring(0, 300));
       const json = JSON.parse(r.body);
-      const records = (json.results || []).filter(x => x.imbalanceprice != null)
+      const records = (json.results || [])
+        .filter(x => x.imbalanceprice != null)
         .map(x => ({ t: x.datetime.substring(0, 19) + 'Z', v: Math.round(parseFloat(x.imbalanceprice) * 100) / 100 }));
       allResults.push(...records);
-      if (records.length < pageSize || allResults.length >= 2000) break;
-      offset += pageSize;
+      if (records.length < limit || allResults.length >= 3000) break;
+      offset += limit;
     }
     return allResults;
   }
