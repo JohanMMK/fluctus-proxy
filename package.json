@@ -1,0 +1,15 @@
+{
+  "name": "fluctus-energie-proxy",
+  "version": "1.0.0",
+  "description": "Proxy voor ENTSO-E en Elia energie API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
