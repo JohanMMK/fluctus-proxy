@@ -70,6 +70,19 @@ function parseXml(xml) {
   return results.sort((a, b) => a.t.localeCompare(b.t));
 }
 
+// Splits tijdsperiode in maandelijkse segmenten
+function splitIntoMonths(start, end) {
+  const segments = [];
+  let cur = new Date(start);
+  while (cur < end) {
+    const segStart = new Date(cur);
+    const segEnd = new Date(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1);
+    segments.push({ s: segStart, e: segEnd > end ? end : segEnd });
+    cur = new Date(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1);
+  }
+  return segments;
+}
+
 app.get('/spot', async (req, res) => {
   const days = Math.min(parseInt(req.query.days || '7'), 365);
   const now = new Date(); now.setUTCMinutes(0, 0, 0);
@@ -95,20 +108,17 @@ app.get('/spot', async (req, res) => {
 });
 
 app.get('/imbalance', async (req, res) => {
-  const days = Math.min(parseInt(req.query.days || '7'), 365);
+  const days = Math.min(parseInt(req.query.days || '7'), 366);
   const now = new Date(); now.setUTCMinutes(0, 0, 0);
   const start = new Date(now.getTime() - days * 86400000);
   const cutoff = new Date('2024-05-22T00:00:00Z');
-  const results = [];
-  const warnings = [];
 
-  async function fetchOds(ds, s, e) {
+  async function fetchOdsMonth(ds, s, e) {
     const startStr = fmtIso(s);
     const endStr = fmtIso(e);
     const allResults = [];
     let offset = 0;
     const limit = 100;
-
     while (true) {
       const whereEnc = encodeURIComponent('datetime >= "' + startStr + '" AND datetime < "' + endStr + '"');
       const url = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets/' + ds
@@ -117,27 +127,47 @@ app.get('/imbalance', async (req, res) => {
         + '&order_by=datetime%20ASC'
         + '&limit=' + limit
         + '&offset=' + offset;
-
       const r = await httpGet(url);
-      if (r.status !== 200) throw new Error(ds + ' HTTP ' + r.status + ': ' + r.body.substring(0, 300));
+      if (r.status !== 200) throw new Error(ds + ' HTTP ' + r.status);
       const json = JSON.parse(r.body);
       const records = (json.results || [])
         .filter(x => x.imbalanceprice != null)
         .map(x => ({ t: x.datetime.substring(0, 19) + 'Z', v: Math.round(parseFloat(x.imbalanceprice) * 100) / 100 }));
       allResults.push(...records);
-      if (records.length < limit || allResults.length >= 3000) break;
+      if (records.length < limit) break;
       offset += limit;
     }
     return allResults;
   }
 
+  async function fetchOdsParallel(ds, s, e) {
+    const segments = splitIntoMonths(s, e);
+    // Haal maandelijkse segmenten parallel op (max 6 tegelijk)
+    const results = [];
+    for (let i = 0; i < segments.length; i += 6) {
+      const batch = segments.slice(i, i + 6);
+      const batchResults = await Promise.all(batch.map(seg => fetchOdsMonth(ds, seg.s, seg.e)));
+      batchResults.forEach(r => results.push(...r));
+    }
+    return results;
+  }
+
+  const results = [];
+  const warnings = [];
+
   if (start < cutoff) {
-    try { const d = await fetchOds('ods047', start, now < cutoff ? now : cutoff); results.push(...d); }
-    catch (e) { warnings.push(e.message); }
+    try {
+      const segEnd = now < cutoff ? now : cutoff;
+      const d = await fetchOdsParallel('ods047', start, segEnd);
+      results.push(...d);
+    } catch (e) { warnings.push('ods047: ' + e.message); }
   }
   if (now >= cutoff) {
-    try { const d = await fetchOds('ods134', start >= cutoff ? start : cutoff, now); results.push(...d); }
-    catch (e) { warnings.push(e.message); }
+    try {
+      const segStart = start >= cutoff ? start : cutoff;
+      const d = await fetchOdsParallel('ods134', segStart, now);
+      results.push(...d);
+    } catch (e) { warnings.push('ods134: ' + e.message); }
   }
 
   results.sort((a, b) => a.t.localeCompare(b.t));
