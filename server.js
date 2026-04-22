@@ -144,6 +144,48 @@ async function eliaFetch(dataset, spotfield, imbfield, startDate, endDate) {
 // Geeft spot + onbalans terug voor de gevraagde periode.
 // Automatisch uit de juiste dataset (historisch of recent).
 // ═══════════════════════════════════════════════════════════════════════════
+// ─── Hulpfunctie: geaggregeerde data (wind/zon) per kwartieruur ──────────────
+async function eliaAggMonth(dataset, segStart, segEnd) {
+  const startStr = fmtIso(segStart);
+  const endStr   = fmtIso(segEnd);
+  const results  = [];
+  let offset = 0;
+  const limit = 100;
+
+  while (true) {
+    const where  = encodeURIComponent(`datetime >= "${startStr}" AND datetime < "${endStr}"`);
+    const select = encodeURIComponent('datetime,sum(measured) as total_mw');
+    const group  = encodeURIComponent('datetime');
+    const order  = encodeURIComponent('datetime ASC');
+    const url = `${ELIA_BASE}/${dataset}/records?where=${where}&select=${select}&group_by=${group}&order_by=${order}&limit=${limit}&offset=${offset}`;
+
+    const r = await httpGet(url);
+    if (r.status !== 200) throw new Error(`Elia ${dataset} HTTP ${r.status}`);
+    const json = JSON.parse(r.body);
+    const records = (json.results || []).map(rec => ({
+      t: rec.datetime ? rec.datetime.substring(0, 19) + 'Z' : null,
+      v: Math.round((parseFloat(rec.total_mw) || 0) * 10) / 10
+    })).filter(r => r.t);
+
+    results.push(...records);
+    if (records.length < limit) break;
+    offset += limit;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return results;
+}
+
+async function eliaAggFetch(dataset, startDate, endDate) {
+  const segments = splitIntoMonths(startDate, endDate);
+  const all = [];
+  for (let i = 0; i < segments.length; i += 4) {
+    const batch = segments.slice(i, i + 4);
+    const batchResults = await Promise.all(batch.map(seg => eliaAggMonth(dataset, seg.s, seg.e)));
+    batchResults.forEach(r => all.push(...r));
+  }
+  return all;
+}
+
 app.get('/elia-data', async (req, res) => {
   const { from, to } = req.query;
 
@@ -155,48 +197,54 @@ app.get('/elia-data', async (req, res) => {
   const toDate   = new Date(to   + 'T23:59:59Z');
   const cutoff   = new Date('2024-05-22T00:00:00Z');
 
-  // Dataset configuratie
   const HIST   = { id: 'ods047', spotfield: 'marginalincrementalprice', imbfield: 'positiveimbalanceprice' };
   const RECENT = { id: 'ods134', spotfield: 'marginalincrementalprice', imbfield: 'imbalanceprice' };
 
   try {
-    const allSpot = [], allImb = [];
+    const allSpot = [], allImb = [], allWind = [], allSolar = [];
     const warnings = [];
 
-    // Historische data nodig?
+    // Spot + onbalans
     if (fromDate < cutoff) {
       try {
         const histEnd = toDate < cutoff ? toDate : cutoff;
         const d = await eliaFetch(HIST.id, HIST.spotfield, HIST.imbfield, fromDate, histEnd);
         allSpot.push(...d.spot);
         allImb.push(...d.imb);
-      } catch (e) {
-        warnings.push('ods047 fout: ' + e.message);
-      }
+      } catch (e) { warnings.push('ods047: ' + e.message); }
     }
-
-    // Recente data nodig?
     if (toDate >= cutoff) {
       try {
         const recentStart = fromDate >= cutoff ? fromDate : cutoff;
         const d = await eliaFetch(RECENT.id, RECENT.spotfield, RECENT.imbfield, recentStart, toDate);
         allSpot.push(...d.spot);
         allImb.push(...d.imb);
-      } catch (e) {
-        warnings.push('ods134 fout: ' + e.message);
-      }
+      } catch (e) { warnings.push('ods134: ' + e.message); }
     }
 
-    // Sorteer op tijd
+    // Wind (ods031) — altijd één dataset, volledig historiek
+    try {
+      const w = await eliaAggFetch('ods031', fromDate, toDate);
+      allWind.push(...w);
+    } catch (e) { warnings.push('ods031 wind: ' + e.message); }
+
+    // Zon (ods032) — altijd één dataset, volledig historiek
+    try {
+      const s = await eliaAggFetch('ods032', fromDate, toDate);
+      allSolar.push(...s);
+    } catch (e) { warnings.push('ods032 zon: ' + e.message); }
+
     allSpot.sort((a, b) => a.t.localeCompare(b.t));
     allImb.sort((a, b) => a.t.localeCompare(b.t));
+    allWind.sort((a, b) => a.t.localeCompare(b.t));
+    allSolar.sort((a, b) => a.t.localeCompare(b.t));
 
     const out = {
       spot:  allSpot,
       imb:   allImb,
-      total_spot: allSpot.length,
-      total_imb:  allImb.length,
-      source: 'Elia Open Data (ods047 + ods134)',
+      wind:  allWind,
+      solar: allSolar,
+      source: 'Elia Open Data',
     };
     if (warnings.length) out.warnings = warnings;
     res.json(out);
