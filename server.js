@@ -2,6 +2,7 @@ const express = require('express');
 const https = require('https');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const ELIA_BASE = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets';
 
 app.use(express.json({ limit: '25mb' }));
 
