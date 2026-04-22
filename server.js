@@ -153,19 +153,25 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
   const limit = 100;
 
   while (true) {
-    const where  = encodeURIComponent(`datetime >= "${startStr}" AND datetime < "${endStr}"`);
-    const select = encodeURIComponent('datetime,sum(measured) as total_mw');
-    const group  = encodeURIComponent('datetime');
-    const order  = encodeURIComponent('datetime ASC');
-    const url = `${ELIA_BASE}/${dataset}/records?where=${where}&select=${select}&group_by=${group}&order_by=${order}&limit=${limit}&offset=${offset}`;
+    // Gebruik aparte query parameters zonder encodeURIComponent nesting
+    const whereClause = `datetime >= "${startStr}" AND datetime < "${endStr}"`;
+    const url = `${ELIA_BASE}/${dataset}/records`
+      + `?where=${encodeURIComponent(whereClause)}`
+      + `&select=${encodeURIComponent('datetime,sum(measured) as total_mw')}`
+      + `&group_by=${encodeURIComponent('datetime')}`
+      + `&order_by=${encodeURIComponent('datetime ASC')}`
+      + `&limit=${limit}`
+      + `&offset=${offset}`;
 
     const r = await httpGet(url);
-    if (r.status !== 200) throw new Error(`Elia ${dataset} HTTP ${r.status}`);
+    if (r.status !== 200) throw new Error(`Elia ${dataset} HTTP ${r.status}: ${r.body.slice(0,100)}`);
     const json = JSON.parse(r.body);
-    const records = (json.results || []).map(rec => ({
-      t: rec.datetime ? rec.datetime.substring(0, 19) + 'Z' : null,
-      v: Math.round((parseFloat(rec.total_mw) || 0) * 10) / 10
-    })).filter(r => r.t);
+    const records = (json.results || [])
+      .filter(rec => rec.datetime && rec.total_mw != null)
+      .map(rec => ({
+        t: rec.datetime.substring(0, 19) + 'Z',
+        v: Math.round((parseFloat(rec.total_mw) || 0) * 10) / 10
+      }));
 
     results.push(...records);
     if (records.length < limit) break;
