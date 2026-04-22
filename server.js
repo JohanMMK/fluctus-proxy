@@ -144,7 +144,7 @@ async function eliaFetch(dataset, spotfield, imbfield, startDate, endDate) {
 // Geeft spot + onbalans terug voor de gevraagde periode.
 // Automatisch uit de juiste dataset (historisch of recent).
 // ═══════════════════════════════════════════════════════════════════════════
-// ─── Hulpfunctie: geaggregeerde data (wind/zon) per kwartieruur ──────────────
+// ─── Hulpfunctie: geaggregeerde data (wind/zon) — één maand ─────────────────
 async function eliaAggMonth(dataset, segStart, segEnd) {
   const startStr = fmtIso(segStart);
   const endStr   = fmtIso(segEnd);
@@ -153,7 +153,6 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
   const limit = 100;
 
   while (true) {
-    // Gebruik aparte query parameters zonder encodeURIComponent nesting
     const whereClause = `datetime >= "${startStr}" AND datetime < "${endStr}"`;
     const url = `${ELIA_BASE}/${dataset}/records`
       + `?where=${encodeURIComponent(whereClause)}`
@@ -164,7 +163,7 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
       + `&offset=${offset}`;
 
     const r = await httpGet(url);
-    if (r.status !== 200) throw new Error(`Elia ${dataset} HTTP ${r.status}: ${r.body.slice(0,100)}`);
+    if (r.status !== 200) throw new Error(`${dataset} HTTP ${r.status}`);
     const json = JSON.parse(r.body);
     const records = (json.results || [])
       .filter(rec => rec.datetime && rec.total_mw != null)
@@ -176,20 +175,9 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
     results.push(...records);
     if (records.length < limit) break;
     offset += limit;
-    await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 80));
   }
   return results;
-}
-
-async function eliaAggFetch(dataset, startDate, endDate) {
-  const segments = splitIntoMonths(startDate, endDate);
-  const all = [];
-  for (let i = 0; i < segments.length; i += 4) {
-    const batch = segments.slice(i, i + 4);
-    const batchResults = await Promise.all(batch.map(seg => eliaAggMonth(dataset, seg.s, seg.e)));
-    batchResults.forEach(r => all.push(...r));
-  }
-  return all;
 }
 
 app.get('/elia-data', async (req, res) => {
@@ -228,28 +216,14 @@ app.get('/elia-data', async (req, res) => {
       } catch (e) { warnings.push('ods134: ' + e.message); }
     }
 
-    // Wind (ods031) — altijd één dataset, volledig historiek
-    try {
-      const w = await eliaAggFetch('ods031', fromDate, toDate);
-      allWind.push(...w);
-    } catch (e) { warnings.push('ods031 wind: ' + e.message); }
-
-    // Zon (ods032) — altijd één dataset, volledig historiek
-    try {
-      const s = await eliaAggFetch('ods032', fromDate, toDate);
-      allSolar.push(...s);
-    } catch (e) { warnings.push('ods032 zon: ' + e.message); }
-
     allSpot.sort((a, b) => a.t.localeCompare(b.t));
     allImb.sort((a, b) => a.t.localeCompare(b.t));
-    allWind.sort((a, b) => a.t.localeCompare(b.t));
-    allSolar.sort((a, b) => a.t.localeCompare(b.t));
 
     const out = {
       spot:  allSpot,
       imb:   allImb,
-      wind:  allWind,
-      solar: allSolar,
+      wind:  [],
+      solar: [],
       source: 'Elia Open Data',
     };
     if (warnings.length) out.warnings = warnings;
@@ -257,6 +231,47 @@ app.get('/elia-data', async (req, res) => {
 
   } catch (err) {
     console.error('elia-data fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /elia-renewable?dataset=ods031&from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Haalt wind (ods031) of zon (ods032) op — één maand per keer
+// Frontend roept dit jaar per jaar aan om timeout te vermijden
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/elia-renewable', async (req, res) => {
+  const { dataset, from, to } = req.query;
+
+  if (!dataset || !from || !to) {
+    return res.status(400).json({ error: 'dataset, from en to zijn verplicht' });
+  }
+  if (!['ods031', 'ods032'].includes(dataset)) {
+    return res.status(400).json({ error: 'dataset moet ods031 (wind) of ods032 (zon) zijn' });
+  }
+
+  const fromDate = new Date(from + 'T00:00:00Z');
+  const toDate   = new Date(to   + 'T23:59:59Z');
+
+  try {
+    const segments = splitIntoMonths(fromDate, toDate);
+    const all = [];
+
+    // Max 3 maanden parallel om timeout te vermijden
+    for (let i = 0; i < segments.length; i += 3) {
+      const batch = segments.slice(i, i + 3);
+      const batchResults = await Promise.all(
+        batch.map(seg => eliaAggMonth(dataset, seg.s, seg.e))
+      );
+      batchResults.forEach(r => all.push(...r));
+    }
+
+    all.sort((a, b) => a.t.localeCompare(b.t));
+    res.json({ data: all, count: all.length, dataset, source: 'Elia Open Data' });
+
+  } catch (err) {
+    console.error('elia-renewable fout:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
