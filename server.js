@@ -75,29 +75,53 @@ function httpPostJson(url, headers, bodyObj) {
 // ─── GitHub helpers voor kleine JSON-bestanden ─────────────────────────────
 // Lees een JSON-bestand uit de GitHub repo (via Contents API, niet de raw CDN,
 // dus altijd vers). Retourneert {json, sha} of null als het bestand niet bestaat.
+// Haal de rauwe inhoud op van een GitHub file. Werkt voor bestanden van alle
+// groottes (ook >1 MB) door de raw media type te gebruiken. Returns:
+// {raw, json, sha, parseError, exists}
 async function githubReadJson(token, owner, repo, path) {
   const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?t=${Date.now()}`;
-  const authHeaders = {
+
+  // Eerste call: krijg de file content + metadata in raw formaat.
+  // application/vnd.github.raw+json werkt voor alle file-groottes.
+  const rawHeaders = {
     'Authorization': 'token ' + token,
-    'User-Agent': 'Fluctus-Worker/2.1',
-    'Accept': 'application/json',
+    'User-Agent': 'Fluctus-Worker/4.0',
+    'Accept': 'application/vnd.github.raw+json',
   };
-  const resp = await httpGet(apiUrl, authHeaders);
-  if (resp.status === 404) return null;
-  if (resp.status !== 200) throw new Error(`GitHub read HTTP ${resp.status}: ${resp.body.slice(0, 200)}`);
-  const data = JSON.parse(resp.body);
-  // content is base64-encoded
-  const decoded = Buffer.from(data.content, 'base64').toString('utf8');
-  // Belangrijk: bij corrupt JSON geven we TOCH de SHA terug zodat writes
-  // mogelijk blijven. `json` is dan null en de caller kan dat detecteren.
+  const rawResp = await httpGet(apiUrl, rawHeaders);
+  if (rawResp.status === 404) return null;
+  if (rawResp.status !== 200) {
+    throw new Error(`GitHub read HTTP ${rawResp.status}: ${rawResp.body.slice(0, 200)}`);
+  }
+
+  const rawContent = rawResp.body;
+
+  // Tweede call: haal de SHA op via de standaard JSON media type.
+  // Voor kleine bestanden bevat deze ook de base64 content (redundant hier),
+  // voor grote bestanden alleen metadata. In beide gevallen: .sha is aanwezig.
+  const jsonHeaders = {
+    'Authorization': 'token ' + token,
+    'User-Agent': 'Fluctus-Worker/4.0',
+    'Accept': 'application/vnd.github+json',
+  };
+  const metaResp = await httpGet(apiUrl + '&_meta=1', jsonHeaders);
+  let sha = null;
+  if (metaResp.status === 200) {
+    try {
+      const metaData = JSON.parse(metaResp.body);
+      sha = metaData.sha || null;
+    } catch (_) { /* metadata parse fail is niet-kritiek; write zal sha later ophalen */ }
+  }
+
   let parsedJson = null;
   let parseError = null;
   try {
-    parsedJson = JSON.parse(decoded);
+    parsedJson = JSON.parse(rawContent);
   } catch (e) {
     parseError = e.message;
   }
-  return { json: parsedJson, sha: data.sha, raw: decoded, parseError };
+
+  return { json: parsedJson, sha, raw: rawContent, parseError };
 }
 
 // Schrijf een JSON-bestand naar de GitHub repo. Retourneert {ok, action}.
@@ -735,10 +759,10 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '4.0',
+  versie: '4.1',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
-  cache: 'multi-bestand (5 datasets)',
+  cache: 'multi-bestand (5 datasets) — fix voor files >1 MB',
   routes: [
     '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia)',
     '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
@@ -1004,4 +1028,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v4.0 (multi-file cache, ENTSO-E + Elia) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v4.1 (multi-file cache, raw media type voor >1 MB) draait op poort ' + PORT));
