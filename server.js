@@ -533,7 +533,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '2.2',
+  versie: '2.3',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
@@ -544,6 +544,7 @@ app.get('/', (req, res) => res.json({
     'POST /cache-update                         (schrijf marktdata cache naar GitHub)',
     'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
     'POST /claude-explain-refresh               (genereer + cache uitleg — 1x per dag)',
+    'POST /share-create                         (PNG + OG-pagina naar GitHub Pages)',
     'POST /claude-explain                       (legacy: AI uitleg zonder cache)',
   ]
 }));
@@ -725,24 +726,200 @@ app.options('/claude-explain-refresh', (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /share-create
+// Body: { imageBase64: '...', title: '...', description: '...' }
+//
+// Schrijft de grafiek-PNG naar data/shares/<hash>.png en maakt een HTML-pagina
+// met OG-tags op data/shares/<hash>.html. LinkedIn fetcht de HTML, leest de
+// OG-tags en toont de PNG als preview.
+//
+// Retourneert { shareUrl, imageUrl, hash } — shareUrl is wat in de LinkedIn
+// share-link gaat, imageUrl is direct naar de PNG.
+// ═══════════════════════════════════════════════════════════════════════════
+function makeShareHash(imageBase64) {
+  // Kleine stabiele hash uit timestamp + eerste chunk van de PNG.
+  // Geen crypto nodig — uniek genoeg voor share-URLs.
+  const base = Date.now().toString(36) + (imageBase64 || '').substring(0, 64);
+  let h = 0;
+  for (let i = 0; i < base.length; i++) h = ((h << 5) - h + base.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36) + '-' + Date.now().toString(36);
+}
+
+function escapeHtml(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildSharePage(title, description, imageUrl, pagesUrl) {
+  const safeTitle = escapeHtml(title);
+  const safeDesc = escapeHtml(description).substring(0, 300);
+  const safeImg = escapeHtml(imageUrl);
+  const safePage = escapeHtml(pagesUrl);
+  return `<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<title>${safeTitle}</title>
+<meta name="description" content="${safeDesc}">
+<meta property="og:type" content="article">
+<meta property="og:title" content="${safeTitle}">
+<meta property="og:description" content="${safeDesc}">
+<meta property="og:image" content="${safeImg}">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:url" content="${safePage}">
+<meta property="og:site_name" content="Fluctus">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="${safeTitle}">
+<meta name="twitter:description" content="${safeDesc}">
+<meta name="twitter:image" content="${safeImg}">
+<meta http-equiv="refresh" content="0; url=https://fluctus.net/energie">
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#1F3864;background:#fff;}
+h1{color:#1F3864;border-bottom:3px solid #05B050;padding-bottom:8px;}
+.meta{color:#666;font-size:13px;margin-bottom:20px;}
+img{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px;}
+.desc{margin:20px 0;line-height:1.6;white-space:pre-wrap;}
+.cta{display:inline-block;margin-top:16px;background:#05B050;color:#fff;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:600;}
+.cta:hover{background:#048a40;}
+footer{margin-top:30px;padding-top:16px;border-top:1px solid #eee;color:#888;font-size:12px;}
+</style>
+</head>
+<body>
+<h1>${safeTitle}</h1>
+<div class="meta">Fluctus · ${new Date().toLocaleDateString('nl-BE')}</div>
+<img src="${safeImg}" alt="${safeTitle}">
+<div class="desc">${safeDesc}</div>
+<a class="cta" href="https://fluctus.net/energie">Bekijk het live dashboard op fluctus.net</a>
+<footer>
+Gedeeld vanuit het Fluctus energiemarkt dashboard · Verdien anders · Onze kennis, uw macht<br>
+Data bron: Elia Open Data Licence · Elia Transmission Belgium SA
+</footer>
+</body>
+</html>`;
+}
+
+async function githubWriteBinary(token, owner, repo, path, base64Content, message) {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+
+  // Haal SHA op als bestand bestaat
+  let sha = null;
+  try {
+    const authHeaders = {
+      'Authorization': 'token ' + token,
+      'User-Agent': 'Fluctus-Worker/2.2',
+      'Accept': 'application/json',
+    };
+    const existing = await httpGet(apiUrl + '?t=' + Date.now(), authHeaders);
+    if (existing.status === 200) {
+      const d = JSON.parse(existing.body);
+      sha = d.sha;
+    }
+  } catch (_) {}
+
+  const putBody = {
+    message: message || ('auto: share ' + new Date().toISOString().slice(0, 10)),
+    content: base64Content,
+    committer: { name: 'Fluctus Bot', email: 'bot@fluctus.net' },
+  };
+  if (sha) putBody.sha = sha;
+
+  const putResp = await httpPut(apiUrl, token, putBody);
+  if (putResp.status !== 200 && putResp.status !== 201) {
+    throw new Error(`GitHub write HTTP ${putResp.status}: ${putResp.body.slice(0, 200)}`);
+  }
+  return { ok: true, action: sha ? 'updated' : 'created' };
+}
+
+app.post('/share-create', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+
+  if (!token || !owner || !repo) {
+    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
+  }
+
+  const { imageBase64, title, description } = req.body || {};
+  if (!imageBase64 || typeof imageBase64 !== 'string') {
+    return res.status(400).json({ error: 'imageBase64 is verplicht' });
+  }
+  if (imageBase64.length > 8 * 1024 * 1024) {
+    return res.status(400).json({ error: 'Afbeelding te groot (max 8MB base64)' });
+  }
+  if (!title) {
+    return res.status(400).json({ error: 'title is verplicht' });
+  }
+
+  try {
+    const hash = makeShareHash(imageBase64);
+    const imgPath = `data/shares/${hash}.png`;
+    const htmlPath = `data/shares/${hash}.html`;
+
+    // GitHub Pages URL — lowercase repo naam
+    const pagesBase = `https://${owner.toLowerCase()}.github.io/${repo}`;
+    const imageUrl = `${pagesBase}/${imgPath}`;
+    const pageUrl = `${pagesBase}/${htmlPath}`;
+
+    // Stap 1: upload PNG
+    // Verwijder "data:image/png;base64," prefix als die aanwezig is
+    let pngData = imageBase64;
+    const comma = pngData.indexOf(',');
+    if (pngData.startsWith('data:') && comma > 0) {
+      pngData = pngData.substring(comma + 1);
+    }
+    await githubWriteBinary(token, owner, repo, imgPath, pngData, `auto: share PNG ${hash}`);
+
+    // Stap 2: upload HTML met OG-tags
+    const html = buildSharePage(title, description || '', imageUrl, pageUrl);
+    const htmlBase64 = Buffer.from(html, 'utf8').toString('base64');
+    await githubWriteBinary(token, owner, repo, htmlPath, htmlBase64, `auto: share page ${hash}`);
+
+    res.json({
+      ok: true,
+      hash,
+      shareUrl: pageUrl,
+      imageUrl
+    });
+
+  } catch (err) {
+    console.error('share-create fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.options('/share-create', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(200);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /claude-explain
 //
 // (legacy — blijft beschikbaar maar cache NIET via GitHub; elke klik = API call)
 // Nieuwe frontend gebruikt /explanation + /claude-explain-refresh.
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Haal alle tekst + citaties uit de content blocks van een Claude response
+// Haal alle tekst + citaties uit de content blocks van een Claude response.
+// Strategie: alleen het LAATSTE substantiële tekstblok is het eigenlijke antwoord.
+// Eerdere tekstblokken zijn "ik ga zoeken..." redeneringen tussen tool-calls door.
+// Citaties verzamelen we uit ALLE text blocks (niet enkel het laatste) zodat
+// bronnen niet verloren gaan als Claude ze in een vroeg blok vermeldde.
 function extractTextAndCitations(content) {
-  const texts = [];
-  const citations = []; // array van {url, title}
+  const allTexts = [];
+  const citations = [];
   const seenUrls = {};
 
   (content || []).forEach(block => {
-    if (block.type === 'text' && typeof block.text === 'string') {
-      texts.push(block.text);
-      // Citaties binnen dit text block
+    if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
+      allTexts.push(block.text);
       (block.citations || []).forEach(c => {
-        // web_search_result_location: heeft url en title
         const url = c.url;
         const title = c.title || c.cited_text || url;
         if (url && !seenUrls[url]) {
@@ -751,19 +928,29 @@ function extractTextAndCitations(content) {
         }
       });
     }
-    // web_search_tool_result blocks tellen we niet als tekst, maar kunnen ook sources bevatten
-    if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
-      block.content.forEach(r => {
-        if (r && r.type === 'web_search_result' && r.url && !seenUrls[r.url]) {
-          // Deze worden pas citaat als Claude ernaar verwijst in tekst blocks,
-          // dus hier niet toevoegen — we laten extractie via text.citations lopen.
-        }
-      });
-    }
   });
 
+  // Filter: neem alleen het laatste substantiële blok (=> finale antwoord).
+  // Een blok telt als substantieel als het >150 tekens is OF als het ENIGE blok is.
+  let finalText = '';
+  if (allTexts.length === 0) {
+    finalText = '';
+  } else if (allTexts.length === 1) {
+    finalText = allTexts[0];
+  } else {
+    // Zoek vanachter naar voor naar eerste substantiële blok
+    for (let i = allTexts.length - 1; i >= 0; i--) {
+      if (allTexts[i].trim().length > 150) {
+        finalText = allTexts[i];
+        break;
+      }
+    }
+    // Fallback: als niets >150 chars, neem het laatste
+    if (!finalText) finalText = allTexts[allTexts.length - 1];
+  }
+
   return {
-    text: texts.join('\n\n').trim(),
+    text: finalText.trim(),
     citations
   };
 }
@@ -850,4 +1037,4 @@ app.options('/claude-explain', (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(PORT, () => console.log('Fluctus Worker v2.2 (Opus 4.7 + web search + explanation cache) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v2.3 (Opus 4.7 + web search + explanation cache + share pages) draait op poort ' + PORT));
