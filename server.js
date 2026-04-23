@@ -888,6 +888,36 @@ function extractTextAndCitations(content) {
     if (!finalText) finalText = allTexts[allTexts.length - 1];
   }
 
+  // Strip Engelse meta-prefixes die Claude soms uitspreekt vóór het echte antwoord.
+  // Deze patronen zijn overleg-tekst die onbedoeld in het antwoord belandt.
+  // We strippen regel-voor-regel tot we een regel vinden die geen meta is.
+  const metaPrefixes = [
+    /^i have (enough |now |)\s*(gathered |collected |gotten |)\s*(enough |sufficient |)?\s*(information|data|context).*$/i,
+    /^i (now |)\s*have (what i need|sufficient|enough).*$/i,
+    /^i'?ll now (compose|write|put together|structure|draft|provide).*$/i,
+    /^let me (now |)\s*(compose|write|put together|structure|draft|provide|analyze).*$/i,
+    /^based on (the |my |)(research|search|data|analysis), (i|let me).*$/i,
+    /^(now |)\s*i can (compose|write|provide|give|analyze).*$/i,
+    /^(now |)\s*let'?s (compose|analyze|look).*$/i,
+    /^here'?s (the|my|a) (analysis|breakdown|summary|overview).*$/i,
+    /^i'?ll (structure|format|organize).*$/i,
+  ];
+  const lines = finalText.split('\n');
+  let skipUntil = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) { skipUntil = i + 1; continue; } // lege regels meenemen in skip
+    const isMeta = metaPrefixes.some(re => re.test(line));
+    if (isMeta) {
+      skipUntil = i + 1;
+    } else {
+      break; // eerste niet-meta regel → stop
+    }
+  }
+  if (skipUntil > 0) {
+    finalText = lines.slice(skipUntil).join('\n').trimStart();
+  }
+
   return { text: finalText.trim(), citations };
 }
 
