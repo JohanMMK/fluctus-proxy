@@ -88,34 +88,59 @@ async function githubReadJson(token, owner, repo, path) {
   const data = JSON.parse(resp.body);
   // content is base64-encoded
   const decoded = Buffer.from(data.content, 'base64').toString('utf8');
+  // Belangrijk: bij corrupt JSON geven we TOCH de SHA terug zodat writes
+  // mogelijk blijven. `json` is dan null en de caller kan dat detecteren.
+  let parsedJson = null;
+  let parseError = null;
   try {
-    return { json: JSON.parse(decoded), sha: data.sha };
+    parsedJson = JSON.parse(decoded);
   } catch (e) {
-    throw new Error(`GitHub file ${path} niet geldig JSON: ${e.message}`);
+    parseError = e.message;
   }
+  return { json: parsedJson, sha: data.sha, raw: decoded, parseError };
 }
 
 // Schrijf een JSON-bestand naar de GitHub repo. Retourneert {ok, action}.
 async function githubWriteJson(token, owner, repo, path, payload, message) {
   const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-
-  // Haal SHA op (nodig om overschrijven toe te laten)
-  let sha = null;
-  const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
-  if (existing && existing.sha) sha = existing.sha;
-
-  const putBody = {
+  const contentBase64 = Buffer.from(JSON.stringify(payload)).toString('base64');
+  const baseBody = {
     message: message || ('auto: ' + path + ' ' + new Date().toISOString().slice(0, 10)),
-    content: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    content: contentBase64,
     committer: { name: 'Fluctus Bot', email: 'bot@fluctus.net' },
   };
-  if (sha) putBody.sha = sha;
 
-  const putResp = await httpPut(apiUrl, token, putBody);
-  if (putResp.status !== 200 && putResp.status !== 201) {
-    throw new Error(`GitHub write HTTP ${putResp.status}: ${putResp.body.slice(0, 200)}`);
+  // Probeer tot 3 keer: bij 409 SHA-mismatch haal verse SHA op en retry.
+  // Dit lost race-condities op tussen parallelle cache-update calls.
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Haal huidige SHA op (null = bestand bestaat nog niet)
+    let sha = null;
+    const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
+    if (existing && existing.sha) sha = existing.sha;
+
+    const putBody = { ...baseBody };
+    if (sha) putBody.sha = sha;
+
+    const putResp = await httpPut(apiUrl, token, putBody);
+
+    if (putResp.status === 200 || putResp.status === 201) {
+      return { ok: true, action: sha ? 'updated' : 'created', attempts: attempt };
+    }
+
+    // 409 = SHA mismatch (iemand anders heeft ondertussen geschreven).
+    // 422 = content validation failed (kan ook over SHA gaan soms).
+    // Bij beide: korte pauze + retry met verse SHA.
+    if ((putResp.status === 409 || putResp.status === 422) && attempt < MAX_ATTEMPTS) {
+      console.log(`GitHub write conflict (attempt ${attempt}/${MAX_ATTEMPTS}) — retry met verse SHA`);
+      await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
+      continue;
+    }
+
+    throw new Error(`GitHub write HTTP ${putResp.status} na ${attempt} poging(en): ${putResp.body.slice(0, 200)}`);
   }
-  return { ok: true, action: sha ? 'updated' : 'created' };
+
+  throw new Error(`GitHub write faalde na ${MAX_ATTEMPTS} pogingen (conflicts)`);
 }
 
 function fmtIso(d) {
@@ -557,32 +582,65 @@ app.get('/cache-read', async (req, res) => {
   }
 
   try {
-    let result;
-    try {
-      result = await githubReadJson(token, owner, repo, path);
-    } catch (parseErr) {
-      // Corrupt JSON of andere parse-fout: behandel als "leeg" in plaats van 500.
-      // Zo kan de snippet gewoon opnieuw opbouwen i.p.v. te crashen.
-      console.error('cache-read: corrupt JSON bestand op GitHub — terug als leeg:', parseErr.message);
-      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-      res.set('Pragma', 'no-cache');
+    const result = await githubReadJson(token, owner, repo, path);
+    if (!result) {
+      return res.status(404).json({ error: 'Cache bestand niet gevonden' });
+    }
+    // No-cache headers
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+
+    // Corrupt JSON: geef lege cache terug zodat snippet niet crasht.
+    // De parseError wordt meegestuurd voor diagnostiek.
+    if (!result.json) {
+      console.error('cache-read: corrupt JSON op GitHub — terug als leeg:', result.parseError);
       return res.json({
         spot: [], imb: [], wind: [], solar: [],
         lastDate: null,
         cacheVersion: 'entsoe-v1',
         _corrupted: true,
-        _error: parseErr.message
+        _error: result.parseError
       });
     }
-    if (!result) {
-      return res.status(404).json({ error: 'Cache bestand niet gevonden' });
-    }
-    // No-cache headers zodat browsers deze response ook niet cachen
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.set('Pragma', 'no-cache');
     res.json(result.json);
   } catch (err) {
     console.error('cache-read fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /cache-init
+//
+// Schrijft een lege-maar-geldige cache-structuur naar GitHub. Gebruikt om
+// corrupte cache te resetten zonder handmatig GitHub-editen. Idempotent.
+// Retourneert {ok, initialized} bij succes.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/cache-init', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+  const path  = process.env.GITHUB_PATH || 'data/fluctus-cache.json';
+
+  if (!token || !owner || !repo) {
+    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
+  }
+
+  const emptyCache = {
+    spot: [], imb: [], wind: [], solar: [],
+    lastDate: null,
+    cacheVersion: 'entsoe-v1',
+    lastUpdated: new Date().toISOString(),
+    _initializedAt: new Date().toISOString()
+  };
+
+  try {
+    const result = await githubWriteJson(token, owner, repo, path, emptyCache,
+      'init: reset cache naar lege structuur');
+    res.json({ ok: true, initialized: true, action: result.action, attempts: result.attempts });
+  } catch (err) {
+    console.error('cache-init fout:', err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -655,7 +713,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '3.2',
+  versie: '3.3',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
@@ -663,9 +721,10 @@ app.get('/', (req, res) => res.json({
     '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
     '/entsoe-dayahead?from=YYYY-MM-DD&to=...    (BELPEX day-ahead uit ENTSO-E)',
     'GET  /cache-read                           (lees cache via GitHub API, no-CDN)',
-    'POST /cache-update                         (schrijf marktdata cache naar GitHub)',
+    'POST /cache-update                         (schrijf cache met 409-retry)',
+    'POST /cache-init                           (reset cache naar lege structuur)',
     'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
-    'POST /claude-explain-refresh               (genereer + cache uitleg — 1x per dag)',
+    'POST /claude-explain-refresh               (genereer + cache uitleg)',
   ]
 }));
 
@@ -922,4 +981,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v3.2 (ENTSO-E spot + Elia onbalans + cache-read via GitHub API) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v3.3 (ENTSO-E + Elia + cache-read/init/update met retry) draait op poort ' + PORT));
