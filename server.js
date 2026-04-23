@@ -535,6 +535,43 @@ app.get('/entsoe-dayahead', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /cache-read
+//
+// Leest fluctus-cache.json rechtstreeks via de GitHub API (niet via
+// raw.githubusercontent.com, dat door Fastly CDN ~5 min gecached wordt).
+// Gebruikt door de snippet om verse cache-data op te halen na een save.
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/cache-read', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+  const path  = process.env.GITHUB_PATH || 'data/fluctus-cache.json';
+
+  if (!token || !owner || !repo) {
+    return res.status(500).json({
+      error: 'GitHub omgevingsvariabelen niet ingesteld.'
+    });
+  }
+
+  try {
+    const result = await githubReadJson(token, owner, repo, path);
+    if (!result) {
+      return res.status(404).json({ error: 'Cache bestand niet gevonden' });
+    }
+    // No-cache headers zodat browsers deze response ook niet cachen
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.json(result.json);
+  } catch (err) {
+    console.error('cache-read fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.post('/cache-update', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
@@ -602,13 +639,14 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '3.1',
+  versie: '3.2',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
     '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia; spot = [])',
     '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
     '/entsoe-dayahead?from=YYYY-MM-DD&to=...    (BELPEX day-ahead uit ENTSO-E)',
+    'GET  /cache-read                           (lees cache via GitHub API, no-CDN)',
     'POST /cache-update                         (schrijf marktdata cache naar GitHub)',
     'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
     'POST /claude-explain-refresh               (genereer + cache uitleg — 1x per dag)',
@@ -854,4 +892,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v3.1 (ENTSO-E spot + Elia onbalans + Opus 4.7) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v3.2 (ENTSO-E spot + Elia onbalans + cache-read via GitHub API) draait op poort ' + PORT));
