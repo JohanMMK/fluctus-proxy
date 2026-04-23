@@ -16,11 +16,13 @@ app.use((req, res, next) => {
 });
 
 // ─── HTTP hulpfunctie ──────────────────────────────────────────────────────
-function httpGet(url) {
+function httpGet(url, extraHeaders) {
   return new Promise((resolve, reject) => {
-    https.get(url, {
-      headers: { 'Accept': 'application/json', 'User-Agent': 'Fluctus-Dashboard/2.0' }
-    }, (resp) => {
+    const headers = Object.assign(
+      { 'Accept': 'application/json', 'User-Agent': 'Fluctus-Dashboard/2.0' },
+      extraHeaders || {}
+    );
+    https.get(url, { headers }, (resp) => {
       let data = '';
       resp.on('data', chunk => data += chunk);
       resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
@@ -40,6 +42,25 @@ function httpPut(url, token, bodyObj) {
         'Content-Length': Buffer.byteLength(body),
       }
     };
+    const req = https.request(url, options, (resp) => {
+      let data = '';
+      resp.on('data', chunk => data += chunk);
+      resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+function httpPostJson(url, headers, bodyObj) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(bodyObj);
+    const finalHeaders = Object.assign({
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    }, headers || {});
+    const options = { method: 'POST', headers: finalHeaders };
     const req = https.request(url, options, (resp) => {
       let data = '';
       resp.on('data', chunk => data += chunk);
@@ -139,12 +160,6 @@ async function eliaFetch(dataset, spotfield, imbfield, startDate, endDate) {
   return { spot: allSpot, imb: allImb };
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD&offset=0&limit=100
-//
-// Geeft spot + onbalans terug voor de gevraagde periode.
-// Automatisch uit de juiste dataset (historisch of recent).
-// ═══════════════════════════════════════════════════════════════════════════
 // ─── Hulpfunctie: geaggregeerde data (wind/zon) — één maand ─────────────────
 async function eliaAggMonth(dataset, segStart, segEnd) {
   const startStr = fmtIso(segStart);
@@ -181,6 +196,9 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
   return results;
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/elia-data', async (req, res) => {
   const { from, to } = req.query;
 
@@ -196,7 +214,7 @@ app.get('/elia-data', async (req, res) => {
   const RECENT = { id: 'ods134', spotfield: 'marginalincrementalprice', imbfield: 'imbalanceprice' };
 
   try {
-    const allSpot = [], allImb = [], allWind = [], allSolar = [];
+    const allSpot = [], allImb = [];
     const warnings = [];
 
     // Spot + onbalans
@@ -238,9 +256,6 @@ app.get('/elia-data', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /elia-renewable?dataset=ods031&from=YYYY-MM-DD&to=YYYY-MM-DD
-//
-// Haalt wind (ods031) of zon (ods032) op — één maand per keer
-// Frontend roept dit jaar per jaar aan om timeout te vermijden
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/elia-renewable', async (req, res) => {
   const { dataset, from, to } = req.query;
@@ -340,7 +355,7 @@ app.get('/imbalance', async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /spot?days=N   (nu ook van Elia in plaats van ENTSO-E)
+// ROUTE: GET /spot?days=N
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/spot', async (req, res) => {
   const days = Math.min(parseInt(req.query.days || '7'), 1825);
@@ -403,9 +418,7 @@ app.get('/spot', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /cache-update
-//
 // Schrijft de volledige cache als JSON naar GitHub.
-// Token staat ALLEEN hier op de server, nooit in de frontend.
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/cache-update', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
@@ -424,34 +437,24 @@ app.post('/cache-update', async (req, res) => {
     const payload    = req.body;
     const payloadStr = JSON.stringify(payload);
     const apiUrl     = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-    const getHeaders = {
+    const authHeaders = {
       'Authorization': 'token ' + token,
       'User-Agent': 'Fluctus-Worker/2.0',
       'Accept': 'application/json',
     };
 
-    // Stap 1: haal huidige SHA op (nodig om bestaand bestand te overschrijven)
+    // Stap 1: haal huidige SHA op (nodig om bestaand bestand te overschrijven).
+    // Cache-bust via unieke query parameter om GitHub's CDN te omzeilen.
     let sha = null;
     try {
-      const shaR = await httpGet(apiUrl + '?token=' + Date.now()); // cache-bust
-      // httpGet gebruikt geen auth headers — we doen dit via een aparte call
-      const shaResp = await new Promise((resolve, reject) => {
-        const options = {
-          method: 'GET',
-          headers: getHeaders,
-        };
-        https.request(apiUrl, options, (resp) => {
-          let data = '';
-          resp.on('data', c => data += c);
-          resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-        }).on('error', reject).end();
-      });
+      const shaResp = await httpGet(apiUrl + '?t=' + Date.now(), authHeaders);
       if (shaResp.status === 200) {
         const shaData = JSON.parse(shaResp.body);
         sha = shaData.sha;
       }
+      // status 404 = bestand bestaat nog niet, sha blijft null (dat is ok)
     } catch (_) {
-      // Bestand bestaat nog niet — eerste keer, sha blijft null
+      // Netwerk error bij SHA ophalen — doorgaan met sha=null, PUT zal falen als bestand bestaat
     }
 
     // Stap 2: schrijf het bestand naar GitHub
@@ -484,20 +487,77 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '2.0',
+  versie: '2.1',
+  model: 'claude-opus-4-7',
+  tools: ['web_search_20250305'],
   routes: [
     '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD  (spot + imbalans tegelijk)',
+    '/elia-renewable?dataset=ods031|ods032&from=...&to=...  (wind/zon)',
     '/spot?days=N                               (spot proxy via Elia)',
     '/imbalance?days=N                          (onbalans via Elia)',
     'POST /cache-update                         (schrijf cache naar GitHub)',
+    'POST /claude-explain                       (AI uitleg met web search)',
   ]
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /claude-explain
-// Roept Anthropic API aan met de context van de grafiek
-// API key staat veilig op de server als env variabele
+//
+// Roept Anthropic API aan met web search tool. Bouwt de citaten om tot
+// leesbare bronvermelding en behandelt pause_turn als Claude meer zoek-
+// opdrachten nodig heeft dan in één ronde passen.
 // ═══════════════════════════════════════════════════════════════════════════
+
+// Haal alle tekst + citaties uit de content blocks van een Claude response
+function extractTextAndCitations(content) {
+  const texts = [];
+  const citations = []; // array van {url, title}
+  const seenUrls = {};
+
+  (content || []).forEach(block => {
+    if (block.type === 'text' && typeof block.text === 'string') {
+      texts.push(block.text);
+      // Citaties binnen dit text block
+      (block.citations || []).forEach(c => {
+        // web_search_result_location: heeft url en title
+        const url = c.url;
+        const title = c.title || c.cited_text || url;
+        if (url && !seenUrls[url]) {
+          seenUrls[url] = true;
+          citations.push({ url, title });
+        }
+      });
+    }
+    // web_search_tool_result blocks tellen we niet als tekst, maar kunnen ook sources bevatten
+    if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
+      block.content.forEach(r => {
+        if (r && r.type === 'web_search_result' && r.url && !seenUrls[r.url]) {
+          // Deze worden pas citaat als Claude ernaar verwijst in tekst blocks,
+          // dus hier niet toevoegen — we laten extractie via text.citations lopen.
+        }
+      });
+    }
+  });
+
+  return {
+    text: texts.join('\n\n').trim(),
+    citations
+  };
+}
+
+async function callClaudeMessages(apiKey, requestBody) {
+  const headers = {
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+    'User-Agent': 'Fluctus-Dashboard/2.1',
+  };
+  const r = await httpPostJson('https://api.anthropic.com/v1/messages', headers, requestBody);
+  if (r.status !== 200) {
+    throw new Error(`Anthropic HTTP ${r.status}: ${r.body.slice(0, 300)}`);
+  }
+  return JSON.parse(r.body);
+}
+
 app.post('/claude-explain', async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
@@ -509,40 +569,49 @@ app.post('/claude-explain', async (req, res) => {
     return res.status(400).json({ error: 'prompt is verplicht' });
   }
 
+  const MODEL = 'claude-opus-4-7';
+  const MAX_CONTINUATIONS = 3; // pause_turn loop veiligheid
+
+  const baseRequest = {
+    model: MODEL,
+    max_tokens: 1500,
+    tools: [{
+      type: 'web_search_20250305',
+      name: 'web_search',
+      max_uses: 4,
+      user_location: {
+        type: 'approximate',
+        country: 'BE',
+        timezone: 'Europe/Brussels'
+      }
+    }],
+    messages: [{ role: 'user', content: prompt }]
+  };
+
   try {
-    const body = JSON.stringify({
-      model: 'claude-opus-4-5',
-      max_tokens: 1000,
-      messages: [{ role: 'user', content: prompt }]
-    });
+    let response = await callClaudeMessages(apiKey, baseRequest);
+    let conversation = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: response.content }
+    ];
 
-    const response = await new Promise((resolve, reject) => {
-      const options = {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': apiKey,
-          'anthropic-version': '2023-06-01',
-          'User-Agent': 'Fluctus-Dashboard/2.0'
-        }
-      };
-      const req2 = https.request('https://api.anthropic.com/v1/messages', options, (resp) => {
-        let data = '';
-        resp.on('data', chunk => data += chunk);
-        resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-      });
-      req2.on('error', reject);
-      req2.write(body);
-      req2.end();
-    });
-
-    if (response.status !== 200) {
-      return res.status(response.status).json({ error: 'Anthropic API fout: ' + response.body.slice(0, 200) });
+    // pause_turn = Claude wil meer searches doen dan in één turn passen
+    let continuations = 0;
+    while (response.stop_reason === 'pause_turn' && continuations < MAX_CONTINUATIONS) {
+      continuations++;
+      const continueReq = Object.assign({}, baseRequest, { messages: conversation });
+      response = await callClaudeMessages(apiKey, continueReq);
+      conversation.push({ role: 'assistant', content: response.content });
     }
 
-    const data = JSON.parse(response.body);
-    const text = data.content && data.content[0] ? data.content[0].text : 'Geen antwoord.';
-    res.json({ text });
+    const { text, citations } = extractTextAndCitations(response.content);
+
+    res.json({
+      text: text || 'Geen antwoord.',
+      citations,
+      stop_reason: response.stop_reason,
+      model: response.model || MODEL
+    });
 
   } catch (err) {
     console.error('claude-explain fout:', err.message);
@@ -558,4 +627,4 @@ app.options('/claude-explain', (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(PORT, () => console.log('Fluctus Worker v2.0 draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v2.1 (Opus 4.7 + web search) draait op poort ' + PORT));
