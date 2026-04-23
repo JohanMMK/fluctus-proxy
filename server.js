@@ -72,6 +72,52 @@ function httpPostJson(url, headers, bodyObj) {
   });
 }
 
+// ─── GitHub helpers voor kleine JSON-bestanden ─────────────────────────────
+// Lees een JSON-bestand uit de GitHub repo (via Contents API, niet de raw CDN,
+// dus altijd vers). Retourneert {json, sha} of null als het bestand niet bestaat.
+async function githubReadJson(token, owner, repo, path) {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?t=${Date.now()}`;
+  const authHeaders = {
+    'Authorization': 'token ' + token,
+    'User-Agent': 'Fluctus-Worker/2.1',
+    'Accept': 'application/json',
+  };
+  const resp = await httpGet(apiUrl, authHeaders);
+  if (resp.status === 404) return null;
+  if (resp.status !== 200) throw new Error(`GitHub read HTTP ${resp.status}: ${resp.body.slice(0, 200)}`);
+  const data = JSON.parse(resp.body);
+  // content is base64-encoded
+  const decoded = Buffer.from(data.content, 'base64').toString('utf8');
+  try {
+    return { json: JSON.parse(decoded), sha: data.sha };
+  } catch (e) {
+    throw new Error(`GitHub file ${path} niet geldig JSON: ${e.message}`);
+  }
+}
+
+// Schrijf een JSON-bestand naar de GitHub repo. Retourneert {ok, action}.
+async function githubWriteJson(token, owner, repo, path, payload, message) {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+
+  // Haal SHA op (nodig om overschrijven toe te laten)
+  let sha = null;
+  const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
+  if (existing && existing.sha) sha = existing.sha;
+
+  const putBody = {
+    message: message || ('auto: ' + path + ' ' + new Date().toISOString().slice(0, 10)),
+    content: Buffer.from(JSON.stringify(payload)).toString('base64'),
+    committer: { name: 'Fluctus Bot', email: 'bot@fluctus.net' },
+  };
+  if (sha) putBody.sha = sha;
+
+  const putResp = await httpPut(apiUrl, token, putBody);
+  if (putResp.status !== 200 && putResp.status !== 201) {
+    throw new Error(`GitHub write HTTP ${putResp.status}: ${putResp.body.slice(0, 200)}`);
+  }
+  return { ok: true, action: sha ? 'updated' : 'created' };
+}
+
 function fmtIso(d) {
   return d.getUTCFullYear()
     + '-' + String(d.getUTCMonth() + 1).padStart(2, '0')
@@ -487,7 +533,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '2.1',
+  versie: '2.2',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
@@ -495,17 +541,194 @@ app.get('/', (req, res) => res.json({
     '/elia-renewable?dataset=ods031|ods032&from=...&to=...  (wind/zon)',
     '/spot?days=N                               (spot proxy via Elia)',
     '/imbalance?days=N                          (onbalans via Elia)',
-    'POST /cache-update                         (schrijf cache naar GitHub)',
-    'POST /claude-explain                       (AI uitleg met web search)',
+    'POST /cache-update                         (schrijf marktdata cache naar GitHub)',
+    'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
+    'POST /claude-explain-refresh               (genereer + cache uitleg — 1x per dag)',
+    'POST /claude-explain                       (legacy: AI uitleg zonder cache)',
   ]
 }));
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /explanation?chartId=c1
+//
+// Leest de gecachede uitleg voor een chart uit de GitHub repo.
+// Retourneert {cached: true, date, text, citations} of {cached: false}
+// als er nog geen uitleg van vandaag bestaat.
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/explanation', async (req, res) => {
+  const chartId = req.query.chartId;
+  if (!chartId || !/^[a-zA-Z0-9_-]+$/.test(chartId)) {
+    return res.status(400).json({ error: 'chartId is verplicht (alleen a-z, 0-9, _, -)' });
+  }
+
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+  if (!token || !owner || !repo) {
+    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld.' });
+  }
+
+  const path = `data/explanations/${chartId}.json`;
+
+  try {
+    const result = await githubReadJson(token, owner, repo, path);
+    if (!result) {
+      return res.json({ cached: false, reason: 'nog niet gegenereerd' });
+    }
+
+    const today = new Date().toISOString().slice(0, 10);
+    const cachedDate = (result.json && result.json.date) ? result.json.date : null;
+
+    if (cachedDate !== today) {
+      return res.json({
+        cached: false,
+        reason: 'cache van andere dag',
+        stale_date: cachedDate
+      });
+    }
+
+    return res.json({
+      cached: true,
+      date: cachedDate,
+      text: result.json.text || '',
+      citations: result.json.citations || [],
+      generated_at: result.json.generated_at || null,
+      model: result.json.model || null
+    });
+
+  } catch (err) {
+    console.error('GET /explanation fout:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /claude-explain-refresh
+// Body: { chartId: 'c1', prompt: '...' }
+//
+// Genereert een nieuwe uitleg via Claude + web search, schrijft ze naar
+// GitHub cache, en retourneert het resultaat. Beschermt tegen race-condities:
+// als er tussen read en generatie al een cache van vandaag bestaat wordt die
+// teruggegeven zonder tweede API call.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/claude-explain-refresh', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+
+  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY niet ingesteld' });
+  if (!token || !owner || !repo) return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
+
+  const { chartId, prompt } = req.body || {};
+  if (!chartId || !/^[a-zA-Z0-9_-]+$/.test(chartId)) {
+    return res.status(400).json({ error: 'chartId is verplicht (alleen a-z, 0-9, _, -)' });
+  }
+  if (!prompt) return res.status(400).json({ error: 'prompt is verplicht' });
+
+  const path = `data/explanations/${chartId}.json`;
+  const today = new Date().toISOString().slice(0, 10);
+
+  try {
+    // Race-condition check: misschien heeft een andere klik net gegenereerd
+    const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
+    if (existing && existing.json && existing.json.date === today) {
+      return res.json({
+        text: existing.json.text || '',
+        citations: existing.json.citations || [],
+        stop_reason: 'from_cache',
+        model: existing.json.model || null,
+        from_cache: true,
+        generated_at: existing.json.generated_at || null
+      });
+    }
+
+    // Genereer nieuwe uitleg
+    const MODEL = 'claude-opus-4-7';
+    const MAX_CONTINUATIONS = 3;
+
+    const baseRequest = {
+      model: MODEL,
+      max_tokens: 1500,
+      tools: [{
+        type: 'web_search_20250305',
+        name: 'web_search',
+        max_uses: 4,
+        user_location: { type: 'approximate', country: 'BE', timezone: 'Europe/Brussels' }
+      }],
+      messages: [{ role: 'user', content: prompt }]
+    };
+
+    let response = await callClaudeMessages(apiKey, baseRequest);
+    let conversation = [
+      { role: 'user', content: prompt },
+      { role: 'assistant', content: response.content }
+    ];
+
+    let continuations = 0;
+    while (response.stop_reason === 'pause_turn' && continuations < MAX_CONTINUATIONS) {
+      continuations++;
+      const continueReq = Object.assign({}, baseRequest, { messages: conversation });
+      response = await callClaudeMessages(apiKey, continueReq);
+      conversation.push({ role: 'assistant', content: response.content });
+    }
+
+    const { text, citations } = extractTextAndCitations(response.content);
+
+    // Schrijf naar GitHub cache
+    const payload = {
+      chartId,
+      date: today,
+      generated_at: new Date().toISOString(),
+      model: response.model || MODEL,
+      text: text || '',
+      citations,
+      stop_reason: response.stop_reason
+    };
+
+    try {
+      await githubWriteJson(
+        token, owner, repo, path, payload,
+        `auto: uitleg ${chartId} ${today}`
+      );
+    } catch (writeErr) {
+      // Cache-schrijven mislukt, maar we hebben wel tekst — log en stuur terug
+      console.error('Cache write fout (niet-fataal):', writeErr.message);
+    }
+
+    res.json({
+      text: payload.text || 'Geen antwoord.',
+      citations: payload.citations,
+      stop_reason: payload.stop_reason,
+      model: payload.model,
+      from_cache: false,
+      generated_at: payload.generated_at
+    });
+
+  } catch (err) {
+    console.error('claude-explain-refresh fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.options('/explanation', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(200);
+});
+app.options('/claude-explain-refresh', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(200);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /claude-explain
 //
-// Roept Anthropic API aan met web search tool. Bouwt de citaten om tot
-// leesbare bronvermelding en behandelt pause_turn als Claude meer zoek-
-// opdrachten nodig heeft dan in één ronde passen.
+// (legacy — blijft beschikbaar maar cache NIET via GitHub; elke klik = API call)
+// Nieuwe frontend gebruikt /explanation + /claude-explain-refresh.
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Haal alle tekst + citaties uit de content blocks van een Claude response
@@ -627,4 +850,4 @@ app.options('/claude-explain', (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(PORT, () => console.log('Fluctus Worker v2.1 (Opus 4.7 + web search) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v2.2 (Opus 4.7 + web search + explanation cache) draait op poort ' + PORT));
