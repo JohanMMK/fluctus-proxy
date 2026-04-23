@@ -557,7 +557,23 @@ app.get('/cache-read', async (req, res) => {
   }
 
   try {
-    const result = await githubReadJson(token, owner, repo, path);
+    let result;
+    try {
+      result = await githubReadJson(token, owner, repo, path);
+    } catch (parseErr) {
+      // Corrupt JSON of andere parse-fout: behandel als "leeg" in plaats van 500.
+      // Zo kan de snippet gewoon opnieuw opbouwen i.p.v. te crashen.
+      console.error('cache-read: corrupt JSON bestand op GitHub — terug als leeg:', parseErr.message);
+      res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.set('Pragma', 'no-cache');
+      return res.json({
+        spot: [], imb: [], wind: [], solar: [],
+        lastDate: null,
+        cacheVersion: 'entsoe-v1',
+        _corrupted: true,
+        _error: parseErr.message
+      });
+    }
     if (!result) {
       return res.status(404).json({ error: 'Cache bestand niet gevonden' });
     }
@@ -735,20 +751,34 @@ function extractTextAndCitations(content) {
     }
   });
 
-  // Filter: neem alleen het laatste substantiële blok (=> finale antwoord).
-  // Een blok telt als substantieel als het >150 tekens is OF als het ENIGE blok is.
+  // Filter: het finale antwoord bestaat vaak uit meerdere aaneensluitende
+  // tekstblokken (Claude kan z'n antwoord in stukken genereren). Korte blokken
+  // tussen tool-calls ("Ik ga zoeken...", "Nu controleer ik...") moeten eruit,
+  // maar we willen het volledige finale antwoord behouden.
+  //
+  // Strategie: vind de eerste INDEX waarna alle blokken substantieel zijn,
+  // en concateneer die tot het einde. "Substantieel" = >80 chars OF het
+  // laatste blok in de reeks.
   let finalText = '';
   if (allTexts.length === 0) {
     finalText = '';
   } else if (allTexts.length === 1) {
     finalText = allTexts[0];
   } else {
+    // Loop van achter naar voor, en blijf blokken meenemen zolang ze substantieel zijn
+    const finalBlocks = [];
     for (let i = allTexts.length - 1; i >= 0; i--) {
-      if (allTexts[i].trim().length > 150) {
-        finalText = allTexts[i];
+      const block = allTexts[i].trim();
+      if (block.length > 80 || finalBlocks.length === 0) {
+        finalBlocks.unshift(block);
+      } else {
+        // Eerste kort blok dat geen deel is van finale antwoord → stop
         break;
       }
     }
+    finalText = finalBlocks.join('\n\n');
+
+    // Fallback: als niets gevonden, neem gewoon het laatste blok
     if (!finalText) finalText = allTexts[allTexts.length - 1];
   }
 
