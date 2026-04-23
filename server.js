@@ -563,48 +563,69 @@ app.get('/entsoe-dayahead', async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /cache-read
+// CACHE ROUTES — multi-bestand architectuur
 //
-// Leest fluctus-cache.json rechtstreeks via de GitHub API (niet via
-// raw.githubusercontent.com, dat door Fastly CDN ~5 min gecached wordt).
-// Gebruikt door de snippet om verse cache-data op te halen na een save.
+// De cache is opgesplitst in 5 GitHub-bestanden om onder de GitHub API
+// onbetrouwbaarheidsgrens (~10 MB) te blijven:
+//   data/fluctus-cache-meta.json    (meta: lastDate, cacheVersion, ...)
+//   data/fluctus-cache-spot.json    (ENTSO-E day-ahead, uurlijks)
+//   data/fluctus-cache-imb.json     (Elia onbalans, kwartierlijks)
+//   data/fluctus-cache-wind.json    (wind productie, kwartierlijks)
+//   data/fluctus-cache-solar.json   (zon productie, kwartierlijks)
+//
+// Elk bestand is een plain JSON array met {t,v} objecten. Meta is een object.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const CACHE_DATASETS = ['meta', 'spot', 'imb', 'wind', 'solar'];
+const CACHE_BASE = 'data/fluctus-cache';
+
+function cachePathFor(dataset) {
+  if (!CACHE_DATASETS.includes(dataset)) return null;
+  return `${CACHE_BASE}-${dataset}.json`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /cache-read?dataset=meta|spot|imb|wind|solar
+// Leest één cache-bestand via de GitHub API (no-CDN).
+// Als het bestand niet bestaat of corrupt is, retourneert het een lege default
+// i.p.v. een fout — zo blijft de snippet eenvoudig.
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/cache-read', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
   const repo  = process.env.GITHUB_REPO;
-  const path  = process.env.GITHUB_PATH || 'data/fluctus-cache.json';
 
   if (!token || !owner || !repo) {
-    return res.status(500).json({
-      error: 'GitHub omgevingsvariabelen niet ingesteld.'
-    });
+    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
   }
+
+  const dataset = req.query.dataset || 'meta';
+  const path = cachePathFor(dataset);
+  if (!path) {
+    return res.status(400).json({ error: `Ongeldige dataset: ${dataset}. Geldig: ${CACHE_DATASETS.join(', ')}` });
+  }
+
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.set('Pragma', 'no-cache');
 
   try {
     const result = await githubReadJson(token, owner, repo, path);
     if (!result) {
-      return res.status(404).json({ error: 'Cache bestand niet gevonden' });
+      // Bestand bestaat niet — retourneer default lege structuur
+      return res.json(dataset === 'meta'
+        ? { cacheVersion: 'entsoe-v1', lastDate: null, lastUpdated: null, _missing: true }
+        : []);
     }
-    // No-cache headers
-    res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.set('Pragma', 'no-cache');
-
-    // Corrupt JSON: geef lege cache terug zodat snippet niet crasht.
-    // De parseError wordt meegestuurd voor diagnostiek.
     if (!result.json) {
-      console.error('cache-read: corrupt JSON op GitHub — terug als leeg:', result.parseError);
-      return res.json({
-        spot: [], imb: [], wind: [], solar: [],
-        lastDate: null,
-        cacheVersion: 'entsoe-v1',
-        _corrupted: true,
-        _error: result.parseError
-      });
+      // Corrupt JSON — retourneer lege default en markeer als corrupt
+      console.error(`cache-read ${dataset}: corrupt JSON — ${result.parseError}`);
+      return res.json(dataset === 'meta'
+        ? { cacheVersion: 'entsoe-v1', lastDate: null, lastUpdated: null, _corrupted: true, _error: result.parseError }
+        : []);
     }
     res.json(result.json);
   } catch (err) {
-    console.error('cache-read fout:', err.message);
+    console.error(`cache-read ${dataset} fout:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -612,98 +633,99 @@ app.get('/cache-read', async (req, res) => {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /cache-init
-//
-// Schrijft een lege-maar-geldige cache-structuur naar GitHub. Gebruikt om
-// corrupte cache te resetten zonder handmatig GitHub-editen. Idempotent.
-// Retourneert {ok, initialized} bij succes.
+// Initialiseert alle 5 cache-bestanden met lege structuur. Idempotent.
+// Gebruikt om corrupte cache te resetten.
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/cache-init', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
   const repo  = process.env.GITHUB_REPO;
-  const path  = process.env.GITHUB_PATH || 'data/fluctus-cache.json';
 
   if (!token || !owner || !repo) {
     return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
   }
 
-  const emptyCache = {
-    spot: [], imb: [], wind: [], solar: [],
-    lastDate: null,
-    cacheVersion: 'entsoe-v1',
-    lastUpdated: new Date().toISOString(),
-    _initializedAt: new Date().toISOString()
-  };
+  const results = {};
+  const now = new Date().toISOString();
 
   try {
-    const result = await githubWriteJson(token, owner, repo, path, emptyCache,
-      'init: reset cache naar lege structuur');
-    res.json({ ok: true, initialized: true, action: result.action, attempts: result.attempts });
+    // Meta bestand
+    const metaPath = cachePathFor('meta');
+    const metaContent = {
+      cacheVersion: 'entsoe-v1',
+      lastDate: null,
+      lastUpdated: now,
+      _initializedAt: now
+    };
+    const metaRes = await githubWriteJson(token, owner, repo, metaPath, metaContent,
+      'init: reset ' + metaPath);
+    results.meta = metaRes;
+
+    // Data bestanden (allemaal lege arrays)
+    for (const ds of ['spot', 'imb', 'wind', 'solar']) {
+      const dsPath = cachePathFor(ds);
+      const dsRes = await githubWriteJson(token, owner, repo, dsPath, [],
+        'init: reset ' + dsPath);
+      results[ds] = dsRes;
+      // Kleine pauze om concurrent writes te vermijden
+      await new Promise(r => setTimeout(r, 150));
+    }
+
+    res.json({ ok: true, initialized: true, results });
   } catch (err) {
     console.error('cache-init fout:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, partialResults: results });
   }
 });
 
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /cache-update?dataset=meta|spot|imb|wind|solar
+// Schrijft één cache-bestand. Body = de volledige nieuwe inhoud (array voor
+// data-sets, object voor meta). Gebruikt 409-retry mechanisme van githubWriteJson.
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/cache-update', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
   const repo  = process.env.GITHUB_REPO;
-  const path  = process.env.GITHUB_PATH || 'data/fluctus-cache.json';
 
   if (!token || !owner || !repo) {
-    return res.status(500).json({
-      error: 'GitHub omgevingsvariabelen niet ingesteld. '
-           + 'Controleer GITHUB_TOKEN, GITHUB_OWNER en GITHUB_REPO in Railway Variables.'
-    });
+    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
+  }
+
+  const dataset = req.query.dataset || 'meta';
+  const path = cachePathFor(dataset);
+  if (!path) {
+    return res.status(400).json({ error: `Ongeldige dataset: ${dataset}` });
   }
 
   try {
-    const payload    = req.body;
-    const payloadStr = JSON.stringify(payload);
-    const apiUrl     = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-    const authHeaders = {
-      'Authorization': 'token ' + token,
-      'User-Agent': 'Fluctus-Worker/2.0',
-      'Accept': 'application/json',
-    };
-
-    // Stap 1: haal huidige SHA op (nodig om bestaand bestand te overschrijven).
-    // Cache-bust via unieke query parameter om GitHub's CDN te omzeilen.
-    let sha = null;
-    try {
-      const shaResp = await httpGet(apiUrl + '?t=' + Date.now(), authHeaders);
-      if (shaResp.status === 200) {
-        const shaData = JSON.parse(shaResp.body);
-        sha = shaData.sha;
+    const payload = req.body;
+    // Validatie: arrays voor data-sets, object voor meta
+    if (dataset === 'meta') {
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+        return res.status(400).json({ error: 'meta body moet een object zijn' });
       }
-      // status 404 = bestand bestaat nog niet, sha blijft null (dat is ok)
-    } catch (_) {
-      // Netwerk error bij SHA ophalen — doorgaan met sha=null, PUT zal falen als bestand bestaat
+    } else {
+      if (!Array.isArray(payload)) {
+        return res.status(400).json({ error: `${dataset} body moet een array zijn` });
+      }
     }
 
-    // Stap 2: schrijf het bestand naar GitHub
-    const putBody = {
-      message:   'auto: marktdata ' + new Date().toISOString().slice(0, 10),
-      content:   Buffer.from(payloadStr).toString('base64'),
-      committer: { name: 'Fluctus Bot', email: 'bot@fluctus.net' },
-    };
-    if (sha) putBody.sha = sha;
+    const result = await githubWriteJson(token, owner, repo, path, payload,
+      `auto: ${dataset} ${new Date().toISOString().slice(0, 10)}`);
 
-    const putResp = await httpPut(apiUrl, token, putBody);
-
-    if (putResp.status !== 200 && putResp.status !== 201) {
-      return res.status(putResp.status).json({
-        error: `GitHub write mislukt (HTTP ${putResp.status}): ${putResp.body.slice(0, 200)}`
-      });
-    }
-
-    const sizeKb = Math.round(payloadStr.length / 1024);
-    res.json({ ok: true, size_kb: sizeKb, action: sha ? 'updated' : 'created' });
+    const sizeKb = Math.round(JSON.stringify(payload).length / 1024);
+    res.json({
+      ok: true,
+      dataset,
+      size_kb: sizeKb,
+      action: result.action,
+      attempts: result.attempts
+    });
 
   } catch (err) {
-    console.error('cache-update fout:', err.message);
+    console.error(`cache-update ${dataset} fout:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -713,18 +735,19 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '3.3',
+  versie: '4.0',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
+  cache: 'multi-bestand (5 datasets)',
   routes: [
-    '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia; spot = [])',
+    '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia)',
     '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
-    '/entsoe-dayahead?from=YYYY-MM-DD&to=...    (BELPEX day-ahead uit ENTSO-E)',
-    'GET  /cache-read                           (lees cache via GitHub API, no-CDN)',
-    'POST /cache-update                         (schrijf cache met 409-retry)',
-    'POST /cache-init                           (reset cache naar lege structuur)',
-    'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
-    'POST /claude-explain-refresh               (genereer + cache uitleg)',
+    '/entsoe-dayahead?from=...&to=...           (BELPEX spot uit ENTSO-E)',
+    'GET  /cache-read?dataset=meta|spot|imb|wind|solar',
+    'POST /cache-update?dataset=...             (body = array, behalve meta=object)',
+    'POST /cache-init                           (reset alle 5 cache-bestanden)',
+    'GET  /explanation?chartId=c1',
+    'POST /claude-explain-refresh',
   ]
 }));
 
@@ -981,4 +1004,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v3.3 (ENTSO-E + Elia + cache-read/init/update met retry) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v4.0 (multi-file cache, ENTSO-E + Elia) draait op poort ' + PORT));
