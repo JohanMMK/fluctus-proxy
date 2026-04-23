@@ -533,7 +533,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '2.3',
+  versie: '2.4',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
@@ -759,6 +759,9 @@ function buildSharePage(title, description, imageUrl, pagesUrl) {
   const safeDesc = escapeHtml(description).substring(0, 300);
   const safeImg = escapeHtml(imageUrl);
   const safePage = escapeHtml(pagesUrl);
+  // Let op: GEEN meta-refresh. LinkedIn's crawler volgt redirects en zou dan
+  // de OG-tags van de target page proberen te lezen i.p.v. van deze pagina.
+  // De CTA-knop onderaan volstaat voor menselijke bezoekers.
   return `<!DOCTYPE html>
 <html lang="nl">
 <head>
@@ -777,16 +780,19 @@ function buildSharePage(title, description, imageUrl, pagesUrl) {
 <meta name="twitter:title" content="${safeTitle}">
 <meta name="twitter:description" content="${safeDesc}">
 <meta name="twitter:image" content="${safeImg}">
-<meta http-equiv="refresh" content="0; url=https://fluctus.net/energie">
 <style>
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#1F3864;background:#fff;}
-h1{color:#1F3864;border-bottom:3px solid #05B050;padding-bottom:8px;}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;max-width:900px;margin:40px auto;padding:20px;color:#1F3864;background:#fff;line-height:1.55;}
+h1{color:#1F3864;border-bottom:3px solid #05B050;padding-bottom:8px;font-size:24px;}
 .meta{color:#666;font-size:13px;margin-bottom:20px;}
-img{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px;}
-.desc{margin:20px 0;line-height:1.6;white-space:pre-wrap;}
-.cta{display:inline-block;margin-top:16px;background:#05B050;color:#fff;padding:10px 20px;text-decoration:none;border-radius:4px;font-weight:600;}
+img{max-width:100%;height:auto;border:1px solid #ddd;border-radius:4px;background:#0d1117;}
+.desc{margin:24px 0;line-height:1.65;white-space:pre-wrap;font-size:15px;}
+.cta-row{margin-top:24px;display:flex;gap:10px;flex-wrap:wrap;}
+.cta{display:inline-block;background:#05B050;color:#fff;padding:12px 22px;text-decoration:none;border-radius:4px;font-weight:600;}
 .cta:hover{background:#048a40;}
-footer{margin-top:30px;padding-top:16px;border-top:1px solid #eee;color:#888;font-size:12px;}
+.cta.secondary{background:#1F3864;}
+.cta.secondary:hover{background:#15284a;}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid #eee;color:#888;font-size:12px;}
+footer a{color:#1F3864;}
 </style>
 </head>
 <body>
@@ -794,9 +800,13 @@ footer{margin-top:30px;padding-top:16px;border-top:1px solid #eee;color:#888;fon
 <div class="meta">Fluctus · ${new Date().toLocaleDateString('nl-BE')}</div>
 <img src="${safeImg}" alt="${safeTitle}">
 <div class="desc">${safeDesc}</div>
-<a class="cta" href="https://fluctus.net/energie">Bekijk het live dashboard op fluctus.net</a>
+<div class="cta-row">
+  <a class="cta" href="https://www.fluctus.net/energie">Bekijk het live dashboard</a>
+  <a class="cta secondary" href="https://www.fluctus.net/betere-injectie">SolarActive</a>
+  <a class="cta secondary" href="https://www.fluctus.net/batteryactive">BatteryActive</a>
+</div>
 <footer>
-Gedeeld vanuit het Fluctus energiemarkt dashboard · Verdien anders · Onze kennis, uw macht<br>
+Gedeeld vanuit het <a href="https://www.fluctus.net/energie">Fluctus energiemarkt dashboard</a> · Verdien anders · Onze kennis, uw macht<br>
 Data bron: Elia Open Data Licence · Elia Transmission Belgium SA
 </footer>
 </body>
@@ -1037,4 +1047,4 @@ app.options('/claude-explain', (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(PORT, () => console.log('Fluctus Worker v2.3 (Opus 4.7 + web search + explanation cache + share pages) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v2.4 (Opus 4.7 + web search + explanation cache + share pages) draait op poort ' + PORT));
