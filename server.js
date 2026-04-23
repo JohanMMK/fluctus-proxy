@@ -860,35 +860,29 @@ function extractTextAndCitations(content) {
     }
   });
 
-  // Filter: het finale antwoord bestaat vaak uit meerdere aaneensluitende
-  // tekstblokken (Claude kan z'n antwoord in stukken genereren). Korte blokken
-  // tussen tool-calls ("Ik ga zoeken...", "Nu controleer ik...") moeten eruit,
-  // maar we willen het volledige finale antwoord behouden.
+  // Filter: het finale antwoord kan uit meerdere text-blocks bestaan verdeeld
+  // rond tool_use calls. We nemen ALLE substantiële blocks (>50 chars) in
+  // volgorde en concateneren ze. Kleine blocks (<50 chars) zijn meestal
+  // overgangs-tekst ("Laat me checken...", "Gevonden.") en worden geskipt.
   //
-  // Strategie: vind de eerste INDEX waarna alle blokken substantieel zijn,
-  // en concateneer die tot het einde. "Substantieel" = >80 chars OF het
-  // laatste blok in de reeks.
+  // Let op: vroeger namen we alleen een achterwaartse reeks. Dat was fout
+  // want een kort block tussen twee lange blocks zorgde voor het weglaten
+  // van het eerste lange block (zoals de header "**1) Algemeen beeld**").
   let finalText = '';
   if (allTexts.length === 0) {
     finalText = '';
   } else if (allTexts.length === 1) {
     finalText = allTexts[0];
   } else {
-    // Loop van achter naar voor, en blijf blokken meenemen zolang ze substantieel zijn
-    const finalBlocks = [];
-    for (let i = allTexts.length - 1; i >= 0; i--) {
-      const block = allTexts[i].trim();
-      if (block.length > 80 || finalBlocks.length === 0) {
-        finalBlocks.unshift(block);
-      } else {
-        // Eerste kort blok dat geen deel is van finale antwoord → stop
-        break;
-      }
+    const substantialBlocks = allTexts
+      .map(t => t.trim())
+      .filter(t => t.length > 50);
+    if (substantialBlocks.length > 0) {
+      finalText = substantialBlocks.join('\n\n');
+    } else {
+      // Fallback: geen enkel block >50 chars — neem gewoon alles samen
+      finalText = allTexts.map(t => t.trim()).filter(Boolean).join('\n\n');
     }
-    finalText = finalBlocks.join('\n\n');
-
-    // Fallback: als niets gevonden, neem gewoon het laatste blok
-    if (!finalText) finalText = allTexts[allTexts.length - 1];
   }
 
   // Strip Engelse meta-prefixes die Claude soms uitspreekt vóór het echte antwoord.
