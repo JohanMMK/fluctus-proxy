@@ -862,8 +862,11 @@ function extractTextAndCitations(content) {
 
   // Filter: het finale antwoord kan uit meerdere text-blocks bestaan verdeeld
   // rond tool_use calls. We nemen ALLE substantiële blocks (>50 chars) in
-  // volgorde en concateneren ze. Kleine blocks (<50 chars) zijn meestal
-  // overgangs-tekst ("Laat me checken...", "Gevonden.") en worden geskipt.
+  // volgorde en voegen ze slim samen.
+  //
+  // Slim samenvoegen: als een block eindigt midden in een zin (geen . ! ? ) en
+  // het volgende block begint met een kleine letter, dan voegen we samen met
+  // één spatie. Anders met een dubbele newline (paragraaf-break).
   //
   // Let op: vroeger namen we alleen een achterwaartse reeks. Dat was fout
   // want een kort block tussen twee lange blocks zorgde voor het weglaten
@@ -878,10 +881,28 @@ function extractTextAndCitations(content) {
       .map(t => t.trim())
       .filter(t => t.length > 50);
     if (substantialBlocks.length > 0) {
-      finalText = substantialBlocks.join('\n\n');
+      finalText = substantialBlocks[0];
+      for (let i = 1; i < substantialBlocks.length; i++) {
+        const prev = finalText;
+        const next = substantialBlocks[i];
+        // Eindigt vorig block in midden van zin? (geen punt/vraag/uitroep aan einde
+        // en geen dubbele newline)
+        const endsMidSentence = !/[.!?:]["')]*\s*$/.test(prev) && !prev.endsWith('\n\n');
+        // Begint volgende block met kleine letter of leesteken? (vervolg van zin)
+        const startsMidSentence = /^[a-z,;)\-–—]/.test(next);
+        if (endsMidSentence && startsMidSentence) {
+          finalText = prev + ' ' + next;
+        } else if (endsMidSentence) {
+          // Midden in zin maar volgende start nieuwe zin/kop → spatie
+          finalText = prev + ' ' + next;
+        } else {
+          // Complete zin → paragraaf-break
+          finalText = prev + '\n\n' + next;
+        }
+      }
     } else {
       // Fallback: geen enkel block >50 chars — neem gewoon alles samen
-      finalText = allTexts.map(t => t.trim()).filter(Boolean).join('\n\n');
+      finalText = allTexts.map(t => t.trim()).filter(Boolean).join(' ');
     }
   }
 
