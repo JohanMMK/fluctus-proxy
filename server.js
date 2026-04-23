@@ -244,6 +244,14 @@ async function eliaAggMonth(dataset, segStart, segEnd) {
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Geeft ONBALANSPRIJS terug voor de gevraagde periode uit Elia's ods047/ods134.
+// Day-ahead spotprijs wordt via /entsoe-dayahead gehaald (ENTSO-E), NIET hier.
+// (Het veld 'marginalincrementalprice' in Elia's datasets is een imbalance-
+// component, geen spotprijs — vaak verward.)
+//
+// Response vorm blijft compatibel: { imb: [], spot: [], wind: [], solar: [] }
+// maar spot/wind/solar zijn altijd leeg (voor backward-compat met oude client).
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/elia-data', async (req, res) => {
   const { from, to } = req.query;
@@ -256,19 +264,19 @@ app.get('/elia-data', async (req, res) => {
   const toDate   = new Date(to   + 'T23:59:59Z');
   const cutoff   = new Date('2024-05-22T00:00:00Z');
 
+  // Hergebruik eliaFetch: die haalt ook marginalincrementalprice op, maar die
+  // verdwijnt in resultaten negeren we. imbfield is wat we willen.
   const HIST   = { id: 'ods047', spotfield: 'marginalincrementalprice', imbfield: 'positiveimbalanceprice' };
   const RECENT = { id: 'ods134', spotfield: 'marginalincrementalprice', imbfield: 'imbalanceprice' };
 
   try {
-    const allSpot = [], allImb = [];
+    const allImb = [];
     const warnings = [];
 
-    // Spot + onbalans
     if (fromDate < cutoff) {
       try {
         const histEnd = toDate < cutoff ? toDate : cutoff;
         const d = await eliaFetch(HIST.id, HIST.spotfield, HIST.imbfield, fromDate, histEnd);
-        allSpot.push(...d.spot);
         allImb.push(...d.imb);
       } catch (e) { warnings.push('ods047: ' + e.message); }
     }
@@ -276,20 +284,18 @@ app.get('/elia-data', async (req, res) => {
       try {
         const recentStart = fromDate >= cutoff ? fromDate : cutoff;
         const d = await eliaFetch(RECENT.id, RECENT.spotfield, RECENT.imbfield, recentStart, toDate);
-        allSpot.push(...d.spot);
         allImb.push(...d.imb);
       } catch (e) { warnings.push('ods134: ' + e.message); }
     }
 
-    allSpot.sort((a, b) => a.t.localeCompare(b.t));
     allImb.sort((a, b) => a.t.localeCompare(b.t));
 
     const out = {
-      spot:  allSpot,
+      spot:  [],   // Leeg — spot komt via /entsoe-dayahead
       imb:   allImb,
       wind:  [],
       solar: [],
-      source: 'Elia Open Data',
+      source: 'Elia Open Data (onbalans) — spot via ENTSO-E',
     };
     if (warnings.length) out.warnings = warnings;
     res.json(out);
@@ -340,9 +346,195 @@ app.get('/elia-renewable', async (req, res) => {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: POST /cache-update
-// Schrijft de volledige cache als JSON naar GitHub.
+// ROUTE: GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD
+//
+// Haalt de échte day-ahead spotprijs (BELPEX/EPEX) op via de ENTSO-E
+// Transparency Platform API. Dit is de correcte prijs die Elindus en andere
+// platforms tonen — niet het 'marginalincrementalprice' veld uit Elia.
+//
+// DocumentType: A44 (Price Document)
+// BusinessType: A62 (workaround voor ENTSO-E REST API bug sinds jan 2026)
+// In/Out Domain: 10YBE----------2 (Belgische bidding zone)
 // ═══════════════════════════════════════════════════════════════════════════
+
+const ENTSOE_BASE = 'https://web-api.tp.entsoe.eu/api';
+const ENTSOE_DOMAIN_BE = '10YBE----------2';
+const ENTSOE_MAX_RANGE_DAYS = 365; // ENTSO-E max 1 jaar per call voor A44
+
+// Parse ENTSO-E XML response (Publication_MarketDocument) naar {t, v} array.
+// We gebruiken simpele regex — geen volledige XML parser nodig voor dit schema.
+function parseEntsoePriceXml(xml) {
+  const results = [];
+  // Elke TimeSeries bevat een Period met een start-tijdstip en Point-reeksen
+  // met position + price.amount. Resolution is PT60M (uurlijks) of PT15M.
+  const timeSeriesMatches = xml.match(/<TimeSeries>[\s\S]*?<\/TimeSeries>/g) || [];
+
+  timeSeriesMatches.forEach(ts => {
+    const periodMatch = ts.match(/<Period>([\s\S]*?)<\/Period>/);
+    if (!periodMatch) return;
+    const period = periodMatch[1];
+
+    const startMatch = period.match(/<start>([^<]+)<\/start>/);
+    const resMatch = period.match(/<resolution>([^<]+)<\/resolution>/);
+    if (!startMatch || !resMatch) return;
+
+    const start = new Date(startMatch[1]); // ISO UTC
+    const resolution = resMatch[1]; // bv "PT60M" of "PT15M"
+
+    // Resolution in minuten
+    let stepMin = 60;
+    const resMin = resolution.match(/PT(\d+)M/);
+    if (resMin) stepMin = parseInt(resMin[1], 10);
+
+    // Points
+    const pointRe = /<Point>\s*<position>(\d+)<\/position>\s*<price\.amount>([^<]+)<\/price\.amount>\s*<\/Point>/g;
+    let m;
+    let lastPos = 0;
+    let lastPrice = null;
+    const points = [];
+    while ((m = pointRe.exec(period)) !== null) {
+      points.push({ pos: parseInt(m[1], 10), price: parseFloat(m[2]) });
+    }
+    // ENTSO-E omits repeated values: als position 1 = 50, position 3 = 60,
+    // dan is position 2 ook 50 (gap = fill forward). Maar typisch zien we
+    // 24 opeenvolgende points voor uurlijkse data.
+    if (!points.length) return;
+
+    // Expand eventuele gaps
+    const expanded = [];
+    for (let i = 0; i < points.length; i++) {
+      expanded.push(points[i]);
+      if (i + 1 < points.length) {
+        const gap = points[i + 1].pos - points[i].pos - 1;
+        for (let g = 1; g <= gap; g++) {
+          expanded.push({ pos: points[i].pos + g, price: points[i].price });
+        }
+      }
+    }
+
+    expanded.forEach(p => {
+      const t = new Date(start.getTime() + (p.pos - 1) * stepMin * 60000);
+      const tStr = t.toISOString().substring(0, 19) + 'Z';
+      if (!isNaN(p.price)) {
+        results.push({ t: tStr, v: Math.round(p.price * 100) / 100 });
+      }
+    });
+  });
+
+  return results;
+}
+
+function fmtEntsoeDate(d) {
+  // Format: YYYYMMDDhhmm in UTC
+  return d.getUTCFullYear()
+    + String(d.getUTCMonth() + 1).padStart(2, '0')
+    + String(d.getUTCDate()).padStart(2, '0')
+    + String(d.getUTCHours()).padStart(2, '0')
+    + String(d.getUTCMinutes()).padStart(2, '0');
+}
+
+async function entsoeDayAhead(token, startDate, endDate) {
+  const url = ENTSOE_BASE
+    + '?securityToken=' + encodeURIComponent(token)
+    + '&documentType=A44'
+    + '&businessType=A62'  // workaround voor REST API bug sinds jan 2026
+    + '&in_Domain=' + ENTSOE_DOMAIN_BE
+    + '&out_Domain=' + ENTSOE_DOMAIN_BE
+    + '&periodStart=' + fmtEntsoeDate(startDate)
+    + '&periodEnd=' + fmtEntsoeDate(endDate);
+
+  const r = await httpGet(url, {
+    'Accept': 'application/xml',
+    'User-Agent': 'Fluctus-Dashboard/3.1',
+  });
+
+  if (r.status === 401) throw new Error('ENTSO-E 401: ongeldig securityToken');
+  if (r.status === 429) throw new Error('ENTSO-E 429: rate limit bereikt');
+  if (r.status !== 200) {
+    // ENTSO-E geeft soms 400 met een XML body die een Reason bevat
+    const reasonMatch = r.body.match(/<text>([^<]+)<\/text>/);
+    const detail = reasonMatch ? reasonMatch[1] : r.body.slice(0, 200);
+    throw new Error(`ENTSO-E HTTP ${r.status}: ${detail}`);
+  }
+
+  // Als er geen data is voor de periode: ENTSO-E geeft 200 met een Acknowledgement_MarketDocument
+  if (r.body.indexOf('Acknowledgement_MarketDocument') !== -1) {
+    return []; // Geen data, geen fout
+  }
+
+  return parseEntsoePriceXml(r.body);
+}
+
+// Splits een periode in segmenten van maximaal N dagen (voor ENTSO-E 1-jaar limiet)
+function splitIntoYears(start, end, maxDays) {
+  maxDays = maxDays || ENTSOE_MAX_RANGE_DAYS;
+  const segments = [];
+  let cur = new Date(start);
+  while (cur < end) {
+    const segEnd = new Date(Math.min(cur.getTime() + maxDays * 86400000, end.getTime()));
+    segments.push({ s: new Date(cur), e: segEnd });
+    cur = new Date(segEnd);
+  }
+  return segments;
+}
+
+app.get('/entsoe-dayahead', async (req, res) => {
+  const { from, to } = req.query;
+
+  if (!from || !to) {
+    return res.status(400).json({ error: 'from en to zijn verplicht (YYYY-MM-DD)' });
+  }
+
+  const token = process.env.ENTSOE_TOKEN;
+  if (!token) {
+    return res.status(500).json({ error: 'ENTSOE_TOKEN niet ingesteld op de server' });
+  }
+
+  const fromDate = new Date(from + 'T00:00:00Z');
+  const toDate   = new Date(to   + 'T23:59:59Z');
+
+  try {
+    // Split in 1-jaar segmenten, sequentieel opvragen (ENTSO-E rate limit is strict)
+    const segments = splitIntoYears(fromDate, toDate);
+    const all = [];
+    const warnings = [];
+
+    for (const seg of segments) {
+      try {
+        const data = await entsoeDayAhead(token, seg.s, seg.e);
+        all.push(...data);
+      } catch (e) {
+        warnings.push(`${seg.s.toISOString().slice(0,10)} → ${seg.e.toISOString().slice(0,10)}: ${e.message}`);
+      }
+      // Kleine pauze tussen segmenten — ENTSO-E rate limit respecteren
+      if (segments.length > 1) await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Dedupe en sorteer (overlapping periodes kunnen dubbele punten geven)
+    const seen = {};
+    const deduped = [];
+    all.forEach(p => {
+      if (!seen[p.t]) {
+        seen[p.t] = true;
+        deduped.push(p);
+      }
+    });
+    deduped.sort((a, b) => a.t.localeCompare(b.t));
+
+    const out = {
+      data: deduped,
+      count: deduped.length,
+      source: 'ENTSO-E Transparency Platform (BELPEX day-ahead)',
+      domain: ENTSOE_DOMAIN_BE
+    };
+    if (warnings.length) out.warnings = warnings;
+    res.json(out);
+
+  } catch (err) {
+    console.error('entsoe-dayahead fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 app.post('/cache-update', async (req, res) => {
   const token = process.env.GITHUB_TOKEN;
   const owner = process.env.GITHUB_OWNER;
@@ -410,12 +602,13 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '3.0',
+  versie: '3.1',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   routes: [
-    '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD  (spot + imbalans)',
-    '/elia-renewable?dataset=ods031|ods032&from=...&to=...  (wind/zon)',
+    '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia; spot = [])',
+    '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
+    '/entsoe-dayahead?from=YYYY-MM-DD&to=...    (BELPEX day-ahead uit ENTSO-E)',
     'POST /cache-update                         (schrijf marktdata cache naar GitHub)',
     'GET  /explanation?chartId=c1               (lees gecachede uitleg)',
     'POST /claude-explain-refresh               (genereer + cache uitleg — 1x per dag)',
@@ -661,4 +854,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v3.0 (Opus 4.7 + web search + explanation cache, opgeschoond) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v3.1 (ENTSO-E spot + Elia onbalans + Opus 4.7) draait op poort ' + PORT));
