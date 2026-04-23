@@ -493,4 +493,69 @@ app.get('/', (req, res) => res.json({
   ]
 }));
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /claude-explain
+// Roept Anthropic API aan met de context van de grafiek
+// API key staat veilig op de server als env variabele
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/claude-explain', async (req, res) => {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ error: 'ANTHROPIC_API_KEY niet ingesteld op de server' });
+  }
+
+  const { prompt } = req.body;
+  if (!prompt) {
+    return res.status(400).json({ error: 'prompt is verplicht' });
+  }
+
+  try {
+    const body = JSON.stringify({
+      model: 'claude-opus-4-5',
+      max_tokens: 1000,
+      messages: [{ role: 'user', content: prompt }]
+    });
+
+    const response = await new Promise((resolve, reject) => {
+      const options = {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'User-Agent': 'Fluctus-Dashboard/2.0'
+        }
+      };
+      const req2 = https.request('https://api.anthropic.com/v1/messages', options, (resp) => {
+        let data = '';
+        resp.on('data', chunk => data += chunk);
+        resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
+      });
+      req2.on('error', reject);
+      req2.write(body);
+      req2.end();
+    });
+
+    if (response.status !== 200) {
+      return res.status(response.status).json({ error: 'Anthropic API fout: ' + response.body.slice(0, 200) });
+    }
+
+    const data = JSON.parse(response.body);
+    const text = data.content && data.content[0] ? data.content[0].text : 'Geen antwoord.';
+    res.json({ text });
+
+  } catch (err) {
+    console.error('claude-explain fout:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// OPTIONS preflight voor claude-explain
+app.options('/claude-explain', (req, res) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  res.sendStatus(200);
+});
+
 app.listen(PORT, () => console.log('Fluctus Worker v2.0 draait op poort ' + PORT));
