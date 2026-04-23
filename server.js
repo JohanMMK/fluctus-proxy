@@ -1,10 +1,18 @@
 const express = require('express');
 const https = require('https');
+const compression = require('compression');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ELIA_BASE = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets';
 
 app.use(express.json({ limit: '25mb' }));
+
+// gzip/brotli compressie — grote JSON responses (imb/wind/solar ~5 MB elk)
+// comprimeren tot ~20-30% van origineel. Drastisch verschil in laadtijd.
+app.use(compression({
+  threshold: 1024, // compresseer alles >1 KB (bijna alles behalve meta)
+  level: 6         // gebalanceerde CPU vs ratio (default)
+}));
 
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -762,10 +770,10 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '4.1',
+  versie: '4.2',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
-  cache: 'multi-bestand (5 datasets) — fix voor files >1 MB',
+  cache: 'multi-bestand (5 datasets) + gzip compressie',
   routes: [
     '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia)',
     '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
@@ -1076,4 +1084,4 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v4.1 (multi-file cache, raw media type voor >1 MB) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v4.2 (multi-file cache + gzip compressie + raw media type) draait op poort ' + PORT));
