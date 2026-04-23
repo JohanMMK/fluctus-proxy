@@ -10,7 +10,10 @@ app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.header('Cache-Control', 'public, max-age=900');
+  // Standaard: geen cache. Individuele routes die van caching profiteren
+  // (bijv. statische Elia data per dag) kunnen dit overschrijven.
+  res.header('Cache-Control', 'no-store, no-cache, must-revalidate');
+  res.header('Pragma', 'no-cache');
   if (req.method === 'OPTIONS') return res.sendStatus(200);
   next();
 });
