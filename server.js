@@ -1,9 +1,15 @@
 const express = require('express');
 const https = require('https');
 const compression = require('compression');
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const ELIA_BASE = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets';
+
+// Pad naar lokale data-bestanden (mee gecommitteerd in repo)
+const DATA_DIR = path.join(__dirname, 'data');
 
 app.use(express.json({ limit: '25mb' }));
 
@@ -770,7 +776,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '4.2',
+  versie: '15.0',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   cache: 'multi-bestand (5 datasets) + gzip compressie',
@@ -783,6 +789,19 @@ app.get('/', (req, res) => res.json({
     'POST /cache-init                           (reset alle 5 cache-bestanden)',
     'GET  /explanation?chartId=c1',
     'POST /claude-explain-refresh',
+    '── SIMULATOR (v15) ──',
+    'GET  /api/profielen-lijst                  (25 profielen + beschrijvingen)',
+    'GET  /api/profiel?naam=Slager              (35040-kwartier-array)',
+    'GET  /api/postcode-grd?postcode=8500       (GRD lookup)',
+    'GET  /api/regio-tarieven?grd=...&spanning=MS|LS',
+    'GET  /api/leveringscontract-staffel        (default markup/markdown per MWh)',
+    'GET  /api/batterijen                       (lijst beschikbare batterijen)',
+    'POST /api/batterij-toevoegen               (voeg batterij toe)',
+    'POST /api/nominatie-sim                    (run simulator.py met JSON-input)',
+    'GET  /api/projecten                        (lijst projecten in fluctus-scenarios)',
+    'GET  /api/scenarios?project=X              (lijst scenarios in project X)',
+    'GET  /api/scenario?project=X&scenario=Y    (lees scenario JSON)',
+    'POST /api/scenario-bewaren                 (body = {project, scenario, data})',
   ]
 }));
 
@@ -1084,4 +1103,436 @@ app.options('/claude-explain-refresh', (req, res) => {
 
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v4.2 (multi-file cache + gzip compressie + raw media type) draait op poort ' + PORT));
+
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+//                         SIMULATOR ENDPOINTS (v15)
+// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+
+// Cache voor data-bestanden (geladen bij eerste call)
+const dataCache = {};
+
+function loadDataFile(filename) {
+  if (dataCache[filename]) return dataCache[filename];
+  const fullPath = path.join(DATA_DIR, filename);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`Data bestand niet gevonden: ${filename}`);
+  }
+  const content = fs.readFileSync(fullPath, 'utf8');
+  const parsed = JSON.parse(content);
+  dataCache[filename] = parsed;
+  return parsed;
+}
+
+function safeFilename(naam) {
+  return String(naam).toLowerCase().replace(/\//g, '_').replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
+}
+
+// ─── ROUTE: GET /api/profielen-lijst ──────────────────────────────────────
+// Retourneert: [{naam, beschrijving}, ...] (25 profielen)
+app.get('/api/profielen-lijst', (req, res) => {
+  try {
+    const lijst = loadDataFile('profielen-lijst.json');
+    res.json(lijst);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/profiel?naam=Slager ──────────────────────────────────
+// Retourneert: {naam, beschrijving, kwartier: [35040 floats genormaliseerd]}
+app.get('/api/profiel', (req, res) => {
+  const naam = req.query.naam;
+  if (!naam) return res.status(400).json({ error: 'naam is verplicht' });
+
+  try {
+    const lijst = loadDataFile('profielen-lijst.json');
+    const meta = lijst.find(p => p.naam === naam);
+    if (!meta) return res.status(404).json({ error: `Profiel '${naam}' niet gevonden` });
+
+    const safe = safeFilename(naam);
+    const fullPath = path.join(DATA_DIR, 'profielen', `${safe}.json`);
+    if (!fs.existsSync(fullPath)) {
+      return res.status(404).json({ error: `Profiel-bestand niet gevonden: ${safe}.json` });
+    }
+    const kwartier = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+    res.json({
+      naam: meta.naam,
+      beschrijving: meta.beschrijving,
+      kwartier: kwartier,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GRD-normalisatie: postcode-tabel naam → tarieven-tabel naam
+const GRD_NORMALISATIE = {
+  'Fluvius Antwerpen': 'Antwerpen',
+  'Fluvius Halle-Vilvoorde': 'Halle-Vilv.',
+  'Fluvius Imewo': 'Imewo',
+  'Fluvius Kempen': 'Kempen',
+  'Fluvius Limburg': 'Limburg',
+  'Fluvius Midden-Vlaanderen': 'Midden-Vl.',
+  'Fluvius West': 'West',
+  'Fluvius Zenne-Dijle': 'Zenne-Dijle',
+  'ORES': 'ORES',
+  'RESA': 'RESA',
+  'AIEG': 'AIEG',
+  'AIESH': 'ORES',  // fallback: AIESH gebruikt ORES-tarieven
+  'REW': 'ORES',    // fallback: REW gebruikt ORES-tarieven (proxy)
+  'Sibelga': 'Sibelga',
+};
+
+// ─── ROUTE: GET /api/postcode-grd?postcode=8500 ──────────────────────────
+// Retourneert: {postcode, grd_origineel, grd, fallback_naar?}
+app.get('/api/postcode-grd', (req, res) => {
+  const pc = String(req.query.postcode || '').trim();
+  if (!/^\d{4}$/.test(pc)) {
+    return res.status(400).json({ error: 'postcode moet 4 cijfers zijn' });
+  }
+  try {
+    const map = loadDataFile('postcodes.json');
+    const grdOrigineel = map[pc];
+    let grd, fallback = null;
+
+    if (grdOrigineel) {
+      grd = GRD_NORMALISATIE[grdOrigineel] || grdOrigineel;
+      if (grd !== grdOrigineel) {
+        if (grdOrigineel === 'AIESH' || grdOrigineel === 'REW') {
+          fallback = `${grdOrigineel} gebruikt ORES-tarieven als proxy`;
+        }
+      }
+    } else {
+      // Onbekende postcode: gewest-fallback op basis van eerste cijfer
+      const eerste = pc[0];
+      if (eerste === '1' && pc[1] === '0' && parseInt(pc) >= 1000 && parseInt(pc) <= 1299) {
+        grd = 'Sibelga';
+        fallback = `Postcode ${pc} niet exact bekend, fallback naar Sibelga (Brussel)`;
+      } else if (['1', '2', '3', '8', '9'].includes(eerste)) {
+        grd = 'West';
+        fallback = `Postcode ${pc} niet exact bekend, fallback naar Fluvius West (Vlaanderen)`;
+      } else {
+        grd = 'ORES';
+        fallback = `Postcode ${pc} niet exact bekend, fallback naar ORES (Wallonië)`;
+      }
+    }
+    res.json({
+      postcode: pc,
+      grd_origineel: grdOrigineel || null,
+      grd,
+      fallback_naar: fallback,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/regio-tarieven?grd=West&spanning=MS ─────────────────
+// Retourneert: alle tarief-velden voor die GRD/spanning combinatie
+app.get('/api/regio-tarieven', (req, res) => {
+  const grd = req.query.grd;
+  const spanning = (req.query.spanning || 'MS').toUpperCase();
+  if (!grd) return res.status(400).json({ error: 'grd is verplicht' });
+  if (!['MS', 'LS'].includes(spanning)) {
+    return res.status(400).json({ error: 'spanning moet MS of LS zijn' });
+  }
+  try {
+    const tarieven = loadDataFile('tarieven.json');
+    const key = `${grd}|${spanning}`;
+    const tar = tarieven[key];
+    if (!tar) {
+      return res.status(404).json({
+        error: `Geen tarieven voor ${key}. Beschikbaar: ${Object.keys(tarieven).join(', ')}`
+      });
+    }
+
+    // Construeer accijns-staffel in juiste formaat voor simulator
+    const accijnzen_staffel = [
+      [3, tar.accijns_schijf1_3mwh || 14.21],
+      [20, tar.accijns_schijf2_20mwh || 14.21],
+      [50, tar.accijns_schijf3_50mwh || 12.09],
+      [1000, tar.accijns_schijf4_1000mwh || 11.39],
+      [9999999, tar.accijns_schijf5_inf || 10.00],
+    ];
+
+    res.json({
+      grd: grd,
+      spanning: spanning,
+      tarieven: tar,
+      accijnzen_staffel: accijnzen_staffel,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/leveringscontract-staffel ────────────────────────────
+app.get('/api/leveringscontract-staffel', (req, res) => {
+  try {
+    const lc = loadDataFile('leveringscontract.json');
+    res.json(lc);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/batterijen ───────────────────────────────────────────
+app.get('/api/batterijen', (req, res) => {
+  try {
+    const list = loadDataFile('batterijen.json');
+    res.json(list);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: POST /api/batterij-toevoegen ──────────────────────────────────
+// Body: {Battery, "Vermogen omvormer kW", "Capaciteit kWh", ...}
+// Append in batterijen.json (lokaal cache + GitHub commit)
+app.post('/api/batterij-toevoegen', async (req, res) => {
+  const nieuwe = req.body;
+  if (!nieuwe || !nieuwe.Battery) {
+    return res.status(400).json({ error: 'body moet Battery-veld bevatten' });
+  }
+  try {
+    const list = loadDataFile('batterijen.json');
+    list.push(nieuwe);
+    // Schrijf lokaal (overleeft niet container restart, maar voor sessie OK)
+    fs.writeFileSync(path.join(DATA_DIR, 'batterijen.json'), JSON.stringify(list, null, 2));
+    dataCache['batterijen.json'] = list;
+
+    // Commit naar GitHub indien mogelijk (best effort)
+    const token = process.env.GITHUB_TOKEN;
+    const owner = process.env.GITHUB_OWNER;
+    const proxyRepo = process.env.GITHUB_PROXY_REPO || 'fluctus-proxy';
+    if (token && owner) {
+      try {
+        await githubWriteJson(token, owner, proxyRepo, 'data/batterijen.json', list,
+          `add: batterij ${nieuwe.Battery}`);
+      } catch (e) {
+        console.warn('GitHub commit batterij gefaald:', e.message);
+      }
+    }
+    res.json({ ok: true, totaal: list.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: POST /api/nominatie-sim ──────────────────────────────────────
+// Body: volledige simulator-input JSON
+// Spawn Python simulator.py, lever stdout terug
+app.post('/api/nominatie-sim', (req, res) => {
+  const input = req.body;
+  if (!input) return res.status(400).json({ error: 'body is verplicht' });
+
+  const startTime = Date.now();
+  const simulatorPath = path.join(__dirname, 'simulator.py');
+  if (!fs.existsSync(simulatorPath)) {
+    return res.status(500).json({ error: 'simulator.py niet gevonden op server' });
+  }
+
+  // Spawn Python process
+  const proc = spawn('python3', [simulatorPath], {
+    cwd: __dirname,
+    env: { ...process.env, PYTHONUNBUFFERED: '1' },
+  });
+
+  let stdoutData = '';
+  let stderrData = '';
+  let timedOut = false;
+
+  // Timeout: 90s
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    proc.kill('SIGKILL');
+  }, 90000);
+
+  proc.stdout.on('data', chunk => stdoutData += chunk.toString());
+  proc.stderr.on('data', chunk => stderrData += chunk.toString());
+
+  proc.on('close', (code) => {
+    clearTimeout(timeout);
+    const elapsed = Date.now() - startTime;
+
+    if (timedOut) {
+      return res.status(504).json({
+        error: 'simulator.py time-out na 90s',
+        log: stderrData.slice(-2000),
+      });
+    }
+    if (code !== 0) {
+      return res.status(500).json({
+        error: `simulator.py exit code ${code}`,
+        log: stderrData.slice(-2000),
+      });
+    }
+    try {
+      const out = JSON.parse(stdoutData);
+      res.json({
+        ok: true,
+        elapsed_ms: elapsed,
+        log: stderrData.slice(-3000),  // laatste 3KB van log
+        result: out,
+      });
+    } catch (e) {
+      res.status(500).json({
+        error: 'simulator.py output niet parseerbaar als JSON: ' + e.message,
+        stdout_preview: stdoutData.slice(0, 500),
+        log: stderrData.slice(-2000),
+      });
+    }
+  });
+
+  proc.on('error', (err) => {
+    clearTimeout(timeout);
+    res.status(500).json({ error: 'spawn fout: ' + err.message });
+  });
+
+  // Schrijf JSON naar stdin
+  try {
+    proc.stdin.write(JSON.stringify(input));
+    proc.stdin.end();
+  } catch (e) {
+    clearTimeout(timeout);
+    proc.kill();
+    res.status(500).json({ error: 'stdin write fout: ' + e.message });
+  }
+});
+
+// ─── ROUTE: GET /api/profiel-aanvulling-genereren ─────────────────────────
+// Stub voor toekomst: synthetisch profiel uit beschrijving genereren
+app.post('/api/profiel-aanvulling-genereren', (req, res) => {
+  res.status(501).json({
+    error: 'Nog niet geïmplementeerd in v15',
+    geplant_voor: 'v16',
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SCENARIO STORAGE — via fluctus-scenarios GitHub repo
+// ═══════════════════════════════════════════════════════════════════════════
+
+const SCEN_OWNER = process.env.GITHUB_SCENARIOS_OWNER || 'JohanMMK';
+const SCEN_REPO = process.env.GITHUB_SCENARIOS_REPO || 'fluctus-scenarios';
+
+function safeProjectName(s) {
+  return String(s || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
+}
+
+// Lijst alle directories onder /projecten via GitHub-API
+async function githubListDirs(token, owner, repo, parentPath) {
+  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${parentPath}?t=${Date.now()}`;
+  const resp = await httpGet(apiUrl, {
+    'Authorization': 'token ' + token,
+    'User-Agent': 'Fluctus-Worker/15.0',
+    'Accept': 'application/vnd.github+json',
+  });
+  if (resp.status === 404) return [];
+  if (resp.status !== 200) {
+    throw new Error(`GitHub list HTTP ${resp.status}: ${resp.body.slice(0, 200)}`);
+  }
+  const arr = JSON.parse(resp.body);
+  return Array.isArray(arr) ? arr : [];
+}
+
+// ─── ROUTE: GET /api/projecten ────────────────────────────────────────────
+app.get('/api/projecten', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
+  try {
+    const items = await githubListDirs(token, SCEN_OWNER, SCEN_REPO, 'projecten');
+    const projecten = items
+      .filter(i => i.type === 'dir')
+      .map(i => ({ naam: i.name, path: i.path }));
+    res.json({ projecten });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/scenarios?project=X ─────────────────────────────────
+app.get('/api/scenarios', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
+  const project = safeProjectName(req.query.project);
+  if (!project) return res.status(400).json({ error: 'project is verplicht' });
+  try {
+    const items = await githubListDirs(token, SCEN_OWNER, SCEN_REPO, `projecten/${project}`);
+    const scenarios = items
+      .filter(i => i.type === 'file' && i.name.endsWith('.json') && i.name !== '.gitkeep')
+      .map(i => ({
+        naam: i.name.replace(/\.json$/, ''),
+        size: i.size,
+        sha: i.sha,
+      }));
+    res.json({ project, scenarios });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/scenario?project=X&scenario=Y ───────────────────────
+app.get('/api/scenario', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
+  const project = safeProjectName(req.query.project);
+  const scenario = safeProjectName(req.query.scenario);
+  if (!project || !scenario) {
+    return res.status(400).json({ error: 'project en scenario zijn verplicht' });
+  }
+  try {
+    const filePath = `projecten/${project}/${scenario}.json`;
+    const result = await githubReadJson(token, SCEN_OWNER, SCEN_REPO, filePath);
+    if (!result) return res.status(404).json({ error: `Scenario niet gevonden: ${filePath}` });
+    if (!result.json) {
+      return res.status(500).json({ error: 'Scenario JSON corrupt: ' + result.parseError });
+    }
+    res.json({ project, scenario, data: result.json });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: POST /api/scenario-bewaren ───────────────────────────────────
+// Body: {project: 'X', scenario: 'Y', data: {...}}
+app.post('/api/scenario-bewaren', async (req, res) => {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
+  const project = safeProjectName(req.body.project);
+  const scenario = safeProjectName(req.body.scenario);
+  const data = req.body.data;
+  if (!project || !scenario || !data) {
+    return res.status(400).json({ error: 'project, scenario en data zijn verplicht' });
+  }
+  try {
+    const filePath = `projecten/${project}/${scenario}.json`;
+    const result = await githubWriteJson(token, SCEN_OWNER, SCEN_REPO, filePath, data,
+      `save: ${project}/${scenario}`);
+    res.json({ ok: true, project, scenario, action: result.action });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// CORS preflight voor nieuwe endpoints
+['/api/profielen-lijst', '/api/profiel', '/api/postcode-grd', '/api/regio-tarieven',
+ '/api/leveringscontract-staffel', '/api/batterijen', '/api/batterij-toevoegen',
+ '/api/nominatie-sim', '/api/profiel-aanvulling-genereren',
+ '/api/projecten', '/api/scenarios', '/api/scenario', '/api/scenario-bewaren']
+  .forEach(route => {
+    app.options(route, (req, res) => {
+      res.header('Access-Control-Allow-Origin', '*');
+      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.header('Access-Control-Allow-Headers', 'Content-Type');
+      res.sendStatus(200);
+    });
+  });
+
+
+app.listen(PORT, () => console.log('Fluctus Worker v15.0 (simulator endpoints + cache + gzip) draait op poort ' + PORT));
