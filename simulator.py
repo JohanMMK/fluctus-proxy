@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-Fluctus Battery Dispatch Simulator v1.0
+Fluctus Battery Dispatch Simulator v1.1
 ========================================
 Lees JSON van stdin, schrijf JSON naar stdout.
+
+Wijzigingen v1.1:
+  - Leveringscontract werkt nu met staffel (Enwyse-stijl)
+  - Markup/markdown worden auto-bepaald op basis van jaarverbruik_mwh
+  - Vergroening (€/MWh) als aparte regel in groep A
+  - Imbalance markup/markdown is fallback wanneer modus=forfaitair
+  - Geen floor op injectievergoeding (kan negatief zijn)
+  - Backwards-compatible: oude markup_eur_mwh/markdown_eur_mwh blijven werken
 
 Input-structuur (top-level keys):
   - profiel_kwartier: list[35040]   (genormaliseerd, som=1.0, basisprofiel)
@@ -17,7 +25,16 @@ Input-structuur (top-level keys):
   - contract: { modus, markup_eur_mwh, markdown_eur_mwh,
                 imb_forfait_afname, imb_forfait_injectie,
                 vaste_kost_eur_maand, gsc_eur_mwh, wkk_eur_mwh,
+                vergroening_eur_per_mwh, staffel,
                 injectie_toegelaten }
+                # NIEUW v1.1:
+                #   staffel = list[{min_mwh, max_mwh, consumption_dam_markup,
+                #                   consumption_imbalance_markup,
+                #                   injection_dam_markdown,
+                #                   injection_imbalance_markdown}]
+                #   vergroening_eur_per_mwh = float
+                # Als staffel aanwezig is wordt markup/markdown afgeleid uit schijf.
+                # Als staffel ontbreekt valt het terug op markup_eur_mwh/markdown_eur_mwh.
   - netbeheer: { grd, spanning, tarieven: {...complete tariefset uit Overzicht 2026...} }
   - forecast: { sigma_da, sigma_imb, sigma_volume_verbruik_pct, sigma_volume_pv_pct }
   - markt: { spot_kwartier[N], imb_kwartier[N], timestamps[N] }
@@ -198,6 +215,64 @@ def build_pv_profile(
 
 
 # =============================================================================
+# LEVERINGSCONTRACT — STAFFEL HELPER (v1.1)
+# =============================================================================
+
+def pick_schijf(jaarverbruik_mwh: float, staffel: list) -> dict:
+    """
+    Selecteer de juiste staffel-schijf op basis van jaarverbruik (in MWh).
+    Schijven hebben min_mwh (inclusief) en max_mwh (exclusief).
+    Returns: dict met de gekozen schijf, of None als geen match.
+    """
+    if not staffel:
+        return None
+    for schijf in staffel:
+        mn = float(schijf.get('min_mwh', 0))
+        mx = float(schijf.get('max_mwh', 1e12))
+        if mn <= jaarverbruik_mwh < mx:
+            return schijf
+    # Fallback: laatste schijf (>1000)
+    return staffel[-1]
+
+
+def resolve_contract_pricing(contract: dict, jaarverbruik_mwh: float) -> dict:
+    """
+    Hydrateer markup/markdown uit staffel als die aanwezig is, anders gebruik
+    de oude markup_eur_mwh/markdown_eur_mwh keys (backwards compatible).
+
+    Returns een dict met expliciete velden voor de LP-loop:
+      markup_dam, markdown_dam, markup_imb, markdown_imb,
+      vergroening, vaste_kost_maand, modus
+    """
+    out = {}
+    staffel = contract.get('staffel') or []
+    schijf = pick_schijf(jaarverbruik_mwh, staffel) if staffel else None
+
+    if schijf is not None:
+        out['markup_dam'] = float(schijf.get('consumption_dam_markup', 0.0))
+        out['markdown_dam'] = float(schijf.get('injection_dam_markdown', 0.0))
+        out['markup_imb'] = float(schijf.get('consumption_imbalance_markup', 0.0))
+        out['markdown_imb'] = float(schijf.get('injection_imbalance_markdown', 0.0))
+        out['schijf_code'] = schijf.get('code', '')
+        out['schijf_label'] = schijf.get('label', '')
+    else:
+        # Fallback op oude keys
+        out['markup_dam'] = float(contract.get('markup_eur_mwh', 0.0))
+        out['markdown_dam'] = float(contract.get('markdown_eur_mwh', 0.0))
+        out['markup_imb'] = float(contract.get('imb_forfait_afname', 0.0))
+        out['markdown_imb'] = float(contract.get('imb_forfait_injectie', 0.0))
+        out['schijf_code'] = ''
+        out['schijf_label'] = '(legacy)'
+
+    out['vergroening'] = float(contract.get('vergroening_eur_per_mwh', 0.0))
+    out['vaste_kost_maand'] = float(contract.get('vaste_kost_eur_maand', 0.0))
+    out['modus'] = contract.get('modus', 'passthrough')  # 'passthrough' | 'forfaitair'
+    out['gsc'] = float(contract.get('gsc_eur_mwh', 0.0))
+    out['wkk'] = float(contract.get('wkk_eur_mwh', 0.0))
+    return out
+
+
+# =============================================================================
 # LP-DISPATCH PER DAG
 # =============================================================================
 
@@ -253,13 +328,26 @@ def lp_dispatch_day(
         max_injectie_zacht = 0.0
         max_injectie_hard = 0.0
 
-    # Markup/markdown
-    markup = contract.get('markup_eur_mwh', 0.0)
-    markdown = contract.get('markdown_eur_mwh', 0.0)
-    gsc = contract.get('gsc_eur_mwh', 0.0)
-    wkk = contract.get('wkk_eur_mwh', 0.0)
-    imb_afn = contract.get('imb_forfait_afname', 0.0) if contract.get('modus') == 'forfaitair' else 0.0
-    imb_inj = contract.get('imb_forfait_injectie', 0.0) if contract.get('modus') == 'forfaitair' else 0.0
+    # Markup/markdown via staffel (v1.1) — resolve_contract_pricing kiest
+    # automatisch de juiste schijf, of valt terug op legacy markup_eur_mwh.
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        # Schat uit consumption_kw (deze functie krijgt 96-kwartier dag, dus extrapoleer)
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+
+    if pricing['modus'] == 'forfaitair':
+        # Imbalance fallback: één forfait per MWh, geen passthrough
+        markup_per_mwh = pricing['markup_imb']
+        markdown_per_mwh = pricing['markdown_imb']
+    else:
+        # Passthrough (DAM): nominatie OK
+        markup_per_mwh = pricing['markup_dam']
+        markdown_per_mwh = pricing['markdown_dam']
+
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
 
     # LP setup
     prob = pulp.LpProblem('battery_dispatch', pulp.LpMinimize)
@@ -300,8 +388,10 @@ def lp_dispatch_day(
     obj_terms = []
     for t in range(H):
         # Energiekost afname (€/kwartier): kW * 0.25 * (€/MWh) / 1000
-        prijs_afn_t = (spot_eur_mwh[t] + markup + gsc + wkk + imb_afn) / 1000.0
-        prijs_inj_t = (spot_eur_mwh[t] - markdown - imb_inj) / 1000.0
+        # v1.1: vergroening (€/MWh) wordt opgeteld bij afnameprijs.
+        # Geen floor op injectieprijs — kan negatief zijn bij negatieve spot.
+        prijs_afn_t = (spot_eur_mwh[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
+        prijs_inj_t = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
         obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
         obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
         # Cyclus-kost: ontladen kost
@@ -395,43 +485,56 @@ def bereken_jaarfactuur(
     toegangsvermogen = max(maandpieken_afname)  # = max(maandpieken)
 
     # ---- GROEP A: ENERGIEKOST (commodity) ----
+    # v1.1: markup/markdown uit staffel (Enwyse-stijl) als die aanwezig is.
+    pricing = resolve_contract_pricing(contract, totaal_afname_mwh)
     A = {}
     # A1. Afname energie spot (kost = sum(kWh × spot/1000))
     A['afname_energie_spot'] = sum(
         afname_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
     )
-    # A2. Markup afname
-    A['markup_afname'] = totaal_afname_mwh * contract.get('markup_eur_mwh', 0.0)
-    # A3. GSC
-    A['gsc'] = totaal_afname_mwh * contract.get('gsc_eur_mwh', 0.0)
-    # A4. WKK
-    A['wkk'] = totaal_afname_mwh * contract.get('wkk_eur_mwh', 0.0)
-    # A5. Imbalance afname
-    if contract.get('modus') == 'forfaitair':
-        A['imbalance_afname'] = totaal_afname_mwh * contract.get('imb_forfait_afname', 0.0)
+    # A2. Markup afname (DAM-tarief uit schijf)
+    A['markup_afname'] = totaal_afname_mwh * pricing['markup_dam']
+    # A3. Vergroening van verbruik (€/MWh × MWh afname)
+    A['vergroening'] = totaal_afname_mwh * pricing['vergroening']
+    # A4. GSC (groene stroom certificaten — meestal 0 bij Enwyse-contract)
+    A['gsc'] = totaal_afname_mwh * pricing['gsc']
+    # A5. WKK (warmte-krachtkoppeling — meestal 0 bij Enwyse-contract)
+    A['wkk'] = totaal_afname_mwh * pricing['wkk']
+    # A6. Imbalance afname
+    if pricing['modus'] == 'forfaitair':
+        # Forfaitair: imbalance markup als €/MWh op het volume
+        A['imbalance_afname'] = totaal_afname_mwh * pricing['markup_imb']
     else:
         # Passthrough: per kwartier (imb - spot) × kWh
         A['imbalance_afname'] = sum(
             afname_kwh_per_kwartier[i] * (imb_eur_mwh[i] - spot_eur_mwh[i]) / 1000.0
             for i in range(N)
         )
-    # A6. Vaste kost leverancier
-    A['vaste_kost_leverancier'] = contract.get('vaste_kost_eur_maand', 10.0) * 12
-    # A7. Injectie energie spot (negatief = inkomst)
+    # A7. Vaste kost leverancier (€/maand × 12)
+    A['vaste_kost_leverancier'] = pricing['vaste_kost_maand'] * 12
+    # A8. Injectie energie spot (negatief = inkomst)
     A['injectie_energie_spot'] = -sum(
         injectie_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
     )
-    # A8. Markdown injectie (negatief, want minder inkomst)
-    A['markdown_injectie'] = totaal_injectie_mwh * contract.get('markdown_eur_mwh', 0.0)
-    # A9. Imbalance injectie
-    if contract.get('modus') == 'forfaitair':
-        A['imbalance_injectie'] = totaal_injectie_mwh * contract.get('imb_forfait_injectie', 0.0)
+    # A9. Markdown injectie (positief, want minder inkomst)
+    A['markdown_injectie'] = totaal_injectie_mwh * pricing['markdown_dam']
+    # A10. Imbalance injectie
+    if pricing['modus'] == 'forfaitair':
+        A['imbalance_injectie'] = totaal_injectie_mwh * pricing['markdown_imb']
     else:
         A['imbalance_injectie'] = -sum(
             injectie_kwh_per_kwartier[i] * (imb_eur_mwh[i] - spot_eur_mwh[i]) / 1000.0
             for i in range(N)
         )
     A['_subtotaal'] = sum(v for k, v in A.items() if not k.startswith('_'))
+    A['_meta'] = {
+        'leverancier': contract.get('leverancier', 'onbekend'),
+        'schijf_code': pricing.get('schijf_code', ''),
+        'schijf_label': pricing.get('schijf_label', ''),
+        'markup_eur_mwh': pricing['markup_dam'],
+        'markdown_eur_mwh': pricing['markdown_dam'],
+        'modus': pricing['modus'],
+    }
 
     # ---- GROEP B: NETGEBRUIK AFNAME ----
     B = {}
