@@ -776,7 +776,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '15.0',
+  versie: '15.1',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   cache: 'multi-bestand (5 datasets) + gzip compressie',
@@ -1325,11 +1325,308 @@ app.post('/api/batterij-toevoegen', async (req, res) => {
 });
 
 // ─── ROUTE: POST /api/nominatie-sim ──────────────────────────────────────
-// Body: volledige simulator-input JSON
-// Spawn Python simulator.py, lever stdout terug
-app.post('/api/nominatie-sim', (req, res) => {
-  const input = req.body;
+// SMART ENDPOINT v15.1
+// Body kan één van twee shapes hebben:
+//   1. UI-payload (high-level): { profielNaam, jaarverbruik_mwh, postcode, grd,
+//        spanning, pv_kwp, batterijId, contract: { staffel, modus, ... },
+//        aansluiting_kva, simulatieperiode: { van, tot } }
+//   2. Volledige sim-input (low-level): wordt direct doorgepiped naar simulator.py
+//
+// We detecteren shape via aanwezigheid van 'profiel_kwartier' (low-level) of
+// 'profielNaam' (high-level). High-level → buildSimulatorInput() draait alle
+// data-loads en mappings, dan spawn.
+
+// Helper: bouw de complete simulator-input vanaf high-level UI keys
+async function buildSimulatorInput(uiInput) {
+  const errors = [];
+  const out = {};
+
+  // --- 1. Profiel ---
+  if (!uiInput.profielNaam) errors.push('profielNaam ontbreekt');
+  let profielKwartier = null;
+  if (uiInput.profielNaam) {
+    const safe = safeFilename(uiInput.profielNaam);
+    const profPath = path.join(DATA_DIR, 'profielen', `${safe}.json`);
+    if (!fs.existsSync(profPath)) {
+      errors.push(`Profiel '${uiInput.profielNaam}' niet gevonden (bestand ${safe}.json)`);
+    } else {
+      profielKwartier = JSON.parse(fs.readFileSync(profPath, 'utf8'));
+      if (!Array.isArray(profielKwartier) || profielKwartier.length !== 35040) {
+        errors.push(`Profiel ${uiInput.profielNaam} heeft ${profielKwartier?.length || 0} elementen, verwacht 35040`);
+      }
+    }
+  }
+  out.profiel_kwartier = profielKwartier || [];
+  out.aanvullingen = { laadinfra: null, elektrificatie: null };
+  out.jaarverbruik_mwh = parseFloat(uiInput.jaarverbruik_mwh) || 0;
+  if (out.jaarverbruik_mwh <= 0) errors.push('jaarverbruik_mwh moet > 0');
+
+  // --- 2. PV ---
+  const pv_kwp = parseFloat(uiInput.pv_kwp) || 0;
+  // Generieke Belgische PV-vorm (35040 floats, som=1) — sinusoidale dagcurve × seizoensmodulatie
+  // Lazy-laad of genereer een keer en cache
+  if (!dataCache._pvShape) {
+    dataCache._pvShape = generateBelgianPvShape();
+  }
+  out.pv = {
+    kwp: pv_kwp,
+    specifiek_rendement_kwh_per_kwp: 950,
+    vorm_kwartier: dataCache._pvShape,
+    capex_eur: 0
+  };
+
+  // --- 3. Batterij ---
+  if (uiInput.batterijId) {
+    const batterijen = loadDataFile('batterijen.json');
+    const list = batterijen.batterijen || batterijen;
+    const b = list.find(x => (x.id || x.naam) === uiInput.batterijId);
+    if (!b) {
+      errors.push(`Batterij '${uiInput.batterijId}' niet gevonden`);
+    } else {
+      out.batterij = {
+        kw: parseFloat(b.kw) || 0,
+        kwh: parseFloat(b.kwh) || 0,
+        dod_pct: parseFloat(b.dod_pct || b.dod) || 0.95,
+        rte_pct: parseFloat(b.eta || b.rte_pct) || 0.92,
+        capex_eur: parseFloat(b.capex || b.capex_eur) || 0,
+        max_cycli: parseFloat(b.max_cycli) || 5000
+      };
+    }
+  } else {
+    // geen batterij — kw=0, kwh=0
+    out.batterij = { kw: 0, kwh: 0, dod_pct: 0.95, rte_pct: 0.92, capex_eur: 0, max_cycli: 5000 };
+  }
+
+  // --- 4. Aansluiting ---
+  const kva = parseFloat(uiInput.aansluiting_kva) || 50;
+  const cosphi = 0.95;  // typisch
+  const max_kw = kva * cosphi;
+  out.aansluiting = {
+    max_afname_kw_zacht: max_kw,
+    max_afname_kw_hard: max_kw * 1.5,
+    max_injectie_kw_zacht: max_kw,
+    max_injectie_kw_hard: max_kw * 1.5,
+    tarief_overschrijding_afname_eur_per_kw_jaar: 50,
+    tarief_overschrijding_injectie_eur_per_kw_jaar: 30
+  };
+
+  // --- 5. Contract (passthrough vanuit UI met fallback defaults) ---
+  out.contract = uiInput.contract || {};
+  // Zorg dat staffel een lijst is
+  if (!Array.isArray(out.contract.staffel)) {
+    try {
+      const lc = loadDataFile('leveringscontract.json');
+      out.contract.staffel = lc.schijven || lc.staffel || [];
+      if (typeof out.contract.vergroening_eur_per_mwh !== 'number') {
+        out.contract.vergroening_eur_per_mwh = lc.vergroening_eur_per_mwh || 2.5;
+      }
+      if (typeof out.contract.vaste_kost_eur_maand !== 'number') {
+        out.contract.vaste_kost_eur_maand = lc.vast_eur_per_maand || 10;
+      }
+      if (!out.contract.leverancier) out.contract.leverancier = lc.leverancier || 'Enwyse';
+    } catch (e) {
+      errors.push('leveringscontract.json niet leesbaar: ' + e.message);
+    }
+  }
+  if (!out.contract.modus) out.contract.modus = 'passthrough';
+  if (typeof out.contract.injectie_toegelaten !== 'boolean') out.contract.injectie_toegelaten = true;
+  // backwards-compat keys voor simulator
+  out.contract.gsc_eur_mwh = out.contract.gsc_eur_mwh || 0;
+  out.contract.wkk_eur_mwh = out.contract.wkk_eur_mwh || 0;
+
+  // --- 6. Netbeheer (tarieven) ---
+  const grd = uiInput.grd || 'West';
+  const spanning = uiInput.spanning || 'MS';
+  let tariefset = null;
+  try {
+    const tarieven = loadDataFile('tarieven.json');
+    // tarieven.json shape: { "West": { "MS": {...}, "LS": {...} }, ... }
+    if (tarieven[grd] && tarieven[grd][spanning]) {
+      tariefset = tarieven[grd][spanning];
+    } else {
+      // Fallback op eerste beschikbare GRD/spanning
+      const grdKeys = Object.keys(tarieven);
+      if (grdKeys.length > 0) {
+        const fallbackGrd = grdKeys[0];
+        if (tarieven[fallbackGrd] && tarieven[fallbackGrd][spanning]) {
+          tariefset = tarieven[fallbackGrd][spanning];
+          errors.push(`WAARSCHUWING: GRD '${grd}' niet gevonden, fallback op '${fallbackGrd}'`);
+        }
+      }
+    }
+  } catch (e) {
+    errors.push('tarieven.json niet leesbaar: ' + e.message);
+  }
+  if (!tariefset) {
+    errors.push(`Geen tarieven voor GRD=${grd} spanning=${spanning}`);
+    tariefset = {};
+  }
+  out.netbeheer = { grd, spanning, tarieven: tariefset };
+
+  // --- 7. Forecast (defaults) ---
+  out.forecast = uiInput.forecast || {
+    sigma_da: 0,
+    sigma_imb: 0,
+    sigma_volume_verbruik_pct: 0,
+    sigma_volume_pv_pct: 0
+  };
+
+  // --- 8. Simulatieperiode ---
+  out.simulatieperiode = uiInput.simulatieperiode || { van: '2024-01-01', tot: '2024-12-31' };
+
+  // --- 9. Marktdata (BELPEX spot + imbalance) ---
+  // Lees uit GitHub cache via githubReadJson, projecteer op simulatieperiode
+  const markt = await loadMarktData(out.simulatieperiode.van, out.simulatieperiode.tot);
+  out.markt = markt;
+  if (markt._warning) errors.push(markt._warning);
+
+  // --- 10. Random seed ---
+  out.random_seed = parseInt(uiInput.random_seed) || 42;
+
+  return { input: out, errors };
+}
+
+// PV-vorm generator: 35040 kwartiers, sinus-curve × seizoens-modulatie
+// Genormaliseerd op som=1 (zodat × jaarproductie_kwh × 4 = kw per kwartier)
+function generateBelgianPvShape() {
+  const N = 35040;
+  const arr = new Array(N).fill(0);
+  for (let i = 0; i < N; i++) {
+    // Dag van het jaar (0-364), uur van de dag (0-23.75)
+    const day = Math.floor(i / 96);
+    const quartUur = i % 96;
+    const hour = quartUur / 4;  // 0..23.75
+    // Daglengte en zonnemax: zomer ~16h, winter ~8h
+    const seasonRad = ((day - 80) / 365) * 2 * Math.PI;  // 0 op equinox
+    const dayLength = 12 + 4 * Math.sin(seasonRad);  // 8..16
+    const noon = 13;  // CET zonnehoogte
+    const sunStart = noon - dayLength / 2;
+    const sunEnd = noon + dayLength / 2;
+    if (hour < sunStart || hour > sunEnd) continue;
+    // Sinus-piek tijdens daglicht
+    const t = (hour - sunStart) / (sunEnd - sunStart);
+    const dailyShape = Math.sin(t * Math.PI);
+    // Seizoens-amplitude: zomer × 1.5, winter × 0.5
+    const seasonScale = 1.0 + 0.5 * Math.sin(seasonRad);
+    arr[i] = Math.max(0, dailyShape * seasonScale);
+  }
+  // Normaliseer som=1
+  const som = arr.reduce((a, b) => a + b, 0);
+  if (som > 0) {
+    for (let i = 0; i < N; i++) arr[i] /= som;
+  }
+  return arr;
+}
+
+// Laad BELPEX spot + imbalance data uit GitHub cache, projecteer op periode
+async function loadMarktData(vanISO, totISO) {
+  const token = process.env.GITHUB_TOKEN;
+  const owner = process.env.GITHUB_OWNER;
+  const repo  = process.env.GITHUB_REPO;
+  if (!token || !owner || !repo) {
+    return generateDummyMarkt(vanISO, totISO, 'GitHub env-vars niet ingesteld');
+  }
+  let spotRaw = null, imbRaw = null;
+  try {
+    const r1 = await githubReadJson(token, owner, repo, cachePathFor('spot'));
+    if (r1 && r1.json && Array.isArray(r1.json)) spotRaw = r1.json;
+  } catch (e) { /* leeg */ }
+  try {
+    const r2 = await githubReadJson(token, owner, repo, cachePathFor('imb'));
+    if (r2 && r2.json && Array.isArray(r2.json)) imbRaw = r2.json;
+  } catch (e) { /* leeg */ }
+  if (!spotRaw || !imbRaw || spotRaw.length === 0 || imbRaw.length === 0) {
+    return generateDummyMarkt(vanISO, totISO, 'Marktdata-cache leeg of niet beschikbaar — dummy data gebruikt');
+  }
+  // Spot/imb data shape (uit ENTSO-E + Elia): [{datum: 'YYYY-MM-DD', uur: 0-23, prijs_eur_mwh: ...}]
+  // OF kwartier: [{datum, kwartier: 0-95, ...}]. We reconstrueren een 1-uur of 15-min array.
+  // Simpele projectie: bouw timestamps array op kwartierbasis tussen vanISO en totISO.
+  return buildMarktArrayFromCache(spotRaw, imbRaw, vanISO, totISO);
+}
+
+function generateDummyMarkt(vanISO, totISO, warning) {
+  const start = new Date(vanISO + 'T00:00:00');
+  const end = new Date(totISO + 'T23:45:00');
+  const N = Math.floor((end - start) / (15 * 60 * 1000)) + 1;
+  const spot = new Array(N), imb = new Array(N), timestamps = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const t = new Date(start.getTime() + i * 15 * 60 * 1000);
+    timestamps[i] = t.toISOString();
+    // Dummy: ~80 €/MWh + sinus daycycle
+    const hour = t.getHours() + t.getMinutes() / 60;
+    const daily = 80 + 30 * Math.sin((hour - 7) * Math.PI / 12);
+    spot[i] = daily;
+    imb[i] = daily + (Math.random() - 0.5) * 20;
+  }
+  return { spot_kwartier: spot, imb_kwartier: imb, timestamps, _warning: warning };
+}
+
+function buildMarktArrayFromCache(spotRaw, imbRaw, vanISO, totISO) {
+  const start = new Date(vanISO + 'T00:00:00');
+  const end = new Date(totISO + 'T23:45:00');
+  const N = Math.floor((end - start) / (15 * 60 * 1000)) + 1;
+  // Bouw lookup: 'YYYY-MM-DD HH:MM' → prijs
+  function buildLookup(arr) {
+    const map = {};
+    for (const r of arr) {
+      const d = r.datum || r.date || r.day;
+      if (!d) continue;
+      // Detecteer hour vs kwartier shape
+      if (typeof r.kwartier === 'number') {
+        const h = Math.floor(r.kwartier / 4);
+        const m = (r.kwartier % 4) * 15;
+        const key = `${d} ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        map[key] = r.prijs_eur_mwh ?? r.value ?? r.price ?? 0;
+      } else if (typeof r.uur === 'number') {
+        // Uurdata: vul 4× per kwartier
+        for (let k = 0; k < 4; k++) {
+          const m = k * 15;
+          const key = `${d} ${String(r.uur).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+          map[key] = r.prijs_eur_mwh ?? r.value ?? r.price ?? 0;
+        }
+      }
+    }
+    return map;
+  }
+  const spotMap = buildLookup(spotRaw);
+  const imbMap = buildLookup(imbRaw);
+  const spot = new Array(N), imb = new Array(N), timestamps = new Array(N);
+  let missing = 0;
+  for (let i = 0; i < N; i++) {
+    const t = new Date(start.getTime() + i * 15 * 60 * 1000);
+    timestamps[i] = t.toISOString();
+    const dStr = t.toISOString().slice(0, 10);
+    const hStr = String(t.getUTCHours()).padStart(2, '0');
+    const mStr = String(t.getUTCMinutes()).padStart(2, '0');
+    const key = `${dStr} ${hStr}:${mStr}`;
+    const sp = spotMap[key];
+    const im = imbMap[key];
+    if (sp == null || im == null) missing++;
+    spot[i] = sp != null ? sp : 80;  // fallback
+    imb[i] = im != null ? im : 80;
+  }
+  const result = { spot_kwartier: spot, imb_kwartier: imb, timestamps };
+  if (missing > N * 0.5) {
+    result._warning = `Marktdata: ${missing}/${N} kwartieren ontbraken — fallback 80 €/MWh gebruikt`;
+  }
+  return result;
+}
+
+app.post('/api/nominatie-sim', async (req, res) => {
+  let input = req.body;
   if (!input) return res.status(400).json({ error: 'body is verplicht' });
+
+  // SHAPE-DETECTIE: high-level UI payload (profielNaam aanwezig) vs low-level (profiel_kwartier)
+  let buildErrors = [];
+  if (!Array.isArray(input.profiel_kwartier) && input.profielNaam) {
+    try {
+      const built = await buildSimulatorInput(input);
+      input = built.input;
+      buildErrors = built.errors || [];
+    } catch (e) {
+      return res.status(400).json({ error: 'Input-build fout: ' + e.message });
+    }
+  }
 
   const startTime = Date.now();
   const simulatorPath = path.join(__dirname, 'simulator.py');
@@ -1364,12 +1661,14 @@ app.post('/api/nominatie-sim', (req, res) => {
       return res.status(504).json({
         error: 'simulator.py time-out na 90s',
         log: stderrData.slice(-2000),
+        build_errors: buildErrors,
       });
     }
     if (code !== 0) {
       return res.status(500).json({
         error: `simulator.py exit code ${code}`,
         log: stderrData.slice(-2000),
+        build_errors: buildErrors,
       });
     }
     try {
@@ -1378,6 +1677,7 @@ app.post('/api/nominatie-sim', (req, res) => {
         ok: true,
         elapsed_ms: elapsed,
         log: stderrData.slice(-3000),  // laatste 3KB van log
+        build_errors: buildErrors,
         result: out,
       });
     } catch (e) {
@@ -1385,6 +1685,7 @@ app.post('/api/nominatie-sim', (req, res) => {
         error: 'simulator.py output niet parseerbaar als JSON: ' + e.message,
         stdout_preview: stdoutData.slice(0, 500),
         log: stderrData.slice(-2000),
+        build_errors: buildErrors,
       });
     }
   });
@@ -1535,4 +1836,4 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   });
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v15.0 (simulator endpoints + cache + gzip) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v15.1 (smart sim endpoint + staffel) draait op poort ' + PORT));
