@@ -1,1 +1,102 @@
-
+[
+  {
+    "naam": "Boer aardappel",
+    "beschrijving": "continu (7/7), 24u-belasting, zomerpiek, variabel, piek 7u"
+  },
+  {
+    "naam": "Boer melkvee",
+    "beschrijving": "continu (7/7), 24u-belasting, piek 7u"
+  },
+  {
+    "naam": "Boer uien",
+    "beschrijving": "sterk weekdagprofiel, overwegend dag, variabel, piek 10u"
+  },
+  {
+    "naam": "Broeirij",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 16u"
+  },
+  {
+    "naam": "Concertzaal",
+    "beschrijving": "continu (7/7), overwegend dag, zomerpiek, zeer variabel, piek 12u"
+  },
+  {
+    "naam": "Garage",
+    "beschrijving": "sterk weekdagprofiel, overwegend dag, winterpiek, zeer variabel, piek 8u"
+  },
+  {
+    "naam": "Horeca",
+    "beschrijving": "weekdagprofiel, overwegend dag, zomerpiek, variabel, piek 17u"
+  },
+  {
+    "naam": "Hotel",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 18u"
+  },
+  {
+    "naam": "Industrie diepvries",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 16u"
+  },
+  {
+    "naam": "Industrie met zomersluiting",
+    "beschrijving": "sterk weekdagprofiel, 24u-belasting, sterk seizoensgebonden, variabel, piek 10u"
+  },
+  {
+    "naam": "Industrie voeding",
+    "beschrijving": "weekdagprofiel, 24u-belasting, seizoensstabiel, piek 18u"
+  },
+  {
+    "naam": "Kantoor",
+    "beschrijving": "weekdagprofiel, overwegend dag, sterk seizoensgebonden, variabel, piek 11u"
+  },
+  {
+    "naam": "Luchthaven",
+    "beschrijving": "continu (7/7), 24u-belasting, meer winter, piek 11u"
+  },
+  {
+    "naam": "Ontmoetingscenter",
+    "beschrijving": "weekdagprofiel, overwegend dag, winterpiek, variabel, piek 17u"
+  },
+  {
+    "naam": "Opslag / Magazijn",
+    "beschrijving": "weekdagprofiel, overwegend dag, seizoensstabiel, variabel, piek 17u"
+  },
+  {
+    "naam": "Residentieel",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 21u"
+  },
+  {
+    "naam": "Retail voeding en koeling",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 9u"
+  },
+  {
+    "naam": "Retail zonder koeling",
+    "beschrijving": "sterk weekdagprofiel, dagactiviteit, meer zomer, variabel, piek 14u"
+  },
+  {
+    "naam": "School",
+    "beschrijving": "weekdagprofiel, overwegend dag, winterpiek, zeer variabel, piek 9u"
+  },
+  {
+    "naam": "Slager",
+    "beschrijving": "sterk weekdagprofiel, overwegend dag, seizoensstabiel, piek 7u"
+  },
+  {
+    "naam": "Sporthal",
+    "beschrijving": "weekdagprofiel, overwegend dag, meer winter, variabel, piek 19u"
+  },
+  {
+    "naam": "Stadion",
+    "beschrijving": "weekdagprofiel, 24u-belasting, winterpiek, zeer variabel, piek 10u"
+  },
+  {
+    "naam": "Tankstation",
+    "beschrijving": "continu (7/7), 24u-belasting, seizoensstabiel, piek 19u"
+  },
+  {
+    "naam": "Technische dienst",
+    "beschrijving": "weekdagprofiel, 24u-belasting, winterpiek, zeer variabel, piek 6u"
+  },
+  {
+    "naam": "Woonzorgcenter",
+    "beschrijving": "weekdagprofiel, overwegend dag, seizoensstabiel, piek 8u"
+  }
+]
