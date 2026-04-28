@@ -23,7 +23,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Halle-Vilv.|MS": {
     "maandpiek_eur_kw_jaar": 60.1395192,
@@ -49,7 +49,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Imewo|MS": {
     "maandpiek_eur_kw_jaar": 54.2288988,
@@ -75,7 +75,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Kempen|MS": {
     "maandpiek_eur_kw_jaar": 46.8630636,
@@ -101,7 +101,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Limburg|MS": {
     "maandpiek_eur_kw_jaar": 48.912096,
@@ -127,7 +127,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Midden-Vl.|MS": {
     "maandpiek_eur_kw_jaar": 50.4530592,
@@ -153,7 +153,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "West|MS": {
     "maandpiek_eur_kw_jaar": 59.7614052,
@@ -179,7 +179,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "Zenne-Dijle|MS": {
     "maandpiek_eur_kw_jaar": 59.85696,
@@ -205,7 +205,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 2317.8
+    "energiefonds_eur_jaar": 2305.32
   },
   "ORES|MS": {
     "maandpiek_eur_kw_jaar": 33.532662,
@@ -361,7 +361,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Halle-Vilv.|LS": {
     "maandpiek_eur_kw_jaar": 56.0428955,
@@ -387,7 +387,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Imewo|LS": {
     "maandpiek_eur_kw_jaar": 54.2009816,
@@ -413,7 +413,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Kempen|LS": {
     "maandpiek_eur_kw_jaar": 56.2069857,
@@ -439,7 +439,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Limburg|LS": {
     "maandpiek_eur_kw_jaar": 49.0469384,
@@ -465,7 +465,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Midden-Vl.|LS": {
     "maandpiek_eur_kw_jaar": 50.1239818,
@@ -491,7 +491,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "West|LS": {
     "maandpiek_eur_kw_jaar": 57.0995726,
@@ -517,7 +517,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "Zenne-Dijle|LS": {
     "maandpiek_eur_kw_jaar": 56.1228635,
@@ -543,7 +543,7 @@
     "accijns_schijf3_50mwh": 12.09,
     "accijns_schijf4_1000mwh": 11.39,
     "accijns_schijf5_inf": 10.0,
-    "energiefonds_eur_jaar": 121.56
+    "energiefonds_eur_jaar": 120.84
   },
   "ORES|LS": {
     "maandpiek_eur_kw_jaar": 84.5409504,
