@@ -1,140 +1,78 @@
 {
-  "staffel_markup": [
+  "leverancier": "Enwyse",
+  "geldig_vanaf": "2026-01-01",
+  "munt": "EUR",
+  "eenheid": "EUR/MWh",
+  "schijven": [
     {
+      "code": "S1",
+      "label": "< 100 MWh",
       "min_mwh": 0,
-      "max_mwh": 50,
-      "markup_eur_mwh": 10.0,
-      "markdown_eur_mwh": 15.0
+      "max_mwh": 100,
+      "consumption_dam_markup": 15.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 15.00,
+      "injection_imbalance_markdown": 11.00
     },
     {
-      "min_mwh": 50,
+      "code": "S2",
+      "label": "100 – 200 MWh",
+      "min_mwh": 100,
       "max_mwh": 200,
-      "markup_eur_mwh": 8.0,
-      "markdown_eur_mwh": 12.0
+      "consumption_dam_markup": 12.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 13.00,
+      "injection_imbalance_markdown": 11.00
     },
     {
+      "code": "S3",
+      "label": "200 – 500 MWh",
       "min_mwh": 200,
       "max_mwh": 500,
-      "markup_eur_mwh": 7.0,
-      "markdown_eur_mwh": 10.0
+      "consumption_dam_markup": 8.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 11.00,
+      "injection_imbalance_markdown": 11.00
     },
     {
+      "code": "S4",
+      "label": "500 – 800 MWh",
       "min_mwh": 500,
-      "max_mwh": 1000,
-      "markup_eur_mwh": 6.0,
-      "markdown_eur_mwh": 9.0
+      "max_mwh": 800,
+      "consumption_dam_markup": 7.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 9.00,
+      "injection_imbalance_markdown": 11.00
     },
     {
+      "code": "S5",
+      "label": "800 – 1000 MWh",
+      "min_mwh": 800,
+      "max_mwh": 1000,
+      "consumption_dam_markup": 6.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 7.00,
+      "injection_imbalance_markdown": 11.00
+    },
+    {
+      "code": "S6",
+      "label": "> 1000 MWh",
       "min_mwh": 1000,
       "max_mwh": 9999999,
-      "markup_eur_mwh": 5.0,
-      "markdown_eur_mwh": 8.0
+      "consumption_dam_markup": 5.00,
+      "consumption_imbalance_markup": 5.00,
+      "injection_dam_markdown": 6.00,
+      "injection_imbalance_markdown": 11.00
     }
   ],
-  "imb_forfait_afname_eur_mwh": 5.0,
-  "imb_forfait_injectie_eur_mwh": 17.0,
-  "gsc_eur_mwh": 11.0,
-  "wkk_eur_mwh": 4.0,
-  "vaste_kost_eur_maand": 10.0,
-  "vergroening_eur_mwh": 2.5,
-  "raw_excel_rows": [
-    [
-      "Grid consumption / year (<)",
-      "DAM",
-      "",
-      "",
-      ""
-    ],
-    [
-      "",
-      "Consumption",
-      "",
-      "Injection",
-      ""
-    ],
-    [
-      "",
-      "Markup",
-      "Imbalance(*)",
-      "Markdown",
-      "Imbalance (*)"
-    ],
-    [
-      "MWh",
-      "EUR/MWh",
-      "EUR/MWh",
-      "EUR/MWh",
-      "EUR/MWh"
-    ],
-    [
-      "Any",
-      "",
-      "",
-      "",
-      ""
-    ],
-    [
-      "< 100",
-      "15",
-      "5",
-      "15",
-      "11"
-    ],
-    [
-      "100-200",
-      "12",
-      "5",
-      "13",
-      "11"
-    ],
-    [
-      "200-500",
-      "8",
-      "5",
-      "11",
-      "11"
-    ],
-    [
-      "500-800",
-      "7",
-      "5",
-      "9",
-      "11"
-    ],
-    [
-      "800-1000",
-      "6",
-      "5",
-      "7",
-      "11"
-    ],
-    [
-      ">1000",
-      "5",
-      "5",
-      "6",
-      "11"
-    ],
-    [
-      "Vergroening van verbruik",
-      "2.5",
-      "\u20ac/MWh",
-      "",
-      ""
-    ],
-    [
-      "Fixed per month : 10\u20ac",
-      "",
-      "",
-      "",
-      ""
-    ],
-    [
-      "Imbalance(*)",
-      "van toepassing als er geen sturing op onbalans is en er dus geen  nominatie op niveau van de aansluiting gebeurt. Dan gelden deze forfaitaire tarieven.",
-      "",
-      "",
-      ""
-    ]
+  "vergroening_eur_per_mwh": 2.50,
+  "vast_eur_per_maand": 10.00,
+  "imbalance_geldt_als": "geen_nominatie_op_aansluitingsniveau",
+  "negative_injectie_toegestaan": true,
+  "notes": [
+    "Imbalance markup/markdown is fallback wanneer geen nominatie gebeurt op niveau van de aansluiting.",
+    "Vergroening (2,50 EUR/MWh) wordt opgeteld bij elke afname-MWh, niet bij injectie.",
+    "Vast tarief van 10 EUR/maand staat los van energievolume (groep B fixed).",
+    "Injectievergoeding kan negatief zijn bij negatieve spotprijzen — geen floor."
   ]
 }
