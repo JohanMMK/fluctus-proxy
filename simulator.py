@@ -680,7 +680,7 @@ def bereken_jaarfactuur(
 # =============================================================================
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.0 — start ===")
+    log.info("=== Fluctus Simulator v1.1 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
