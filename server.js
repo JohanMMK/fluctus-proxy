@@ -776,7 +776,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '15.2',
+  versie: '15.4',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   cache: 'multi-bestand (5 datasets) + gzip compressie',
@@ -792,7 +792,8 @@ app.get('/', (req, res) => res.json({
     '── SIMULATOR (v15) ──',
     'GET  /api/profielen-lijst                  (25 profielen + beschrijvingen)',
     'GET  /api/profiel?naam=Slager              (35040-kwartier-array)',
-    'GET  /api/postcode-grd?postcode=8500       (GRD lookup)',
+    'GET  /api/postcode-grd?postcode=8500       (GRD + gemeente lookup)',
+    'GET  /api/gemeenten-lijst                  (autocomplete: alle 1783 BE gemeenten)',
     'GET  /api/regio-tarieven?grd=...&spanning=MS|LS',
     'GET  /api/leveringscontract-staffel        (default markup/markdown per MWh)',
     'GET  /api/batterijen                       (lijst beschikbare batterijen)',
@@ -1189,23 +1190,40 @@ const GRD_NORMALISATIE = {
 };
 
 // ─── ROUTE: GET /api/postcode-grd?postcode=8500 ──────────────────────────
-// Retourneert: {postcode, grd_origineel, grd, fallback_naar?}
+// Retourneert: {postcode, gemeenten, gemeente_label, grd_origineel, grd, dnb_volledig, fallback_naar?}
+// v15.4: Leest uit postcodes.json met rijke shape: { "8500": {gemeenten: [...], dnb: "Fluvius West"}, ... }
 app.get('/api/postcode-grd', (req, res) => {
   const pc = String(req.query.postcode || '').trim();
   if (!/^\d{4}$/.test(pc)) {
     return res.status(400).json({ error: 'postcode moet 4 cijfers zijn' });
   }
   try {
-    const map = loadDataFile('postcodes.json');
-    const grdOrigineel = map[pc];
+    let postcodeRecord = null;
+    try {
+      const map = loadDataFile('postcodes.json');
+      if (map && map[pc]) postcodeRecord = map[pc];
+    } catch (e) { /* leeg */ }
+
+    let grdOrigineel = null;
+    let gemeenten = [];
+    let dnb_volledig = null;
     let grd, fallback = null;
 
-    if (grdOrigineel) {
+    if (postcodeRecord && typeof postcodeRecord === 'object') {
+      // Rijke shape: { gemeenten: [...], dnb: "Fluvius West" }
+      gemeenten = postcodeRecord.gemeenten || [];
+      dnb_volledig = postcodeRecord.dnb || null;
+      grdOrigineel = dnb_volledig;
+      grd = GRD_NORMALISATIE[dnb_volledig] || dnb_volledig;
+      if (grd !== dnb_volledig && (dnb_volledig === 'AIESH' || dnb_volledig === 'REW')) {
+        fallback = `${dnb_volledig} gebruikt ORES-tarieven als proxy`;
+      }
+    } else if (typeof postcodeRecord === 'string') {
+      // Backwards-compat met oude platte shape: { "8500": "Fluvius West", ... }
+      grdOrigineel = postcodeRecord;
       grd = GRD_NORMALISATIE[grdOrigineel] || grdOrigineel;
-      if (grd !== grdOrigineel) {
-        if (grdOrigineel === 'AIESH' || grdOrigineel === 'REW') {
-          fallback = `${grdOrigineel} gebruikt ORES-tarieven als proxy`;
-        }
+      if (grd !== grdOrigineel && (grdOrigineel === 'AIESH' || grdOrigineel === 'REW')) {
+        fallback = `${grdOrigineel} gebruikt ORES-tarieven als proxy`;
       }
     } else {
       // Onbekende postcode: gewest-fallback op basis van eerste cijfer
@@ -1221,14 +1239,37 @@ app.get('/api/postcode-grd', (req, res) => {
         fallback = `Postcode ${pc} niet exact bekend, fallback naar ORES (Wallonië)`;
       }
     }
+
+    const gemeente_label = gemeenten.length > 0 ? gemeenten.join(' / ') : null;
+
     res.json({
       postcode: pc,
-      grd_origineel: grdOrigineel || null,
+      gemeenten,
+      gemeente_label,
+      grd_origineel: grdOrigineel,
       grd,
+      dnb_volledig,
       fallback_naar: fallback,
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── ROUTE: GET /api/gemeenten-lijst ───────────────────────────────────────
+// Retourneert flat array van {postcode, gemeente, dnb} voor autocomplete-UI.
+// Bron: data/gemeenten.json (1783 entries).
+app.get('/api/gemeenten-lijst', (req, res) => {
+  try {
+    const lijst = loadDataFile('gemeenten.json');
+    if (!Array.isArray(lijst)) {
+      return res.status(500).json({ error: 'gemeenten.json heeft onverwachte vorm' });
+    }
+    // Cache-Control: deze data verandert nooit binnen een sessie → 1u client cache
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.json({ aantal: lijst.length, gemeenten: lijst });
+  } catch (err) {
+    res.status(500).json({ error: 'gemeenten.json niet leesbaar: ' + err.message });
   }
 });
 
@@ -1840,7 +1881,7 @@ app.post('/api/scenario-bewaren', async (req, res) => {
 });
 
 // CORS preflight voor nieuwe endpoints
-['/api/profielen-lijst', '/api/profiel', '/api/postcode-grd', '/api/regio-tarieven',
+['/api/profielen-lijst', '/api/profiel', '/api/postcode-grd', '/api/gemeenten-lijst', '/api/regio-tarieven',
  '/api/leveringscontract-staffel', '/api/batterijen', '/api/batterij-toevoegen',
  '/api/nominatie-sim', '/api/profiel-aanvulling-genereren',
  '/api/projecten', '/api/scenarios', '/api/scenario', '/api/scenario-bewaren']
@@ -1854,4 +1895,4 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   });
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v15.2 (smart sim + cache fix + tarief fix) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v15.4 (1 postcodes.json met rijke shape) draait op poort ' + PORT));
