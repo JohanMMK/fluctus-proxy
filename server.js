@@ -776,7 +776,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '15.1',
+  versie: '15.2',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   cache: 'multi-bestand (5 datasets) + gzip compressie',
@@ -1440,18 +1440,18 @@ async function buildSimulatorInput(uiInput) {
   let tariefset = null;
   try {
     const tarieven = loadDataFile('tarieven.json');
-    // tarieven.json shape: { "West": { "MS": {...}, "LS": {...} }, ... }
-    if (tarieven[grd] && tarieven[grd][spanning]) {
-      tariefset = tarieven[grd][spanning];
+    // tarieven.json shape: flat { "West|MS": {...}, "West|LS": {...}, ... }
+    // (NIET nested { "West": { "MS": {...}, ... } })
+    const key = `${grd}|${spanning}`;
+    if (tarieven[key]) {
+      tariefset = tarieven[key];
     } else {
-      // Fallback op eerste beschikbare GRD/spanning
-      const grdKeys = Object.keys(tarieven);
-      if (grdKeys.length > 0) {
-        const fallbackGrd = grdKeys[0];
-        if (tarieven[fallbackGrd] && tarieven[fallbackGrd][spanning]) {
-          tariefset = tarieven[fallbackGrd][spanning];
-          errors.push(`WAARSCHUWING: GRD '${grd}' niet gevonden, fallback op '${fallbackGrd}'`);
-        }
+      // Fallback op eerste beschikbare GRD voor deze spanning
+      const matchingKeys = Object.keys(tarieven).filter(k => k.endsWith('|' + spanning));
+      if (matchingKeys.length > 0) {
+        const fallbackKey = matchingKeys[0];
+        tariefset = tarieven[fallbackKey];
+        errors.push(`WAARSCHUWING: GRD '${grd}' niet gevonden voor ${spanning}, fallback op '${fallbackKey}'`);
       }
     }
   } catch (e) {
@@ -1562,48 +1562,66 @@ function generateDummyMarkt(vanISO, totISO, warning) {
 }
 
 function buildMarktArrayFromCache(spotRaw, imbRaw, vanISO, totISO) {
-  const start = new Date(vanISO + 'T00:00:00');
-  const end = new Date(totISO + 'T23:45:00');
+  // CACHE SHAPE: [{t: 1619215200000, v: 68.51}, ...]
+  //   t = Unix milliseconds (UTC), 15-minute resolution
+  //   v = prijs in €/MWh
+  // Sim-periode: vanISO/totISO zijn YYYY-MM-DD (lokale dag, behandelen we als UTC)
+  const start = new Date(vanISO + 'T00:00:00Z').getTime();
+  const end = new Date(totISO + 'T23:45:00Z').getTime();
   const N = Math.floor((end - start) / (15 * 60 * 1000)) + 1;
-  // Bouw lookup: 'YYYY-MM-DD HH:MM' → prijs
+
+  // Bouw lookup map: timestamp_ms → prijs
+  // We rounden de cache-timestamps naar de dichtsbijzijnde 15-min grid om missende
+  // datapunten op te vangen (sommige bronnen geven uurdata, sommige kwartierdata).
   function buildLookup(arr) {
-    const map = {};
+    const map = new Map();
     for (const r of arr) {
-      const d = r.datum || r.date || r.day;
-      if (!d) continue;
-      // Detecteer hour vs kwartier shape
-      if (typeof r.kwartier === 'number') {
-        const h = Math.floor(r.kwartier / 4);
-        const m = (r.kwartier % 4) * 15;
-        const key = `${d} ${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-        map[key] = r.prijs_eur_mwh ?? r.value ?? r.price ?? 0;
-      } else if (typeof r.uur === 'number') {
-        // Uurdata: vul 4× per kwartier
-        for (let k = 0; k < 4; k++) {
-          const m = k * 15;
-          const key = `${d} ${String(r.uur).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-          map[key] = r.prijs_eur_mwh ?? r.value ?? r.price ?? 0;
-        }
-      }
+      const t = r.t;
+      const v = r.v;
+      if (typeof t !== 'number' || typeof v !== 'number') continue;
+      // Round naar dichtsbijzijnde 15-min boundary (kwartier-grid)
+      const rounded = Math.round(t / (15 * 60 * 1000)) * (15 * 60 * 1000);
+      map.set(rounded, v);
     }
     return map;
   }
   const spotMap = buildLookup(spotRaw);
   const imbMap = buildLookup(imbRaw);
+
   const spot = new Array(N), imb = new Array(N), timestamps = new Array(N);
   let missing = 0;
+  // Track laatste bekende waarde voor forward-fill (bij uurdata: 4 kwartieren krijgen zelfde uur-prijs)
+  let lastSpot = null, lastImb = null;
+
   for (let i = 0; i < N; i++) {
-    const t = new Date(start.getTime() + i * 15 * 60 * 1000);
-    timestamps[i] = t.toISOString();
-    const dStr = t.toISOString().slice(0, 10);
-    const hStr = String(t.getUTCHours()).padStart(2, '0');
-    const mStr = String(t.getUTCMinutes()).padStart(2, '0');
-    const key = `${dStr} ${hStr}:${mStr}`;
-    const sp = spotMap[key];
-    const im = imbMap[key];
-    if (sp == null || im == null) missing++;
-    spot[i] = sp != null ? sp : 80;  // fallback
-    imb[i] = im != null ? im : 80;
+    const t = start + i * 15 * 60 * 1000;
+    timestamps[i] = new Date(t).toISOString();
+
+    // Probeer exacte 15-min match, anders zoek naar uur-grid (00,15,30,45 → 00)
+    let sp = spotMap.get(t);
+    let im = imbMap.get(t);
+
+    // Fallback: probeer uur-grid (rond af naar uur)
+    if (sp == null) {
+      const hourT = Math.floor(t / (60 * 60 * 1000)) * (60 * 60 * 1000);
+      sp = spotMap.get(hourT);
+    }
+    if (im == null) {
+      const hourT = Math.floor(t / (60 * 60 * 1000)) * (60 * 60 * 1000);
+      im = imbMap.get(hourT);
+    }
+
+    // Forward-fill bij gat
+    if (sp != null) lastSpot = sp; else if (lastSpot != null) sp = lastSpot;
+    if (im != null) lastImb = im; else if (lastImb != null) im = lastImb;
+
+    if (sp == null || im == null) {
+      missing++;
+      sp = sp != null ? sp : 80;
+      im = im != null ? im : (sp != null ? sp : 80);
+    }
+    spot[i] = sp;
+    imb[i] = im;
   }
   const result = { spot_kwartier: spot, imb_kwartier: imb, timestamps };
   if (missing > N * 0.5) {
@@ -1836,4 +1854,4 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   });
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v15.1 (smart sim endpoint + staffel) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v15.2 (smart sim + cache fix + tarief fix) draait op poort ' + PORT));
