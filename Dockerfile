@@ -13,7 +13,7 @@ RUN npm install --omit=dev
 
 # Install Python deps (cache layer)
 COPY requirements.txt ./
-RUN python3 -m pip install --break-system-packages --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy rest of app (server.js, simulator.py, data/)
 COPY . .
