@@ -1,0 +1,8917 @@
+[
+{
+"postcode":"3798",
+"gemeente":"'s Gravenvoeren/Fouron-le-Comte",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2970",
+"gemeente":"'s Gravenwezel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3700",
+"gemeente":"'s Herenelderen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7510",
+"gemeente":"3 Suisses",
+"dnb":"ORES"
+},
+{
+"postcode":"9420",
+"gemeente":"Aaigem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8511",
+"gemeente":"Aalbeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9300",
+"gemeente":"Aalst",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3800",
+"gemeente":"Aalst (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9880",
+"gemeente":"Aalter",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3200",
+"gemeente":"Aarschot",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8700",
+"gemeente":"Aarsele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8211",
+"gemeente":"Aartrijke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2630",
+"gemeente":"Aartselaar",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3930",
+"gemeente":"Achel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5362",
+"gemeente":"Achet",
+"dnb":"ORES"
+},
+{
+"postcode":"9991",
+"gemeente":"Adegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8660",
+"gemeente":"Adinkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9051",
+"gemeente":"Afsnee",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5544",
+"gemeente":"Agimont",
+"dnb":"ORES"
+},
+{
+"postcode":"6250",
+"gemeente":"Aiseau-Presles",
+"dnb":"ORES"
+},
+{
+"postcode":"5010",
+"gemeente":"Albi",
+"dnb":"ORES"
+},
+{
+"postcode":"5012",
+"gemeente":"Albi",
+"dnb":"ORES"
+},
+{
+"postcode":"3570",
+"gemeente":"Alken",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4432",
+"gemeente":"Alleur",
+"dnb":"RESA"
+},
+{
+"postcode":"1652",
+"gemeente":"Alsemberg",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8690",
+"gemeente":"Alveringem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4540",
+"gemeente":"Amay",
+"dnb":"ORES"
+},
+{
+"postcode":"6953",
+"gemeente":"Ambly",
+"dnb":"ORES"
+},
+{
+"postcode":"4770",
+"gemeente":"Amel",
+"dnb":"RESA"
+},
+{
+"postcode":"5300",
+"gemeente":"Andenne",
+"dnb":"AIEG"
+},
+{
+"postcode":"1070",
+"gemeente":"Anderlecht",
+"dnb":"Sibelga"
+},
+{
+"postcode":"6150",
+"gemeente":"Anderlues",
+"dnb":"ORES"
+},
+{
+"postcode":"4821",
+"gemeente":"Andrimont",
+"dnb":"RESA"
+},
+{
+"postcode":"4031",
+"gemeente":"Angleur",
+"dnb":"RESA"
+},
+{
+"postcode":"7387",
+"gemeente":"Angre",
+"dnb":"ORES"
+},
+{
+"postcode":"5537",
+"gemeente":"Anhée",
+"dnb":"ORES"
+},
+{
+"postcode":"6721",
+"gemeente":"Anlier",
+"dnb":"ORES"
+},
+{
+"postcode":"4430",
+"gemeente":"Ans",
+"dnb":"RESA"
+},
+{
+"postcode":"4160",
+"gemeente":"Anthisnes",
+"dnb":"RESA"
+},
+{
+"postcode":"7640",
+"gemeente":"Antoing",
+"dnb":"ORES"
+},
+{
+"postcode":"2000",
+"gemeente":"Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2018",
+"gemeente":"Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2030",
+"gemeente":"Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2040",
+"gemeente":"Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2060",
+"gemeente":"Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2020",
+"gemeente":"Antwerpen - Kiel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2050",
+"gemeente":"Antwerpen Linkeroever",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8570",
+"gemeente":"Anzegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9200",
+"gemeente":"Appels",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9400",
+"gemeente":"Appelterre-Eichem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"7811",
+"gemeente":"Arbre",
+"dnb":"ORES"
+},
+{
+"postcode":"8850",
+"gemeente":"Ardooie",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2370",
+"gemeente":"Arendonk",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"4601",
+"gemeente":"Argenteau",
+"dnb":"RESA"
+},
+{
+"postcode":"6700",
+"gemeente":"Arlon",
+"dnb":"ORES"
+},
+{
+"postcode":"3665",
+"gemeente":"As",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9404",
+"gemeente":"Aspelare",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9890",
+"gemeente":"Asper",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1730",
+"gemeente":"Asse",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8310",
+"gemeente":"Assebroek",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9960",
+"gemeente":"Assenede",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3460",
+"gemeente":"Assent",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5330",
+"gemeente":"Assesse",
+"dnb":"ORES"
+},
+{
+"postcode":"9800",
+"gemeente":"Astene",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7800",
+"gemeente":"Ath",
+"dnb":"ORES"
+},
+{
+"postcode":"6791",
+"gemeente":"Athus",
+"dnb":"ORES"
+},
+{
+"postcode":"3404",
+"gemeente":"Attenhoven",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3384",
+"gemeente":"Attenrode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6717",
+"gemeente":"Attert",
+"dnb":"ORES"
+},
+{
+"postcode":"7941",
+"gemeente":"Attre",
+"dnb":"ORES"
+},
+{
+"postcode":"6790",
+"gemeente":"Aubange",
+"dnb":"ORES"
+},
+{
+"postcode":"4880",
+"gemeente":"Aubel",
+"dnb":"RESA"
+},
+{
+"postcode":"7382",
+"gemeente":"Audregnies",
+"dnb":"ORES"
+},
+{
+"postcode":"6706",
+"gemeente":"Autelbas",
+"dnb":"ORES"
+},
+{
+"postcode":"8630",
+"gemeente":"Avekapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8580",
+"gemeente":"Avelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3271",
+"gemeente":"Averbode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4340",
+"gemeente":"Awans",
+"dnb":"RESA"
+},
+{
+"postcode":"4070",
+"gemeente":"Aywaille",
+"dnb":"RESA"
+},
+{
+"postcode":"4920",
+"gemeente":"Aywaille",
+"dnb":"RESA"
+},
+{
+"postcode":"9890",
+"gemeente":"Baaigem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3128",
+"gemeente":"Baal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9310",
+"gemeente":"Baardegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2387",
+"gemeente":"Baarle-Hertog (uitgezonderd Zondereigen)",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9200",
+"gemeente":"Baasrode",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9800",
+"gemeente":"Bachte-Maria-Leerne",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4837",
+"gemeente":"Baelen",
+"dnb":"RESA"
+},
+{
+"postcode":"6464",
+"gemeente":"Baileux",
+"dnb":"ORES"
+},
+{
+"postcode":"5377",
+"gemeente":"Baillonville",
+"dnb":"ORES"
+},
+{
+"postcode":"9860",
+"gemeente":"Balegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2490",
+"gemeente":"Balen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9420",
+"gemeente":"Bambrugge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6951",
+"gemeente":"Bande",
+"dnb":"ORES"
+},
+{
+"postcode":"4671",
+"gemeente":"Barchon",
+"dnb":"RESA"
+},
+{
+"postcode":"7534",
+"gemeente":"Barry",
+"dnb":"ORES"
+},
+{
+"postcode":"7784",
+"gemeente":"Bas-Warneton",
+"dnb":"ORES"
+},
+{
+"postcode":"4983",
+"gemeente":"Basse-Bodeux",
+"dnb":"RESA"
+},
+{
+"postcode":"4690",
+"gemeente":"Bassenge",
+"dnb":"RESA"
+},
+{
+"postcode":"9968",
+"gemeente":"Bassevelde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6600",
+"gemeente":"Bastogne",
+"dnb":"ORES"
+},
+{
+"postcode":"7971",
+"gemeente":"Basècles",
+"dnb":"ORES"
+},
+{
+"postcode":"3870",
+"gemeente":"Batsheers",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4651",
+"gemeente":"Battice",
+"dnb":"RESA"
+},
+{
+"postcode":"7331",
+"gemeente":"Baudour",
+"dnb":"ORES"
+},
+{
+"postcode":"1401",
+"gemeente":"Baulers",
+"dnb":"ORES"
+},
+{
+"postcode":"9520",
+"gemeente":"Bavegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8531",
+"gemeente":"Bavikhove",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9150",
+"gemeente":"Bazel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"4052",
+"gemeente":"Beaufays",
+"dnb":"RESA"
+},
+{
+"postcode":"6500",
+"gemeente":"Beaumont",
+"dnb":"ORES"
+},
+{
+"postcode":"5570",
+"gemeente":"Beauraing",
+"dnb":"ORES"
+},
+{
+"postcode":"1320",
+"gemeente":"Beauvechain",
+"dnb":"ORES"
+},
+{
+"postcode":"6594",
+"gemeente":"Beauwelz",
+"dnb":"ORES"
+},
+{
+"postcode":"7532",
+"gemeente":"Beclers",
+"dnb":"ORES"
+},
+{
+"postcode":"3960",
+"gemeente":"Beek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9630",
+"gemeente":"Beerlegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8730",
+"gemeente":"Beernem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2340",
+"gemeente":"Beerse",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1650",
+"gemeente":"Beersel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8600",
+"gemeente":"Beerst",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1673",
+"gemeente":"Beert",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9080",
+"gemeente":"Beervelde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2580",
+"gemeente":"Beerzel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3130",
+"gemeente":"Begijnendijk",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6672",
+"gemeente":"Beho",
+"dnb":"ORES"
+},
+{
+"postcode":"1852",
+"gemeente":"Beigem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8480",
+"gemeente":"Bekegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1730",
+"gemeente":"Bekkerzeel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3460",
+"gemeente":"Bekkevoort",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5001",
+"gemeente":"Belgrade",
+"dnb":"ORES"
+},
+{
+"postcode":"8510",
+"gemeente":"Bellegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9881",
+"gemeente":"Bellem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6834",
+"gemeente":"Bellevaux",
+"dnb":"ORES"
+},
+{
+"postcode":"1674",
+"gemeente":"Bellingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7970",
+"gemeente":"Beloeil",
+"dnb":"ORES"
+},
+{
+"postcode":"9111",
+"gemeente":"Belsele",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3540",
+"gemeente":"Berbroek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2600",
+"gemeente":"Berchem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9690",
+"gemeente":"Berchem (O.-Vl.)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2040",
+"gemeente":"Berendrecht",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3700",
+"gemeente":"Berg (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1910",
+"gemeente":"Berg (Vl.Br.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3580",
+"gemeente":"Beringen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2590",
+"gemeente":"Berlaar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9290",
+"gemeente":"Berlare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3830",
+"gemeente":"Berlingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4257",
+"gemeente":"Berloz",
+"dnb":"ORES"
+},
+{
+"postcode":"7320",
+"gemeente":"Bernissart",
+"dnb":"ORES"
+},
+{
+"postcode":"3060",
+"gemeente":"Bertem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6686",
+"gemeente":"Bertogne",
+"dnb":"ORES"
+},
+{
+"postcode":"6687",
+"gemeente":"Bertogne",
+"dnb":"ORES"
+},
+{
+"postcode":"6880",
+"gemeente":"Bertrix",
+"dnb":"ORES"
+},
+{
+"postcode":"8980",
+"gemeente":"Beselare",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3130",
+"gemeente":"Betekom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2560",
+"gemeente":"Bevel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"1547",
+"gemeente":"Bever/Biévène",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9700",
+"gemeente":"Bevere",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8791",
+"gemeente":"Beveren (Leie)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8800",
+"gemeente":"Beveren (Roeselare)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9120",
+"gemeente":"Beveren (Waas)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8691",
+"gemeente":"Beveren-aan-den-Ijzer",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3581",
+"gemeente":"Beverlo",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3740",
+"gemeente":"Beverst",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4610",
+"gemeente":"Beyne-Heusay",
+"dnb":"RESA"
+},
+{
+"postcode":"6541",
+"gemeente":"Bienne-lez-Happart",
+"dnb":"ORES"
+},
+{
+"postcode":"6543",
+"gemeente":"Bienne-lez-Happart",
+"dnb":"ORES"
+},
+{
+"postcode":"3360",
+"gemeente":"Bierbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6533",
+"gemeente":"Biercée",
+"dnb":"ORES"
+},
+{
+"postcode":"1301",
+"gemeente":"Bierges",
+"dnb":"REW"
+},
+{
+"postcode":"6531",
+"gemeente":"Biesme-sous-Thuin",
+"dnb":"ORES"
+},
+{
+"postcode":"8920",
+"gemeente":"Bikschote",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4831",
+"gemeente":"Bilstain",
+"dnb":"RESA"
+},
+{
+"postcode":"3740",
+"gemeente":"Bilzen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7130",
+"gemeente":"Binche",
+"dnb":"ORES"
+},
+{
+"postcode":"3850",
+"gemeente":"Binderveld",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3211",
+"gemeente":"Binkom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8501",
+"gemeente":"Bissegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5555",
+"gemeente":"Bièvre",
+"dnb":"ORES"
+},
+{
+"postcode":"2830",
+"gemeente":"Blaasveld",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5542",
+"gemeente":"Blaimont",
+"dnb":"ORES"
+},
+{
+"postcode":"7522",
+"gemeente":"Blandain",
+"dnb":"ORES"
+},
+{
+"postcode":"3052",
+"gemeente":"Blanden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8370",
+"gemeente":"Blankenberge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4670",
+"gemeente":"Blégny",
+"dnb":"RESA"
+},
+{
+"postcode":"3950",
+"gemeente":"Bocholt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2530",
+"gemeente":"Boechout",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3890",
+"gemeente":"Boekhout",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9961",
+"gemeente":"Boekhoute",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8904",
+"gemeente":"Boezinge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1670",
+"gemeente":"Bogaarden",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7866",
+"gemeente":"Bois-de-Lessines",
+"dnb":"ORES"
+},
+{
+"postcode":"4653",
+"gemeente":"Bolland",
+"dnb":"RESA"
+},
+{
+"postcode":"3840",
+"gemeente":"Bommershoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7603",
+"gemeente":"Bon-Secours",
+"dnb":"AIEG"
+},
+{
+"postcode":"2820",
+"gemeente":"Bonheiden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5021",
+"gemeente":"Boninne",
+"dnb":"ORES"
+},
+{
+"postcode":"1325",
+"gemeente":"Bonlez",
+"dnb":"ORES"
+},
+{
+"postcode":"2221",
+"gemeente":"Booischot",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8630",
+"gemeente":"Booitshoeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2850",
+"gemeente":"Boom",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3631",
+"gemeente":"Boorsem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3190",
+"gemeente":"Boortmeerbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1761",
+"gemeente":"Borchtlombeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2140",
+"gemeente":"Borgerhout",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3840",
+"gemeente":"Borgloon",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3891",
+"gemeente":"Borlo",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2880",
+"gemeente":"Bornem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1404",
+"gemeente":"Bornival",
+"dnb":"ORES"
+},
+{
+"postcode":"2150",
+"gemeente":"Borsbeek",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9552",
+"gemeente":"Borsbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"5032",
+"gemeente":"Bossière",
+"dnb":"ORES"
+},
+{
+"postcode":"8583",
+"gemeente":"Bossuit",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3300",
+"gemeente":"Bost",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9820",
+"gemeente":"Bottelare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5004",
+"gemeente":"Bouge",
+"dnb":"ORES"
+},
+{
+"postcode":"6830",
+"gemeente":"Bouillon",
+"dnb":"ORES"
+},
+{
+"postcode":"7300",
+"gemeente":"Boussu",
+"dnb":"ORES"
+},
+{
+"postcode":"3370",
+"gemeente":"Boutersem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7803",
+"gemeente":"Bouvignies",
+"dnb":"ORES"
+},
+{
+"postcode":"2288",
+"gemeente":"Bouwel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8680",
+"gemeente":"Bovekerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6671",
+"gemeente":"Bovigny",
+"dnb":"ORES"
+},
+{
+"postcode":"7604",
+"gemeente":"Braffe",
+"dnb":"AIEG"
+},
+{
+"postcode":"1420",
+"gemeente":"Braine-l'Alleud",
+"dnb":"ORES"
+},
+{
+"postcode":"1440",
+"gemeente":"Braine-le-Château",
+"dnb":"ORES"
+},
+{
+"postcode":"7090",
+"gemeente":"Braine-le-Comte",
+"dnb":"ORES"
+},
+{
+"postcode":"4260",
+"gemeente":"Braives",
+"dnb":"ORES"
+},
+{
+"postcode":"9660",
+"gemeente":"Brakel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2930",
+"gemeente":"Brasschaat",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2960",
+"gemeente":"Brecht",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8450",
+"gemeente":"Bredene",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3960",
+"gemeente":"Bree",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2870",
+"gemeente":"Breendonk",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8900",
+"gemeente":"Brielen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2520",
+"gemeente":"Broechem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3840",
+"gemeente":"Broekom",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7940",
+"gemeente":"Brugelette",
+"dnb":"ORES"
+},
+{
+"postcode":"8000",
+"gemeente":"Brugge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7620",
+"gemeente":"Brunehaut",
+"dnb":"ORES"
+},
+{
+"postcode":"1785",
+"gemeente":"Brussegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1000",
+"gemeente":"Brussel",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3800",
+"gemeente":"Brustem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7641",
+"gemeente":"Bruyelle",
+"dnb":"ORES"
+},
+{
+"postcode":"6222",
+"gemeente":"Brye",
+"dnb":"ORES"
+},
+{
+"postcode":"3440",
+"gemeente":"Budingen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9255",
+"gemeente":"Buggenhout",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1501",
+"gemeente":"Buizingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1910",
+"gemeente":"Buken",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8630",
+"gemeente":"Bulskamp",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3380",
+"gemeente":"Bunsbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2070",
+"gemeente":"Burcht",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"4210",
+"gemeente":"Burdinne",
+"dnb":"ORES"
+},
+{
+"postcode":"4790",
+"gemeente":"Burg-Reuland",
+"dnb":"RESA"
+},
+{
+"postcode":"9420",
+"gemeente":"Burst",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"7602",
+"gemeente":"Bury",
+"dnb":"AIEG"
+},
+{
+"postcode":"3891",
+"gemeente":"Buvingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7133",
+"gemeente":"Buvrinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"6743",
+"gemeente":"Buzenol",
+"dnb":"ORES"
+},
+{
+"postcode":"4760",
+"gemeente":"Büllingen",
+"dnb":"RESA"
+},
+{
+"postcode":"4750",
+"gemeente":"Bütgenbach",
+"dnb":"RESA"
+},
+{
+"postcode":"7642",
+"gemeente":"Calonne",
+"dnb":"ORES"
+},
+{
+"postcode":"6853",
+"gemeente":"Carlsbourg",
+"dnb":"ORES"
+},
+{
+"postcode":"7141",
+"gemeente":"Carnières",
+"dnb":"ORES"
+},
+{
+"postcode":"7061",
+"gemeente":"Casteau",
+"dnb":"ORES"
+},
+{
+"postcode":"5561",
+"gemeente":"Celles",
+"dnb":"ORES"
+},
+{
+"postcode":"7760",
+"gemeente":"Celles",
+"dnb":"ORES"
+},
+{
+"postcode":"5630",
+"gemeente":"Cerfontaine",
+"dnb":"ORES"
+},
+{
+"postcode":"5020",
+"gemeente":"Champion",
+"dnb":"ORES"
+},
+{
+"postcode":"6971",
+"gemeente":"Champlon",
+"dnb":"ORES"
+},
+{
+"postcode":"6921",
+"gemeente":"Chanly",
+"dnb":"ORES"
+},
+{
+"postcode":"6742",
+"gemeente":"Chantemelle",
+"dnb":"ORES"
+},
+{
+"postcode":"7160",
+"gemeente":"Chapelle-lez-Herlaimont",
+"dnb":"ORES"
+},
+{
+"postcode":"7903",
+"gemeente":"Chapelle-à-Oie",
+"dnb":"ORES"
+},
+{
+"postcode":"6000",
+"gemeente":"Charleroi",
+"dnb":"ORES"
+},
+{
+"postcode":"4654",
+"gemeente":"Charneux",
+"dnb":"RESA"
+},
+{
+"postcode":"6824",
+"gemeente":"Chassepierre",
+"dnb":"ORES"
+},
+{
+"postcode":"1450",
+"gemeente":"Chastre",
+"dnb":"ORES"
+},
+{
+"postcode":"4050",
+"gemeente":"Chaudfontaine",
+"dnb":"RESA"
+},
+{
+"postcode":"7063",
+"gemeente":"Chaussée-Notre-Dame-Louvignies",
+"dnb":"ORES"
+},
+{
+"postcode":"6673",
+"gemeente":"Cherain",
+"dnb":"ORES"
+},
+{
+"postcode":"4602",
+"gemeente":"Cheratte",
+"dnb":"RESA"
+},
+{
+"postcode":"7521",
+"gemeente":"Chercq",
+"dnb":"AIESH"
+},
+{
+"postcode":"6460",
+"gemeente":"Chimay",
+"dnb":"ORES"
+},
+{
+"postcode":"6810",
+"gemeente":"Chiny",
+"dnb":"ORES"
+},
+{
+"postcode":"7950",
+"gemeente":"Chièvres",
+"dnb":"ORES"
+},
+{
+"postcode":"6200",
+"gemeente":"Châtelet",
+"dnb":"ORES"
+},
+{
+"postcode":"4032",
+"gemeente":"Chênée",
+"dnb":"RESA"
+},
+{
+"postcode":"5590",
+"gemeente":"Ciney",
+"dnb":"ORES"
+},
+{
+"postcode":"7024",
+"gemeente":"Ciply",
+"dnb":"ORES"
+},
+{
+"postcode":"4560",
+"gemeente":"Clavier",
+"dnb":"ORES"
+},
+{
+"postcode":"5022",
+"gemeente":"Cognelée",
+"dnb":"ORES"
+},
+{
+"postcode":"7340",
+"gemeente":"Colfontaine",
+"dnb":"ORES"
+},
+{
+"postcode":"4170",
+"gemeente":"Comblain-au-Pont",
+"dnb":"RESA"
+},
+{
+"postcode":"7780",
+"gemeente":"Comines-Warneton",
+"dnb":"ORES"
+},
+{
+"postcode":"6838",
+"gemeente":"Corbion",
+"dnb":"ORES"
+},
+{
+"postcode":"6010",
+"gemeente":"Couillet",
+"dnb":"ORES"
+},
+{
+"postcode":"6180",
+"gemeente":"Courcelles",
+"dnb":"ORES"
+},
+{
+"postcode":"5336",
+"gemeente":"Courrière",
+"dnb":"ORES"
+},
+{
+"postcode":"1490",
+"gemeente":"Court-Saint-Etienne",
+"dnb":"ORES"
+},
+{
+"postcode":"4218",
+"gemeente":"Couthuin",
+"dnb":"ORES"
+},
+{
+"postcode":"5660",
+"gemeente":"Couvin",
+"dnb":"ORES"
+},
+{
+"postcode":"4367",
+"gemeente":"Crisnée",
+"dnb":"ORES"
+},
+{
+"postcode":"4784",
+"gemeente":"Crombach",
+"dnb":"RESA"
+},
+{
+"postcode":"5332",
+"gemeente":"Crupet",
+"dnb":"ORES"
+},
+{
+"postcode":"7033",
+"gemeente":"Cuesmes",
+"dnb":"ORES"
+},
+{
+"postcode":"5562",
+"gemeente":"Custinne",
+"dnb":"ORES"
+},
+{
+"postcode":"4632",
+"gemeente":"Cérexhe-Heuseux",
+"dnb":"RESA"
+},
+{
+"postcode":"1341",
+"gemeente":"Céroux-Mousty",
+"dnb":"ORES"
+},
+{
+"postcode":"8890",
+"gemeente":"Dadizele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9160",
+"gemeente":"Daknam",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4607",
+"gemeente":"Dalhem",
+"dnb":"RESA"
+},
+{
+"postcode":"8340",
+"gemeente":"Damme",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6020",
+"gemeente":"Dampremy",
+"dnb":"ORES"
+},
+{
+"postcode":"4253",
+"gemeente":"Darion",
+"dnb":"RESA"
+},
+{
+"postcode":"6929",
+"gemeente":"Daverdisse",
+"dnb":"ORES"
+},
+{
+"postcode":"9170",
+"gemeente":"De Klinge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8630",
+"gemeente":"De Moeren",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8660",
+"gemeente":"De Panne",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9840",
+"gemeente":"De Pinte",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8540",
+"gemeente":"Deerlijk",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9570",
+"gemeente":"Deftinge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9800",
+"gemeente":"Deinze",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9280",
+"gemeente":"Denderbelle",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9450",
+"gemeente":"Denderhoutem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9470",
+"gemeente":"Denderleeuw",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9200",
+"gemeente":"Dendermonde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9400",
+"gemeente":"Denderwindeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8720",
+"gemeente":"Dentergem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2480",
+"gemeente":"Dessel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8792",
+"gemeente":"Desselgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9070",
+"gemeente":"Destelbergen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9042",
+"gemeente":"Desteldonk",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9831",
+"gemeente":"Deurle",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2100",
+"gemeente":"Deurne (Antwerpen)",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3290",
+"gemeente":"Deurne (Vl.Br.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7864",
+"gemeente":"Deux-Acren",
+"dnb":"ORES"
+},
+{
+"postcode":"1831",
+"gemeente":"Diegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3590",
+"gemeente":"Diepenbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3290",
+"gemeente":"Diest",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3700",
+"gemeente":"Diets-Heur",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8900",
+"gemeente":"Dikkebus",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Dikkele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9890",
+"gemeente":"Dikkelvenne",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8600",
+"gemeente":"Diksmuide",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1700",
+"gemeente":"Dilbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3650",
+"gemeente":"Dilsen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5500",
+"gemeente":"Dinant",
+"dnb":"ORES"
+},
+{
+"postcode":"4820",
+"gemeente":"Dison",
+"dnb":"RESA"
+},
+{
+"postcode":"9130",
+"gemeente":"Doel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6836",
+"gemeente":"Dohan",
+"dnb":"ORES"
+},
+{
+"postcode":"5680",
+"gemeente":"Doische",
+"dnb":"ORES"
+},
+{
+"postcode":"4357",
+"gemeente":"Donceel",
+"dnb":"ORES"
+},
+{
+"postcode":"3540",
+"gemeente":"Donk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3440",
+"gemeente":"Dormaal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7711",
+"gemeente":"Dottignies",
+"dnb":"ORES"
+},
+{
+"postcode":"7370",
+"gemeente":"Dour",
+"dnb":"ORES"
+},
+{
+"postcode":"8951",
+"gemeente":"Dranouter",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3350",
+"gemeente":"Drieslinter",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1620",
+"gemeente":"Drogenbos",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9031",
+"gemeente":"Drongen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8380",
+"gemeente":"Dudzele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2570",
+"gemeente":"Duffel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3080",
+"gemeente":"Duisburg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3803",
+"gemeente":"Duras",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6940",
+"gemeente":"Durbuy",
+"dnb":"ORES"
+},
+{
+"postcode":"1653",
+"gemeente":"Dworp",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7190",
+"gemeente":"Ecaussinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"7191",
+"gemeente":"Ecaussinnes-Lalaing",
+"dnb":"ORES"
+},
+{
+"postcode":"2650",
+"gemeente":"Edegem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9700",
+"gemeente":"Edelare",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9900",
+"gemeente":"Eeklo",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8480",
+"gemeente":"Eernegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8740",
+"gemeente":"Egem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8630",
+"gemeente":"Eggewaartskapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5310",
+"gemeente":"Eghezée",
+"dnb":"ORES"
+},
+{
+"postcode":"3740",
+"gemeente":"Eigenbilzen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2430",
+"gemeente":"Eindhout",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9700",
+"gemeente":"Eine",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3630",
+"gemeente":"Eisden",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9810",
+"gemeente":"Eke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2180",
+"gemeente":"Ekeren",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9160",
+"gemeente":"Eksaarde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3941",
+"gemeente":"Eksel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3650",
+"gemeente":"Elen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9620",
+"gemeente":"Elene",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1982",
+"gemeente":"Elewijt",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3400",
+"gemeente":"Eliksem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1671",
+"gemeente":"Elingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7890",
+"gemeente":"Ellezelles",
+"dnb":"ORES"
+},
+{
+"postcode":"3670",
+"gemeente":"Ellikom",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9790",
+"gemeente":"Elsegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1050",
+"gemeente":"Elsene",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9660",
+"gemeente":"Elst",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8906",
+"gemeente":"Elverdinge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9140",
+"gemeente":"Elversele",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2520",
+"gemeente":"Emblem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"4053",
+"gemeente":"Embourg",
+"dnb":"RESA"
+},
+{
+"postcode":"8870",
+"gemeente":"Emelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5363",
+"gemeente":"Emptinne",
+"dnb":"ORES"
+},
+{
+"postcode":"9700",
+"gemeente":"Ename",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3800",
+"gemeente":"Engelmanshoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7850",
+"gemeente":"Enghien",
+"dnb":"ORES"
+},
+{
+"postcode":"4480",
+"gemeente":"Engis",
+"dnb":"RESA"
+},
+{
+"postcode":"1980",
+"gemeente":"Eppegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9320",
+"gemeente":"Erembodegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6997",
+"gemeente":"Erezée",
+"dnb":"ORES"
+},
+{
+"postcode":"5644",
+"gemeente":"Ermeton-sur-Biert",
+"dnb":"ORES"
+},
+{
+"postcode":"6972",
+"gemeente":"Erneuville",
+"dnb":"ORES"
+},
+{
+"postcode":"9420",
+"gemeente":"Erondegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9420",
+"gemeente":"Erpe",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6441",
+"gemeente":"Erpion",
+"dnb":"ORES"
+},
+{
+"postcode":"3071",
+"gemeente":"Erps-Kwerps",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6560",
+"gemeente":"Erquelinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"9940",
+"gemeente":"Ertvelde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9620",
+"gemeente":"Erwetegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8600",
+"gemeente":"Esen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4080",
+"gemeente":"Esneux",
+"dnb":"RESA"
+},
+{
+"postcode":"4130",
+"gemeente":"Esneux",
+"dnb":"RESA"
+},
+{
+"postcode":"7502",
+"gemeente":"Esplechin",
+"dnb":"ORES"
+},
+{
+"postcode":"2910",
+"gemeente":"Essen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1790",
+"gemeente":"Essene",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7730",
+"gemeente":"Estaimpuis",
+"dnb":"ORES"
+},
+{
+"postcode":"7120",
+"gemeente":"Estinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"6740",
+"gemeente":"Etalle",
+"dnb":"ORES"
+},
+{
+"postcode":"9680",
+"gemeente":"Etikhove",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8460",
+"gemeente":"Ettelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1040",
+"gemeente":"Etterbeek",
+"dnb":"Sibelga"
+},
+{
+"postcode":"4700",
+"gemeente":"Eupen",
+"dnb":"RESA"
+},
+{
+"postcode":"4631",
+"gemeente":"Evegnée",
+"dnb":"RESA"
+},
+{
+"postcode":"9660",
+"gemeente":"Everbeek",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3078",
+"gemeente":"Everberg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1140",
+"gemeente":"Evere",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9940",
+"gemeente":"Evergem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4731",
+"gemeente":"Eynatten",
+"dnb":"RESA"
+},
+{
+"postcode":"3400",
+"gemeente":"Ezemaal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4317",
+"gemeente":"Faimes",
+"dnb":"ORES"
+},
+{
+"postcode":"5522",
+"gemeente":"Falaën",
+"dnb":"ORES"
+},
+{
+"postcode":"6240",
+"gemeente":"Farciennes",
+"dnb":"ORES"
+},
+{
+"postcode":"6637",
+"gemeente":"Fauvillers",
+"dnb":"ORES"
+},
+{
+"postcode":"6856",
+"gemeente":"Fays-les-Veneurs",
+"dnb":"ORES"
+},
+{
+"postcode":"7181",
+"gemeente":"Feluy",
+"dnb":"ORES"
+},
+{
+"postcode":"5380",
+"gemeente":"Fernelmont",
+"dnb":"ORES"
+},
+{
+"postcode":"4190",
+"gemeente":"Ferrières",
+"dnb":"RESA"
+},
+{
+"postcode":"4458",
+"gemeente":"Fexhe-Slins",
+"dnb":"RESA"
+},
+{
+"postcode":"4347",
+"gemeente":"Fexhe-le-Haut-Clocher",
+"dnb":"RESA"
+},
+{
+"postcode":"4181",
+"gemeente":"Filot",
+"dnb":"RESA"
+},
+{
+"postcode":"6220",
+"gemeente":"Fleurus",
+"dnb":"ORES"
+},
+{
+"postcode":"7880",
+"gemeente":"Flobecq",
+"dnb":"ORES"
+},
+{
+"postcode":"5150",
+"gemeente":"Floreffe",
+"dnb":"ORES"
+},
+{
+"postcode":"5620",
+"gemeente":"Florennes",
+"dnb":"ORES"
+},
+{
+"postcode":"6820",
+"gemeente":"Florenville",
+"dnb":"ORES"
+},
+{
+"postcode":"5334",
+"gemeente":"Florée",
+"dnb":"ORES"
+},
+{
+"postcode":"4400",
+"gemeente":"Flémalle",
+"dnb":"RESA"
+},
+{
+"postcode":"4060",
+"gemeente":"Fléron",
+"dnb":"RESA"
+},
+{
+"postcode":"4620",
+"gemeente":"Fléron",
+"dnb":"RESA"
+},
+{
+"postcode":"6140",
+"gemeente":"Fontaine-l'Evêque",
+"dnb":"ORES"
+},
+{
+"postcode":"7643",
+"gemeente":"Fontenoy",
+"dnb":"ORES"
+},
+{
+"postcode":"6141",
+"gemeente":"Forchies-la-Marche",
+"dnb":"ORES"
+},
+{
+"postcode":"5070",
+"gemeente":"Fosses-la-Ville",
+"dnb":"ORES"
+},
+{
+"postcode":"5504",
+"gemeente":"Foy-Notre-Dame",
+"dnb":"ORES"
+},
+{
+"postcode":"7080",
+"gemeente":"Frameries",
+"dnb":"ORES"
+},
+{
+"postcode":"7910",
+"gemeente":"Frasnes-lez-Anvaing",
+"dnb":"ORES"
+},
+{
+"postcode":"7911",
+"gemeente":"Frasnes-lez-Buissenal",
+"dnb":"ORES"
+},
+{
+"postcode":"6440",
+"gemeente":"Froidchapelle",
+"dnb":"ORES"
+},
+{
+"postcode":"5576",
+"gemeente":"Froidfontaine",
+"dnb":"ORES"
+},
+{
+"postcode":"7504",
+"gemeente":"Froidmont",
+"dnb":"ORES"
+},
+{
+"postcode":"7503",
+"gemeente":"Froyennes",
+"dnb":"AIESH"
+},
+{
+"postcode":"5641",
+"gemeente":"Furnaux",
+"dnb":"ORES"
+},
+{
+"postcode":"1750",
+"gemeente":"Gaasbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7943",
+"gemeente":"Gages",
+"dnb":"ORES"
+},
+{
+"postcode":"7906",
+"gemeente":"Gallaix",
+"dnb":"ORES"
+},
+{
+"postcode":"1570",
+"gemeente":"Galmaarden",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1083",
+"gemeente":"Ganshoren",
+"dnb":"Sibelga"
+},
+{
+"postcode":"7530",
+"gemeente":"Gaurain-Ramecroix",
+"dnb":"ORES"
+},
+{
+"postcode":"9890",
+"gemeente":"Gavere",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5575",
+"gemeente":"Gedinne",
+"dnb":"ORES"
+},
+{
+"postcode":"2440",
+"gemeente":"Geel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"4250",
+"gemeente":"Geer",
+"dnb":"ORES"
+},
+{
+"postcode":"3450",
+"gemeente":"Geetbets",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3800",
+"gemeente":"Gelinden",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3620",
+"gemeente":"Gellik",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3200",
+"gemeente":"Gelrode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8980",
+"gemeente":"Geluveld",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8940",
+"gemeente":"Geluwe",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5030",
+"gemeente":"Gembloux",
+"dnb":"ORES"
+},
+{
+"postcode":"4851",
+"gemeente":"Gemmenich",
+"dnb":"RESA"
+},
+{
+"postcode":"1470",
+"gemeente":"Genappe",
+"dnb":"ORES"
+},
+{
+"postcode":"3600",
+"gemeente":"Genk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3770",
+"gemeente":"Genoelselderen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9000",
+"gemeente":"Gent",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9050",
+"gemeente":"Gentbrugge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1332",
+"gemeente":"Genval",
+"dnb":"ORES"
+},
+{
+"postcode":"9500",
+"gemeente":"Geraardsbergen",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3960",
+"gemeente":"Gerdingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5524",
+"gemeente":"Gerin",
+"dnb":"ORES"
+},
+{
+"postcode":"6280",
+"gemeente":"Gerpinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"5340",
+"gemeente":"Gesves",
+"dnb":"AIEG"
+},
+{
+"postcode":"7822",
+"gemeente":"Ghislenghien",
+"dnb":"ORES"
+},
+{
+"postcode":"7011",
+"gemeente":"Ghlin",
+"dnb":"ORES"
+},
+{
+"postcode":"7863",
+"gemeente":"Ghoy",
+"dnb":"ORES"
+},
+{
+"postcode":"7823",
+"gemeente":"Gibecq",
+"dnb":"ORES"
+},
+{
+"postcode":"2275",
+"gemeente":"Gierle",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8691",
+"gemeente":"Gijverinkhove",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9308",
+"gemeente":"Gijzegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8570",
+"gemeente":"Gijzelbrechtegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9860",
+"gemeente":"Gijzenzele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6060",
+"gemeente":"Gilly",
+"dnb":"ORES"
+},
+{
+"postcode":"3890",
+"gemeente":"Gingelom",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8470",
+"gemeente":"Gistel",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8830",
+"gemeente":"Gits",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7041",
+"gemeente":"Givry",
+"dnb":"ORES"
+},
+{
+"postcode":"1473",
+"gemeente":"Glabais",
+"dnb":"ORES"
+},
+{
+"postcode":"3380",
+"gemeente":"Glabbeek-Zuurbemde",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1315",
+"gemeente":"Glimes",
+"dnb":"ORES"
+},
+{
+"postcode":"9620",
+"gemeente":"Godveerdegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9500",
+"gemeente":"Goeferdinge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"5353",
+"gemeente":"Goesnes",
+"dnb":"AIEG"
+},
+{
+"postcode":"3300",
+"gemeente":"Goetsenhoven",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9090",
+"gemeente":"Gontrode",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1755",
+"gemeente":"Gooik",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3840",
+"gemeente":"Gors-Opleeuw",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3803",
+"gemeente":"Gorsem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6041",
+"gemeente":"Gosselies",
+"dnb":"ORES"
+},
+{
+"postcode":"3840",
+"gemeente":"Gotem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9800",
+"gemeente":"Gottem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6670",
+"gemeente":"Gouvy",
+"dnb":"ORES"
+},
+{
+"postcode":"6181",
+"gemeente":"Gouy-lez-Piéton",
+"dnb":"ORES"
+},
+{
+"postcode":"6534",
+"gemeente":"Gozée",
+"dnb":"ORES"
+},
+{
+"postcode":"4834",
+"gemeente":"Goé",
+"dnb":"RESA"
+},
+{
+"postcode":"9800",
+"gemeente":"Grammene",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6698",
+"gemeente":"Grand-Halleux",
+"dnb":"ORES"
+},
+{
+"postcode":"5031",
+"gemeente":"Grand-Manil",
+"dnb":"ORES"
+},
+{
+"postcode":"7973",
+"gemeente":"Grandglise",
+"dnb":"ORES"
+},
+{
+"postcode":"3450",
+"gemeente":"Grazen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9200",
+"gemeente":"Grembergen",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1390",
+"gemeente":"Grez-Doiceau",
+"dnb":"ORES"
+},
+{
+"postcode":"1850",
+"gemeente":"Grimbergen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9506",
+"gemeente":"Grimminge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"4030",
+"gemeente":"Grivegnée",
+"dnb":"RESA"
+},
+{
+"postcode":"2280",
+"gemeente":"Grobbendonk",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"1702",
+"gemeente":"Groot-Bijgaarden",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3800",
+"gemeente":"Groot-Gelmen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3840",
+"gemeente":"Groot-Loon",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3990",
+"gemeente":"Grote-Brogel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3740",
+"gemeente":"Grote-Spouwen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9620",
+"gemeente":"Grotenberge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3670",
+"gemeente":"Gruitrode",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6952",
+"gemeente":"Grune",
+"dnb":"ORES"
+},
+{
+"postcode":"4460",
+"gemeente":"Grâce-Hollogne",
+"dnb":"RESA"
+},
+{
+"postcode":"3723",
+"gemeente":"Guigoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6704",
+"gemeente":"Guirsch",
+"dnb":"ORES"
+},
+{
+"postcode":"8560",
+"gemeente":"Gullegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3870",
+"gemeente":"Gutschoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3150",
+"gemeente":"Haacht",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9450",
+"gemeente":"Haaltert",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9120",
+"gemeente":"Haasdonk",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3053",
+"gemeente":"Haasrode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6720",
+"gemeente":"Habay",
+"dnb":"ORES"
+},
+{
+"postcode":"6723",
+"gemeente":"Habay-la-Vieille",
+"dnb":"ORES"
+},
+{
+"postcode":"6782",
+"gemeente":"Habergy",
+"dnb":"ORES"
+},
+{
+"postcode":"4684",
+"gemeente":"Haccourt",
+"dnb":"RESA"
+},
+{
+"postcode":"5351",
+"gemeente":"Haillot",
+"dnb":"AIEG"
+},
+{
+"postcode":"3300",
+"gemeente":"Hakendover",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6792",
+"gemeente":"Halanzy",
+"dnb":"ORES"
+},
+{
+"postcode":"3545",
+"gemeente":"Halen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2220",
+"gemeente":"Hallaar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1500",
+"gemeente":"Halle",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2980",
+"gemeente":"Halle (Kempen)",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3440",
+"gemeente":"Halle-Booienhoven",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6986",
+"gemeente":"Halleux",
+"dnb":"ORES"
+},
+{
+"postcode":"6922",
+"gemeente":"Halma",
+"dnb":"ORES"
+},
+{
+"postcode":"3800",
+"gemeente":"Halmaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6120",
+"gemeente":"Ham-sur-Heure-Nalinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"9220",
+"gemeente":"Hamme (O.-Vl.)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1785",
+"gemeente":"Hamme (Vl.Br.)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4180",
+"gemeente":"Hamoir",
+"dnb":"RESA"
+},
+{
+"postcode":"5360",
+"gemeente":"Hamois",
+"dnb":"ORES"
+},
+{
+"postcode":"3930",
+"gemeente":"Hamont",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8610",
+"gemeente":"Handzame",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4280",
+"gemeente":"Hannut",
+"dnb":"ORES"
+},
+{
+"postcode":"9850",
+"gemeente":"Hansbeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5621",
+"gemeente":"Hanzinne",
+"dnb":"ORES"
+},
+{
+"postcode":"7321",
+"gemeente":"Harchies",
+"dnb":"ORES"
+},
+{
+"postcode":"8530",
+"gemeente":"Harelbeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1130",
+"gemeente":"Haren",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3700",
+"gemeente":"Haren (Tongeren)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3500",
+"gemeente":"Hasselt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5540",
+"gemeente":"Hastière",
+"dnb":"ORES"
+},
+{
+"postcode":"5541",
+"gemeente":"Hastière-par-delà",
+"dnb":"ORES"
+},
+{
+"postcode":"1461",
+"gemeente":"Haut-Ittre",
+"dnb":"ORES"
+},
+{
+"postcode":"7334",
+"gemeente":"Hautrage",
+"dnb":"ORES"
+},
+{
+"postcode":"5370",
+"gemeente":"Havelange",
+"dnb":"ORES"
+},
+{
+"postcode":"2020",
+"gemeente":"Havengebied Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2030",
+"gemeente":"Havengebied Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2040",
+"gemeente":"Havengebied Antwerpen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"7531",
+"gemeente":"Havinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"7021",
+"gemeente":"Havré",
+"dnb":"ORES"
+},
+{
+"postcode":"3940",
+"gemeente":"Hechtel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5543",
+"gemeente":"Heer",
+"dnb":"ORES"
+},
+{
+"postcode":"3870",
+"gemeente":"Heers",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3740",
+"gemeente":"Hees",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8551",
+"gemeente":"Heestert",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2801",
+"gemeente":"Heffen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1670",
+"gemeente":"Heikruis",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2830",
+"gemeente":"Heindonk",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8301",
+"gemeente":"Heist",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2220",
+"gemeente":"Heist-op-den-Berg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1790",
+"gemeente":"Hekelgem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3870",
+"gemeente":"Heks",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3530",
+"gemeente":"Helchteren",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9450",
+"gemeente":"Heldergem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3440",
+"gemeente":"Helen-Bos",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8587",
+"gemeente":"Helkijn/Helchin",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9571",
+"gemeente":"Hemelveerdegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2620",
+"gemeente":"Hemiksem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3840",
+"gemeente":"Hendrieken",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3700",
+"gemeente":"Henis",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4841",
+"gemeente":"Henri-Chapelle",
+"dnb":"RESA"
+},
+{
+"postcode":"7350",
+"gemeente":"Hensies",
+"dnb":"ORES"
+},
+{
+"postcode":"3971",
+"gemeente":"Heppen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4771",
+"gemeente":"Heppenbach",
+"dnb":"RESA"
+},
+{
+"postcode":"6887",
+"gemeente":"Herbeumont",
+"dnb":"ORES"
+},
+{
+"postcode":"3770",
+"gemeente":"Herderen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9310",
+"gemeente":"Herdersem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3020",
+"gemeente":"Herent",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2200",
+"gemeente":"Herentals",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2270",
+"gemeente":"Herenthout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1540",
+"gemeente":"Herfelingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4728",
+"gemeente":"Hergenrath",
+"dnb":"RESA"
+},
+{
+"postcode":"3540",
+"gemeente":"Herk-de-Stad",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4681",
+"gemeente":"Hermalle-sous-Argenteau",
+"dnb":"RESA"
+},
+{
+"postcode":"1540",
+"gemeente":"Herne",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7712",
+"gemeente":"Herseaux",
+"dnb":"ORES"
+},
+{
+"postcode":"2230",
+"gemeente":"Herselt",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4040",
+"gemeente":"Herstal",
+"dnb":"RESA"
+},
+{
+"postcode":"3717",
+"gemeente":"Herstappe",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3831",
+"gemeente":"Herten",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8020",
+"gemeente":"Hertsberge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4650",
+"gemeente":"Herve",
+"dnb":"RESA"
+},
+{
+"postcode":"9550",
+"gemeente":"Herzele",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8501",
+"gemeente":"Heule",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4682",
+"gemeente":"Heure-le-Romain",
+"dnb":"RESA"
+},
+{
+"postcode":"9700",
+"gemeente":"Heurne",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3550",
+"gemeente":"Heusden (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9070",
+"gemeente":"Heusden (O.Vl.)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4802",
+"gemeente":"Heusy",
+"dnb":"RESA"
+},
+{
+"postcode":"3191",
+"gemeente":"Hever",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3001",
+"gemeente":"Heverlee",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9550",
+"gemeente":"Hillegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2880",
+"gemeente":"Hingene",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6984",
+"gemeente":"Hives",
+"dnb":"ORES"
+},
+{
+"postcode":"2660",
+"gemeente":"Hoboken",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"4351",
+"gemeente":"Hodeige",
+"dnb":"ORES"
+},
+{
+"postcode":"4162",
+"gemeente":"Hody",
+"dnb":"RESA"
+},
+{
+"postcode":"3320",
+"gemeente":"Hoegaarden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1560",
+"gemeente":"Hoeilaart",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8340",
+"gemeente":"Hoeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3746",
+"gemeente":"Hoelbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3471",
+"gemeente":"Hoeleden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3840",
+"gemeente":"Hoepertingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3730",
+"gemeente":"Hoeselt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2940",
+"gemeente":"Hoevenen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9308",
+"gemeente":"Hofstade (O.-Vl.)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1981",
+"gemeente":"Hofstade (Vl.Br.)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4342",
+"gemeente":"Hognoul",
+"dnb":"RESA"
+},
+{
+"postcode":"8902",
+"gemeente":"Hollebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3220",
+"gemeente":"Holsbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2811",
+"gemeente":"Hombeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4852",
+"gemeente":"Hombourg",
+"dnb":"RESA"
+},
+{
+"postcode":"2950",
+"gemeente":"Hoogboom",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8830",
+"gemeente":"Hooglede",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8690",
+"gemeente":"Hoogstade",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2320",
+"gemeente":"Hoogstraten",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"7301",
+"gemeente":"Hornu",
+"dnb":"ORES"
+},
+{
+"postcode":"3870",
+"gemeente":"Horpmaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6990",
+"gemeente":"Hotton",
+"dnb":"ORES"
+},
+{
+"postcode":"7110",
+"gemeente":"Houdeng-Aimeries",
+"dnb":"ORES"
+},
+{
+"postcode":"6660",
+"gemeente":"Houffalize",
+"dnb":"ORES"
+},
+{
+"postcode":"5563",
+"gemeente":"Hour",
+"dnb":"ORES"
+},
+{
+"postcode":"1476",
+"gemeente":"Houtain-le-Val",
+"dnb":"ORES"
+},
+{
+"postcode":"7812",
+"gemeente":"Houtaing",
+"dnb":"ORES"
+},
+{
+"postcode":"8377",
+"gemeente":"Houtave",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8630",
+"gemeente":"Houtem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3530",
+"gemeente":"Houthalen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3530",
+"gemeente":"Houthalen-Oost",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7781",
+"gemeente":"Houthem",
+"dnb":"ORES"
+},
+{
+"postcode":"8650",
+"gemeente":"Houthulst",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2235",
+"gemeente":"Houtvenne",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3390",
+"gemeente":"Houwaart",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5560",
+"gemeente":"Houyet",
+"dnb":"ORES"
+},
+{
+"postcode":"2540",
+"gemeente":"Hove",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"7624",
+"gemeente":"Howardries",
+"dnb":"ORES"
+},
+{
+"postcode":"9750",
+"gemeente":"Huise",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1654",
+"gemeente":"Huizingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3040",
+"gemeente":"Huldenberg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2235",
+"gemeente":"Hulshout",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8531",
+"gemeente":"Hulste",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1851",
+"gemeente":"Humbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9630",
+"gemeente":"Hundelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4500",
+"gemeente":"Huy",
+"dnb":"ORES"
+},
+{
+"postcode":"7022",
+"gemeente":"Hyon",
+"dnb":"ORES"
+},
+{
+"postcode":"1357",
+"gemeente":"Hélécine",
+"dnb":"ORES"
+},
+{
+"postcode":"7742",
+"gemeente":"Hérinnes-lez-Pecq",
+"dnb":"ORES"
+},
+{
+"postcode":"4217",
+"gemeente":"Héron",
+"dnb":"ORES"
+},
+{
+"postcode":"8480",
+"gemeente":"Ichtegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9472",
+"gemeente":"Iddergem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9506",
+"gemeente":"Idegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8900",
+"gemeente":"Ieper",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9340",
+"gemeente":"Impe",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8770",
+"gemeente":"Ingelmunster",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8570",
+"gemeente":"Ingooigem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7801",
+"gemeente":"Irchonwelz",
+"dnb":"ORES"
+},
+{
+"postcode":"2222",
+"gemeente":"Itegem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1701",
+"gemeente":"Itterbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1460",
+"gemeente":"Ittre",
+"dnb":"ORES"
+},
+{
+"postcode":"8870",
+"gemeente":"Izegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8691",
+"gemeente":"Izenberge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8490",
+"gemeente":"Jabbeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"4845",
+"gemeente":"Jalhay",
+"dnb":"RESA"
+},
+{
+"postcode":"5354",
+"gemeente":"Jallet",
+"dnb":"AIEG"
+},
+{
+"postcode":"5100",
+"gemeente":"Jambes",
+"dnb":"ORES"
+},
+{
+"postcode":"7012",
+"gemeente":"Jemappes",
+"dnb":"ORES"
+},
+{
+"postcode":"4101",
+"gemeente":"Jemeppe-sur-Meuse",
+"dnb":"RESA"
+},
+{
+"postcode":"5190",
+"gemeente":"Jemeppe-sur-Sambre",
+"dnb":"ORES"
+},
+{
+"postcode":"3840",
+"gemeente":"Jesseren (Kolmont)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1090",
+"gemeente":"Jette",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3890",
+"gemeente":"Jeuk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1370",
+"gemeente":"Jodoigne",
+"dnb":"ORES"
+},
+{
+"postcode":"6040",
+"gemeente":"Jumet",
+"dnb":"ORES"
+},
+{
+"postcode":"4450",
+"gemeente":"Juprelle",
+"dnb":"RESA"
+},
+{
+"postcode":"7050",
+"gemeente":"Jurbise",
+"dnb":"ORES"
+},
+{
+"postcode":"6642",
+"gemeente":"Juseret",
+"dnb":"ORES"
+},
+{
+"postcode":"8600",
+"gemeente":"Kaaskerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8870",
+"gemeente":"Kachtem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3293",
+"gemeente":"Kaggevinne",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7540",
+"gemeente":"Kain",
+"dnb":"ORES"
+},
+{
+"postcode":"9270",
+"gemeente":"Kalken",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9120",
+"gemeente":"Kallo (Beveren-Waas)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9130",
+"gemeente":"Kallo (Kieldrecht)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2920",
+"gemeente":"Kalmthout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1910",
+"gemeente":"Kampenhout",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8700",
+"gemeente":"Kanegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3770",
+"gemeente":"Kanne",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1880",
+"gemeente":"Kapelle-op-den-Bos",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2950",
+"gemeente":"Kapellen (Antw.)",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3381",
+"gemeente":"Kapellen (Vl.Br.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9970",
+"gemeente":"Kaprijke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8572",
+"gemeente":"Kaster",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2460",
+"gemeente":"Kasterlee",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3950",
+"gemeente":"Kaulille",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3140",
+"gemeente":"Keerbergen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8600",
+"gemeente":"Keiem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8956",
+"gemeente":"Kemmel",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9190",
+"gemeente":"Kemzeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8581",
+"gemeente":"Kerkhove",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3370",
+"gemeente":"Kerkom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3800",
+"gemeente":"Kerkom-bij-Sint-Truiden",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9451",
+"gemeente":"Kerksken",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3510",
+"gemeente":"Kermt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3840",
+"gemeente":"Kerniel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3472",
+"gemeente":"Kersbeek-Miskom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2560",
+"gemeente":"Kessel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3010",
+"gemeente":"Kessel-Lo",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3640",
+"gemeente":"Kessenich",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1755",
+"gemeente":"Kester",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4701",
+"gemeente":"Kettenis",
+"dnb":"RESA"
+},
+{
+"postcode":"9130",
+"gemeente":"Kieldrecht",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3640",
+"gemeente":"Kinrooi",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3870",
+"gemeente":"Klein-Gelmen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3990",
+"gemeente":"Kleine-Brogel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3740",
+"gemeente":"Kleine-Spouwen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8420",
+"gemeente":"Klemskerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8650",
+"gemeente":"Klerken",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9940",
+"gemeente":"Kluizen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9910",
+"gemeente":"Knesselare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8300",
+"gemeente":"Knokke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1730",
+"gemeente":"Kobbegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8680",
+"gemeente":"Koekelare",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1081",
+"gemeente":"Koekelberg",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3582",
+"gemeente":"Koersel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8670",
+"gemeente":"Koksijde",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2500",
+"gemeente":"Koningshooikt",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3700",
+"gemeente":"Koninksem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2550",
+"gemeente":"Kontich",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8510",
+"gemeente":"Kooigem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8000",
+"gemeente":"Koolkerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8851",
+"gemeente":"Koolskamp",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3060",
+"gemeente":"Korbeek-Dijle",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3360",
+"gemeente":"Korbeek-Lo",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8610",
+"gemeente":"Kortemark",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3470",
+"gemeente":"Kortenaken",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3070",
+"gemeente":"Kortenberg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3720",
+"gemeente":"Kortessem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3890",
+"gemeente":"Kortijs",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8500",
+"gemeente":"Kortrijk",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3220",
+"gemeente":"Kortrijk-Dutsel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3850",
+"gemeente":"Kozen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1950",
+"gemeente":"Kraainem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8972",
+"gemeente":"Krombeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9150",
+"gemeente":"Kruibeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9770",
+"gemeente":"Kruishoutem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3300",
+"gemeente":"Kumtich",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3511",
+"gemeente":"Kuringen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3840",
+"gemeente":"Kuttekoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8520",
+"gemeente":"Kuurne",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3945",
+"gemeente":"Kwaadmechelen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9690",
+"gemeente":"Kwaremont",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5080",
+"gemeente":"La Bruyère",
+"dnb":"ORES"
+},
+{
+"postcode":"4720",
+"gemeente":"La Calamine",
+"dnb":"RESA"
+},
+{
+"postcode":"7611",
+"gemeente":"La Glanerie",
+"dnb":"AIEG"
+},
+{
+"postcode":"1310",
+"gemeente":"La Hulpe",
+"dnb":"ORES"
+},
+{
+"postcode":"7100",
+"gemeente":"La Louvière",
+"dnb":"ORES"
+},
+{
+"postcode":"6980",
+"gemeente":"La Roche-en-Ardenne",
+"dnb":"ORES"
+},
+{
+"postcode":"3400",
+"gemeente":"Laar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9270",
+"gemeente":"Laarne",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6821",
+"gemeente":"Lacuisine",
+"dnb":"ORES"
+},
+{
+"postcode":"1020",
+"gemeente":"Laken",
+"dnb":"Sibelga"
+},
+{
+"postcode":"8600",
+"gemeente":"Lampernisse",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3620",
+"gemeente":"Lanaken",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9850",
+"gemeente":"Landegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6111",
+"gemeente":"Landelies",
+"dnb":"ORES"
+},
+{
+"postcode":"3400",
+"gemeente":"Landen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9860",
+"gemeente":"Landskouter",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3201",
+"gemeente":"Langdorp",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8920",
+"gemeente":"Langemark",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3650",
+"gemeente":"Lanklaar",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7622",
+"gemeente":"Laplaigne",
+"dnb":"ORES"
+},
+{
+"postcode":"8340",
+"gemeente":"Lapscheure",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1380",
+"gemeente":"Lasne",
+"dnb":"ORES"
+},
+{
+"postcode":"4261",
+"gemeente":"Latinne",
+"dnb":"ORES"
+},
+{
+"postcode":"6761",
+"gemeente":"Latour",
+"dnb":"ORES"
+},
+{
+"postcode":"3700",
+"gemeente":"Lauw",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8930",
+"gemeente":"Lauwe",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6681",
+"gemeente":"Lavacherie",
+"dnb":"ORES"
+},
+{
+"postcode":"7783",
+"gemeente":"Le Bizet",
+"dnb":"ORES"
+},
+{
+"postcode":"7070",
+"gemeente":"Le Roeulx",
+"dnb":"ORES"
+},
+{
+"postcode":"9280",
+"gemeente":"Lebbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9340",
+"gemeente":"Lede",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9050",
+"gemeente":"Ledeberg",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8880",
+"gemeente":"Ledegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3061",
+"gemeente":"Leefdaal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1755",
+"gemeente":"Leerbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6142",
+"gemeente":"Leernes",
+"dnb":"ORES"
+},
+{
+"postcode":"2811",
+"gemeente":"Leest",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9620",
+"gemeente":"Leeuwergem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8432",
+"gemeente":"Leffinge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8691",
+"gemeente":"Leisele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8600",
+"gemeente":"Leke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1502",
+"gemeente":"Lembeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9971",
+"gemeente":"Lembeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9820",
+"gemeente":"Lemberge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8860",
+"gemeente":"Lendelede",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7870",
+"gemeente":"Lens",
+"dnb":"ORES"
+},
+{
+"postcode":"3970",
+"gemeente":"Leopoldsburg",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6210",
+"gemeente":"Les Bons Villers",
+"dnb":"ORES"
+},
+{
+"postcode":"6811",
+"gemeente":"Les Bulles",
+"dnb":"ORES"
+},
+{
+"postcode":"7621",
+"gemeente":"Lesdain",
+"dnb":"ORES"
+},
+{
+"postcode":"7860",
+"gemeente":"Lessines",
+"dnb":"ORES"
+},
+{
+"postcode":"9521",
+"gemeente":"Letterhoutem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9700",
+"gemeente":"Leupegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3630",
+"gemeente":"Leut",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3000",
+"gemeente":"Leuven",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7900",
+"gemeente":"Leuze-en-Hainaut",
+"dnb":"ORES"
+},
+{
+"postcode":"7134",
+"gemeente":"Leval-Trahegnies",
+"dnb":"ORES"
+},
+{
+"postcode":"6890",
+"gemeente":"Libin",
+"dnb":"ORES"
+},
+{
+"postcode":"6800",
+"gemeente":"Libramont-Chevigny",
+"dnb":"ORES"
+},
+{
+"postcode":"2460",
+"gemeente":"Lichtaart",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8810",
+"gemeente":"Lichtervelde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1770",
+"gemeente":"Liedekerke",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9400",
+"gemeente":"Lieferinge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2500",
+"gemeente":"Lier",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"4990",
+"gemeente":"Lierneux",
+"dnb":"RESA"
+},
+{
+"postcode":"4042",
+"gemeente":"Liers",
+"dnb":"RESA"
+},
+{
+"postcode":"2870",
+"gemeente":"Liezele",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7812",
+"gemeente":"Ligne",
+"dnb":"ORES"
+},
+{
+"postcode":"4254",
+"gemeente":"Ligney",
+"dnb":"RESA"
+},
+{
+"postcode":"2275",
+"gemeente":"Lille",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2040",
+"gemeente":"Lillo",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"1428",
+"gemeente":"Lillois-Witterzée",
+"dnb":"ORES"
+},
+{
+"postcode":"1300",
+"gemeente":"Limal",
+"dnb":"REW"
+},
+{
+"postcode":"4830",
+"gemeente":"Limbourg",
+"dnb":"RESA"
+},
+{
+"postcode":"1342",
+"gemeente":"Limelette",
+"dnb":"ORES"
+},
+{
+"postcode":"4287",
+"gemeente":"Lincent",
+"dnb":"ORES"
+},
+{
+"postcode":"3210",
+"gemeente":"Linden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1630",
+"gemeente":"Linkebeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3560",
+"gemeente":"Linkhout",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2547",
+"gemeente":"Lint",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2890",
+"gemeente":"Lippelo",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5501",
+"gemeente":"Lisogne",
+"dnb":"ORES"
+},
+{
+"postcode":"8380",
+"gemeente":"Lissewege",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5101",
+"gemeente":"Lives-sur-Meuse",
+"dnb":"ORES"
+},
+{
+"postcode":"4000",
+"gemeente":"Liège",
+"dnb":"RESA"
+},
+{
+"postcode":"4020",
+"gemeente":"Liège",
+"dnb":"RESA"
+},
+{
+"postcode":"8647",
+"gemeente":"Lo",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6540",
+"gemeente":"Lobbes",
+"dnb":"ORES"
+},
+{
+"postcode":"9080",
+"gemeente":"Lochristi",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6042",
+"gemeente":"Lodelinsart",
+"dnb":"ORES"
+},
+{
+"postcode":"2990",
+"gemeente":"Loenhout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8958",
+"gemeente":"Loker",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9160",
+"gemeente":"Lokeren",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3545",
+"gemeente":"Loksbergen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8434",
+"gemeente":"Lombardsijde",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3920",
+"gemeente":"Lommel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4783",
+"gemeente":"Lommersweiler",
+"dnb":"RESA"
+},
+{
+"postcode":"6463",
+"gemeente":"Lompret",
+"dnb":"ORES"
+},
+{
+"postcode":"6924",
+"gemeente":"Lomprez",
+"dnb":"ORES"
+},
+{
+"postcode":"4431",
+"gemeente":"Loncin",
+"dnb":"RESA"
+},
+{
+"postcode":"1840",
+"gemeente":"Londerzeel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6688",
+"gemeente":"Longchamps",
+"dnb":"ORES"
+},
+{
+"postcode":"4710",
+"gemeente":"Lontzen",
+"dnb":"RESA"
+},
+{
+"postcode":"3040",
+"gemeente":"Loonbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8210",
+"gemeente":"Loppem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1651",
+"gemeente":"Lot",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9880",
+"gemeente":"Lotenhulle",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1471",
+"gemeente":"Loupoigne",
+"dnb":"ORES"
+},
+{
+"postcode":"1348",
+"gemeente":"Louvain-la-Neuve",
+"dnb":"ORES"
+},
+{
+"postcode":"4141",
+"gemeente":"Louveigné",
+"dnb":"RESA"
+},
+{
+"postcode":"9920",
+"gemeente":"Lovendegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3360",
+"gemeente":"Lovenjoel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3210",
+"gemeente":"Lubbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3560",
+"gemeente":"Lummen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6238",
+"gemeente":"Luttre",
+"dnb":"ORES"
+},
+{
+"postcode":"6860",
+"gemeente":"Léglise",
+"dnb":"ORES"
+},
+{
+"postcode":"9680",
+"gemeente":"Maarke-Kerkem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3680",
+"gemeente":"Maaseik",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6663",
+"gemeente":"Mabompré",
+"dnb":"ORES"
+},
+{
+"postcode":"9870",
+"gemeente":"Machelen (O.-Vl.)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1830",
+"gemeente":"Machelen (Vl.Br.)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6591",
+"gemeente":"Macon",
+"dnb":"ORES"
+},
+{
+"postcode":"6593",
+"gemeente":"Macquenoise",
+"dnb":"ORES"
+},
+{
+"postcode":"5374",
+"gemeente":"Maffe",
+"dnb":"ORES"
+},
+{
+"postcode":"7810",
+"gemeente":"Maffle",
+"dnb":"ORES"
+},
+{
+"postcode":"4623",
+"gemeente":"Magnée",
+"dnb":"RESA"
+},
+{
+"postcode":"3700",
+"gemeente":"Mal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9990",
+"gemeente":"Maldegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1840",
+"gemeente":"Malderen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4960",
+"gemeente":"Malmedy",
+"dnb":"RESA"
+},
+{
+"postcode":"7170",
+"gemeente":"Manage",
+"dnb":"ORES"
+},
+{
+"postcode":"6960",
+"gemeente":"Manhay",
+"dnb":"ORES"
+},
+{
+"postcode":"8433",
+"gemeente":"Mannekensvere",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6724",
+"gemeente":"Marbehan",
+"dnb":"ORES"
+},
+{
+"postcode":"6900",
+"gemeente":"Marche-en-Famenne",
+"dnb":"ORES"
+},
+{
+"postcode":"5024",
+"gemeente":"Marche-les-Dames",
+"dnb":"ORES"
+},
+{
+"postcode":"6030",
+"gemeente":"Marchienne-au-Pont",
+"dnb":"ORES"
+},
+{
+"postcode":"4570",
+"gemeente":"Marchin",
+"dnb":"ORES"
+},
+{
+"postcode":"6001",
+"gemeente":"Marcinelle",
+"dnb":"ORES"
+},
+{
+"postcode":"9030",
+"gemeente":"Mariakerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2880",
+"gemeente":"Mariekerke",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8510",
+"gemeente":"Marke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8720",
+"gemeente":"Markegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6630",
+"gemeente":"Martelange",
+"dnb":"ORES"
+},
+{
+"postcode":"3742",
+"gemeente":"Martenslinde",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5573",
+"gemeente":"Martouzin-Neuville",
+"dnb":"ORES"
+},
+{
+"postcode":"9230",
+"gemeente":"Massemen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2240",
+"gemeente":"Massenhoven",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9700",
+"gemeente":"Mater",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1745",
+"gemeente":"Mazenzele",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2800",
+"gemeente":"Mechelen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3870",
+"gemeente":"Mechelen-Bovelingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3630",
+"gemeente":"Mechelen-aan-de-Maas",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3391",
+"gemeente":"Meensel-Kiezegem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2321",
+"gemeente":"Meer",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3078",
+"gemeente":"Meerbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9402",
+"gemeente":"Meerbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9170",
+"gemeente":"Meerdonk",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2450",
+"gemeente":"Meerhout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2328",
+"gemeente":"Meerle",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3630",
+"gemeente":"Meeswijk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8377",
+"gemeente":"Meetkerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3670",
+"gemeente":"Meeuwen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9800",
+"gemeente":"Meigem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9630",
+"gemeente":"Meilegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1860",
+"gemeente":"Meise",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6769",
+"gemeente":"Meix-devant-Virton",
+"dnb":"ORES"
+},
+{
+"postcode":"6747",
+"gemeente":"Meix-le-Tige",
+"dnb":"ORES"
+},
+{
+"postcode":"9700",
+"gemeente":"Melden",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3560",
+"gemeente":"Meldert (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9310",
+"gemeente":"Meldert (O.-Vl.)",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3320",
+"gemeente":"Meldert (Vl.Br.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4633",
+"gemeente":"Melen",
+"dnb":"RESA"
+},
+{
+"postcode":"3350",
+"gemeente":"Melkwezer",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9090",
+"gemeente":"Melle",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6211",
+"gemeente":"Mellet",
+"dnb":"ORES"
+},
+{
+"postcode":"1820",
+"gemeente":"Melsbroek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9120",
+"gemeente":"Melsele",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9820",
+"gemeente":"Melsen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3770",
+"gemeente":"Membruggen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9042",
+"gemeente":"Mendonk",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8930",
+"gemeente":"Menen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6567",
+"gemeente":"Merbes-le-Château",
+"dnb":"ORES"
+},
+{
+"postcode":"1785",
+"gemeente":"Merchtem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9420",
+"gemeente":"Mere",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9820",
+"gemeente":"Merelbeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9850",
+"gemeente":"Merendree",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8650",
+"gemeente":"Merkem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2170",
+"gemeente":"Merksem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2330",
+"gemeente":"Merksplas",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8957",
+"gemeente":"Mesen/Messines",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9200",
+"gemeente":"Mespelare",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6780",
+"gemeente":"Messancy",
+"dnb":"ORES"
+},
+{
+"postcode":"3272",
+"gemeente":"Messelbroek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3870",
+"gemeente":"Mettekoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5640",
+"gemeente":"Mettet",
+"dnb":"ORES"
+},
+{
+"postcode":"8760",
+"gemeente":"Meulebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9660",
+"gemeente":"Michelbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9992",
+"gemeente":"Middelburg",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8430",
+"gemeente":"Middelkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3891",
+"gemeente":"Mielen-boven-Aalst",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3770",
+"gemeente":"Millen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2322",
+"gemeente":"Minderhout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"5376",
+"gemeente":"Miécret",
+"dnb":"ORES"
+},
+{
+"postcode":"4577",
+"gemeente":"Modave",
+"dnb":"ORES"
+},
+{
+"postcode":"3790",
+"gemeente":"Moelingen/Mouland",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8552",
+"gemeente":"Moen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9500",
+"gemeente":"Moerbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9180",
+"gemeente":"Moerbeke (Waas)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8470",
+"gemeente":"Moere",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8340",
+"gemeente":"Moerkerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9220",
+"gemeente":"Moerzeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"5361",
+"gemeente":"Mohiville",
+"dnb":"ORES"
+},
+{
+"postcode":"2400",
+"gemeente":"Mol",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3461",
+"gemeente":"Molenbeek-Wersbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3640",
+"gemeente":"Molenbeersel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3294",
+"gemeente":"Molenstede",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1730",
+"gemeente":"Mollem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6590",
+"gemeente":"Momignies",
+"dnb":"ORES"
+},
+{
+"postcode":"6592",
+"gemeente":"Monceau-Imbrechies",
+"dnb":"ORES"
+},
+{
+"postcode":"6031",
+"gemeente":"Monceau-sur-Sambre",
+"dnb":"ORES"
+},
+{
+"postcode":"7000",
+"gemeente":"Mons",
+"dnb":"ORES"
+},
+{
+"postcode":"7542",
+"gemeente":"Mont-Saint-Aubert",
+"dnb":"ORES"
+},
+{
+"postcode":"1435",
+"gemeente":"Mont-Saint-Guibert",
+"dnb":"ORES"
+},
+{
+"postcode":"7750",
+"gemeente":"Mont-de-l'Enclus",
+"dnb":"ORES"
+},
+{
+"postcode":"6032",
+"gemeente":"Mont-sur-Marchienne",
+"dnb":"ORES"
+},
+{
+"postcode":"3890",
+"gemeente":"Montenaken",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6061",
+"gemeente":"Montignies-sur-Sambre",
+"dnb":"ORES"
+},
+{
+"postcode":"6110",
+"gemeente":"Montigny-le-Tilleul",
+"dnb":"ORES"
+},
+{
+"postcode":"6674",
+"gemeente":"Montleban",
+"dnb":"ORES"
+},
+{
+"postcode":"9310",
+"gemeente":"Moorsel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8560",
+"gemeente":"Moorsele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8890",
+"gemeente":"Moorslede",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9860",
+"gemeente":"Moortsele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3740",
+"gemeente":"Mopertingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9790",
+"gemeente":"Moregem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2200",
+"gemeente":"Morkhoven",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"7140",
+"gemeente":"Morlanwelz",
+"dnb":"ORES"
+},
+{
+"postcode":"2640",
+"gemeente":"Mortsel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"7543",
+"gemeente":"Mourcourt",
+"dnb":"ORES"
+},
+{
+"postcode":"7700",
+"gemeente":"Mouscron",
+"dnb":"ORES"
+},
+{
+"postcode":"3891",
+"gemeente":"Muizen (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2812",
+"gemeente":"Muizen (Mechelen)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9700",
+"gemeente":"Mullem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Munkzwalm",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3740",
+"gemeente":"Munsterbilzen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9820",
+"gemeente":"Munte",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6750",
+"gemeente":"Musson",
+"dnb":"ORES"
+},
+{
+"postcode":"5372",
+"gemeente":"Méan",
+"dnb":"ORES"
+},
+{
+"postcode":"7942",
+"gemeente":"Mévergnies-lez-Lens",
+"dnb":"ORES"
+},
+{
+"postcode":"7062",
+"gemeente":"Naast",
+"dnb":"ORES"
+},
+{
+"postcode":"5000",
+"gemeente":"Namur",
+"dnb":"ORES"
+},
+{
+"postcode":"4550",
+"gemeente":"Nandrin",
+"dnb":"ORES"
+},
+{
+"postcode":"6950",
+"gemeente":"Nassogne",
+"dnb":"ORES"
+},
+{
+"postcode":"9810",
+"gemeente":"Nazareth",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1120",
+"gemeente":"Neder-Over-Heembeek",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9500",
+"gemeente":"Nederboelare",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9660",
+"gemeente":"Nederbrakel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9700",
+"gemeente":"Nederename",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9400",
+"gemeente":"Nederhasselt",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1910",
+"gemeente":"Nederokkerzeel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9636",
+"gemeente":"Nederzwalm-Hermelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3670",
+"gemeente":"Neerglabbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3620",
+"gemeente":"Neerharen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3350",
+"gemeente":"Neerhespen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3040",
+"gemeente":"Neerijse",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3404",
+"gemeente":"Neerlanden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3350",
+"gemeente":"Neerlinter",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3680",
+"gemeente":"Neeroeteren",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3910",
+"gemeente":"Neerpelt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3700",
+"gemeente":"Neerrepen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3370",
+"gemeente":"Neervelp",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3400",
+"gemeente":"Neerwinden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9403",
+"gemeente":"Neigem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3700",
+"gemeente":"Nerem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4721",
+"gemeente":"Neu-Moresnet",
+"dnb":"RESA"
+},
+{
+"postcode":"6840",
+"gemeente":"Neufchâteau",
+"dnb":"ORES"
+},
+{
+"postcode":"4120",
+"gemeente":"Neupré",
+"dnb":"RESA"
+},
+{
+"postcode":"4121",
+"gemeente":"Neuville-en-Condroz",
+"dnb":"RESA"
+},
+{
+"postcode":"9850",
+"gemeente":"Nevele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2845",
+"gemeente":"Niel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3668",
+"gemeente":"Niel-bij-As",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3890",
+"gemeente":"Niel-bij-Sint-Truiden",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9506",
+"gemeente":"Nieuwenhove",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1880",
+"gemeente":"Nieuwenrode",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9320",
+"gemeente":"Nieuwerkerken",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3850",
+"gemeente":"Nieuwerkerken (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8600",
+"gemeente":"Nieuwkapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8950",
+"gemeente":"Nieuwkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9100",
+"gemeente":"Nieuwkerken-Waas",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8377",
+"gemeente":"Nieuwmunster",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8620",
+"gemeente":"Nieuwpoort",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3221",
+"gemeente":"Nieuwrode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2560",
+"gemeente":"Nijlen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"7020",
+"gemeente":"Nimy",
+"dnb":"ORES"
+},
+{
+"postcode":"9400",
+"gemeente":"Ninove",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1400",
+"gemeente":"Nivelles",
+"dnb":"ORES"
+},
+{
+"postcode":"6831",
+"gemeente":"Noirefontaine",
+"dnb":"ORES"
+},
+{
+"postcode":"9771",
+"gemeente":"Nokere",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6851",
+"gemeente":"Nollevaux",
+"dnb":"ORES"
+},
+{
+"postcode":"2200",
+"gemeente":"Noorderwijk",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8647",
+"gemeente":"Noordschote",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1930",
+"gemeente":"Nossegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9681",
+"gemeente":"Nukerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7743",
+"gemeente":"Obigies",
+"dnb":"ORES"
+},
+{
+"postcode":"8730",
+"gemeente":"Oedelem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8800",
+"gemeente":"Oekene",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2520",
+"gemeente":"Oelegem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8690",
+"gemeente":"Oeren",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8720",
+"gemeente":"Oeselgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1755",
+"gemeente":"Oetingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2260",
+"gemeente":"Oevel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"7862",
+"gemeente":"Ogy",
+"dnb":"ORES"
+},
+{
+"postcode":"5350",
+"gemeente":"Ohey",
+"dnb":"AIEG"
+},
+{
+"postcode":"9400",
+"gemeente":"Okegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2250",
+"gemeente":"Olen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2491",
+"gemeente":"Olmen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"4877",
+"gemeente":"Olne",
+"dnb":"RESA"
+},
+{
+"postcode":"9870",
+"gemeente":"Olsene",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4252",
+"gemeente":"Omal",
+"dnb":"RESA"
+},
+{
+"postcode":"5520",
+"gemeente":"Onhaye",
+"dnb":"ORES"
+},
+{
+"postcode":"9500",
+"gemeente":"Onkerzele",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2861",
+"gemeente":"Onze-Lieve-Vrouw-Waver",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8710",
+"gemeente":"Ooigem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9790",
+"gemeente":"Ooike",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9620",
+"gemeente":"Oombergen",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3300",
+"gemeente":"Oorbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9340",
+"gemeente":"Oordegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9041",
+"gemeente":"Oostakker",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8670",
+"gemeente":"Oostduinkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9968",
+"gemeente":"Oosteeklo",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8400",
+"gemeente":"Oostende",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9860",
+"gemeente":"Oosterzele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3945",
+"gemeente":"Oostham",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8020",
+"gemeente":"Oostkamp",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8340",
+"gemeente":"Oostkerke (Damme)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8600",
+"gemeente":"Oostkerke (Diksmuide)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2390",
+"gemeente":"Oostmalle",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8840",
+"gemeente":"Oostnieuwkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8780",
+"gemeente":"Oostrozebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8640",
+"gemeente":"Oostvleteren",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9931",
+"gemeente":"Oostwinkel",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9660",
+"gemeente":"Opbrakel",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9255",
+"gemeente":"Opdorp",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3660",
+"gemeente":"Opglabbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3630",
+"gemeente":"Opgrimbie",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1421",
+"gemeente":"Ophain-Bois-Seigneur-Isaac",
+"dnb":"ORES"
+},
+{
+"postcode":"9500",
+"gemeente":"Ophasselt",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3870",
+"gemeente":"Opheers",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3640",
+"gemeente":"Ophoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3960",
+"gemeente":"Opitter",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3300",
+"gemeente":"Oplinter",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3680",
+"gemeente":"Opoeteren",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6852",
+"gemeente":"Opont",
+"dnb":"ORES"
+},
+{
+"postcode":"2890",
+"gemeente":"Oppuurs",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3360",
+"gemeente":"Opvelp",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1745",
+"gemeente":"Opwijk",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7501",
+"gemeente":"Orcq",
+"dnb":"AIESH"
+},
+{
+"postcode":"3800",
+"gemeente":"Ordingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4360",
+"gemeente":"Oreye",
+"dnb":"ORES"
+},
+{
+"postcode":"7802",
+"gemeente":"Ormeignies",
+"dnb":"ORES"
+},
+{
+"postcode":"1350",
+"gemeente":"Orp-Jauche",
+"dnb":"ORES"
+},
+{
+"postcode":"3350",
+"gemeente":"Orsmaal-Gussenhoven",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6983",
+"gemeente":"Ortho",
+"dnb":"ORES"
+},
+{
+"postcode":"7804",
+"gemeente":"Ostiches",
+"dnb":"ORES"
+},
+{
+"postcode":"8553",
+"gemeente":"Otegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3040",
+"gemeente":"Ottenburg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9420",
+"gemeente":"Ottergem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1340",
+"gemeente":"Ottignies",
+"dnb":"ORES"
+},
+{
+"postcode":"3050",
+"gemeente":"Oud-Heverlee",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2360",
+"gemeente":"Oud-Turnhout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9200",
+"gemeente":"Oudegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8600",
+"gemeente":"Oudekapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9700",
+"gemeente":"Oudenaarde",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1600",
+"gemeente":"Oudenaken",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8460",
+"gemeente":"Oudenburg",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1160",
+"gemeente":"Oudergem",
+"dnb":"Sibelga"
+},
+{
+"postcode":"4590",
+"gemeente":"Ouffet",
+"dnb":"ORES"
+},
+{
+"postcode":"4102",
+"gemeente":"Ougrée",
+"dnb":"RESA"
+},
+{
+"postcode":"4680",
+"gemeente":"Oupeye",
+"dnb":"RESA"
+},
+{
+"postcode":"9406",
+"gemeente":"Outer",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3321",
+"gemeente":"Outgaarden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8582",
+"gemeente":"Outrijve",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9750",
+"gemeente":"Ouwegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9500",
+"gemeente":"Overboelare",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3350",
+"gemeente":"Overhespen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3090",
+"gemeente":"Overijse",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9290",
+"gemeente":"Overmere",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3900",
+"gemeente":"Overpelt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3700",
+"gemeente":"Overrepen (Kolmont)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3400",
+"gemeente":"Overwinden",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3583",
+"gemeente":"Paal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4452",
+"gemeente":"Paifve",
+"dnb":"RESA"
+},
+{
+"postcode":"6850",
+"gemeente":"Paliseul",
+"dnb":"ORES"
+},
+{
+"postcode":"7861",
+"gemeente":"Papignies",
+"dnb":"ORES"
+},
+{
+"postcode":"9661",
+"gemeente":"Parike",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8980",
+"gemeente":"Passendale",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Paulatem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7740",
+"gemeente":"Pecq",
+"dnb":"ORES"
+},
+{
+"postcode":"3990",
+"gemeente":"Peer",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3212",
+"gemeente":"Pellenberg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1670",
+"gemeente":"Pepingen",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"4860",
+"gemeente":"Pepinster",
+"dnb":"RESA"
+},
+{
+"postcode":"1820",
+"gemeente":"Perk",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8600",
+"gemeente":"Pervijze",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1360",
+"gemeente":"Perwez",
+"dnb":"ORES"
+},
+{
+"postcode":"5352",
+"gemeente":"Perwez-Haillot",
+"dnb":"AIEG"
+},
+{
+"postcode":"9800",
+"gemeente":"Petegem-aan-de-Leie",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9790",
+"gemeente":"Petegem-aan-de-Schelde",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6692",
+"gemeente":"Petit-Thier",
+"dnb":"ORES"
+},
+{
+"postcode":"1800",
+"gemeente":"Peutie",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"5600",
+"gemeente":"Philippeville",
+"dnb":"ORES"
+},
+{
+"postcode":"7904",
+"gemeente":"Pipaix",
+"dnb":"ORES"
+},
+{
+"postcode":"3700",
+"gemeente":"Piringen (Haren)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8740",
+"gemeente":"Pittem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4122",
+"gemeente":"Plainevaux",
+"dnb":"RESA"
+},
+{
+"postcode":"7782",
+"gemeente":"Ploegsteert",
+"dnb":"ORES"
+},
+{
+"postcode":"4850",
+"gemeente":"Plombières",
+"dnb":"RESA"
+},
+{
+"postcode":"2275",
+"gemeente":"Poederlee",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9880",
+"gemeente":"Poeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8920",
+"gemeente":"Poelkapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9850",
+"gemeente":"Poesele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9401",
+"gemeente":"Pollare",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8647",
+"gemeente":"Pollinkhove",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5572",
+"gemeente":"Pondrôme",
+"dnb":"ORES"
+},
+{
+"postcode":"5574",
+"gemeente":"Pondrôme",
+"dnb":"ORES"
+},
+{
+"postcode":"6230",
+"gemeente":"Pont-à-Celles",
+"dnb":"ORES"
+},
+{
+"postcode":"8970",
+"gemeente":"Poperinge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2382",
+"gemeente":"Poppel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1414",
+"gemeente":"Postcode 1414",
+"dnb":"ORES"
+},
+{
+"postcode":"4090",
+"gemeente":"Postcode 4090",
+"dnb":"RESA"
+},
+{
+"postcode":"4171",
+"gemeente":"Poulseur",
+"dnb":"RESA"
+},
+{
+"postcode":"5170",
+"gemeente":"Profondeville",
+"dnb":"ORES"
+},
+{
+"postcode":"8972",
+"gemeente":"Proven",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2242",
+"gemeente":"Pulderbos",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2243",
+"gemeente":"Pulle",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2580",
+"gemeente":"Putte",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2870",
+"gemeente":"Puurs",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7600",
+"gemeente":"Péruwelz",
+"dnb":"AIEG"
+},
+{
+"postcode":"7390",
+"gemeente":"Quaregnon",
+"dnb":"ORES"
+},
+{
+"postcode":"7972",
+"gemeente":"Quevaucamps",
+"dnb":"ORES"
+},
+{
+"postcode":"7380",
+"gemeente":"Quiévrain",
+"dnb":"ORES"
+},
+{
+"postcode":"7040",
+"gemeente":"Quévy",
+"dnb":"ORES"
+},
+{
+"postcode":"4730",
+"gemeente":"Raeren",
+"dnb":"RESA"
+},
+{
+"postcode":"6532",
+"gemeente":"Ragnies",
+"dnb":"ORES"
+},
+{
+"postcode":"1367",
+"gemeente":"Ramillies",
+"dnb":"ORES"
+},
+{
+"postcode":"1880",
+"gemeente":"Ramsdonk",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2230",
+"gemeente":"Ramsel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8301",
+"gemeente":"Ramskapelle (Knokke-Heist)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8620",
+"gemeente":"Ramskapelle (Nieuwpoort)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6043",
+"gemeente":"Ransart",
+"dnb":"ORES"
+},
+{
+"postcode":"3470",
+"gemeente":"Ransberg",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2520",
+"gemeente":"Ranst",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2380",
+"gemeente":"Ravels",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1430",
+"gemeente":"Rebecq",
+"dnb":"ORES"
+},
+{
+"postcode":"2840",
+"gemeente":"Reet",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3621",
+"gemeente":"Rekem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8930",
+"gemeente":"Rekkem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1731",
+"gemeente":"Relegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3791",
+"gemeente":"Remersdaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4350",
+"gemeente":"Remicourt",
+"dnb":"ORES"
+},
+{
+"postcode":"6987",
+"gemeente":"Rendeux",
+"dnb":"ORES"
+},
+{
+"postcode":"8647",
+"gemeente":"Reninge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8970",
+"gemeente":"Reningelst",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3950",
+"gemeente":"Reppel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9551",
+"gemeente":"Ressegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2470",
+"gemeente":"Retie",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"4621",
+"gemeente":"Retinne",
+"dnb":"RESA"
+},
+{
+"postcode":"3770",
+"gemeente":"Riemst",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3840",
+"gemeente":"Rijkel",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2310",
+"gemeente":"Rijkevorsel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3740",
+"gemeente":"Rijkhoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2820",
+"gemeente":"Rijmenam",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3700",
+"gemeente":"Riksingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3202",
+"gemeente":"Rillaar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1330",
+"gemeente":"Rixensart",
+"dnb":"ORES"
+},
+{
+"postcode":"9630",
+"gemeente":"Roborst",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5580",
+"gemeente":"Rochefort",
+"dnb":"ORES"
+},
+{
+"postcode":"4761",
+"gemeente":"Rocherath",
+"dnb":"RESA"
+},
+{
+"postcode":"8972",
+"gemeente":"Roesbrugge-Haringe",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8800",
+"gemeente":"Roeselare",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8460",
+"gemeente":"Roksem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8510",
+"gemeente":"Rollegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8880",
+"gemeente":"Rollegem-Kapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3730",
+"gemeente":"Romershoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4624",
+"gemeente":"Romsée",
+"dnb":"RESA"
+},
+{
+"postcode":"7623",
+"gemeente":"Rongy",
+"dnb":"ORES"
+},
+{
+"postcode":"9600",
+"gemeente":"Ronse/Renaix",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9932",
+"gemeente":"Ronsele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3370",
+"gemeente":"Roosbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1760",
+"gemeente":"Roosdaal",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1331",
+"gemeente":"Rosières",
+"dnb":"ORES"
+},
+{
+"postcode":"3740",
+"gemeente":"Rosmeer",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3650",
+"gemeente":"Rotem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3110",
+"gemeente":"Rotselaar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7601",
+"gemeente":"Roucourt",
+"dnb":"AIEG"
+},
+{
+"postcode":"6767",
+"gemeente":"Rouvroy",
+"dnb":"ORES"
+},
+{
+"postcode":"6044",
+"gemeente":"Roux",
+"dnb":"ORES"
+},
+{
+"postcode":"9630",
+"gemeente":"Rozebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8020",
+"gemeente":"Ruddervoorde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9690",
+"gemeente":"Ruien",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2870",
+"gemeente":"Ruisbroek (Antw.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1601",
+"gemeente":"Ruisbroek (Vl.Br.)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8755",
+"gemeente":"Ruiselede",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3870",
+"gemeente":"Rukkelingen-Loon",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8800",
+"gemeente":"Rumbeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7610",
+"gemeente":"Rumes",
+"dnb":"AIEG"
+},
+{
+"postcode":"3454",
+"gemeente":"Rummen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3400",
+"gemeente":"Rumsdorp",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2840",
+"gemeente":"Rumst",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3803",
+"gemeente":"Runkelen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9150",
+"gemeente":"Rupelmonde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3700",
+"gemeente":"Rutten",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6221",
+"gemeente":"Saint-Amand",
+"dnb":"ORES"
+},
+{
+"postcode":"7034",
+"gemeente":"Saint-Denis",
+"dnb":"ORES"
+},
+{
+"postcode":"5081",
+"gemeente":"Saint-Denis-Bovesse",
+"dnb":"ORES"
+},
+{
+"postcode":"4470",
+"gemeente":"Saint-Georges-sur-Meuse",
+"dnb":"RESA"
+},
+{
+"postcode":"7330",
+"gemeente":"Saint-Ghislain",
+"dnb":"ORES"
+},
+{
+"postcode":"6870",
+"gemeente":"Saint-Hubert",
+"dnb":"ORES"
+},
+{
+"postcode":"5003",
+"gemeente":"Saint-Marc",
+"dnb":"ORES"
+},
+{
+"postcode":"6762",
+"gemeente":"Saint-Mard",
+"dnb":"ORES"
+},
+{
+"postcode":"4420",
+"gemeente":"Saint-Nicolas",
+"dnb":"RESA"
+},
+{
+"postcode":"4606",
+"gemeente":"Saint-Remy",
+"dnb":"RESA"
+},
+{
+"postcode":"4672",
+"gemeente":"Saint-Remy",
+"dnb":"RESA"
+},
+{
+"postcode":"7912",
+"gemeente":"Saint-Sauveur",
+"dnb":"ORES"
+},
+{
+"postcode":"5002",
+"gemeente":"Saint-Servais",
+"dnb":"ORES"
+},
+{
+"postcode":"7030",
+"gemeente":"Saint-Symphorien",
+"dnb":"ORES"
+},
+{
+"postcode":"6680",
+"gemeente":"Sainte-Ode",
+"dnb":"ORES"
+},
+{
+"postcode":"5060",
+"gemeente":"Sambreville",
+"dnb":"ORES"
+},
+{
+"postcode":"6982",
+"gemeente":"Samrée",
+"dnb":"ORES"
+},
+{
+"postcode":"4780",
+"gemeente":"Sankt Vith",
+"dnb":"RESA"
+},
+{
+"postcode":"6542",
+"gemeente":"Sars-la-Buissière",
+"dnb":"ORES"
+},
+{
+"postcode":"1030",
+"gemeente":"Schaarbeek",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3290",
+"gemeente":"Schaffen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3732",
+"gemeente":"Schalkhoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5364",
+"gemeente":"Schaltin",
+"dnb":"ORES"
+},
+{
+"postcode":"9820",
+"gemeente":"Schelderode",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9860",
+"gemeente":"Scheldewindeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2627",
+"gemeente":"Schelle",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9260",
+"gemeente":"Schellebelle",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9506",
+"gemeente":"Schendelbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1703",
+"gemeente":"Schepdaal",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3270",
+"gemeente":"Scherpenheuvel",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2970",
+"gemeente":"Schilde",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9200",
+"gemeente":"Schoonaarde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8433",
+"gemeente":"Schore",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9688",
+"gemeente":"Schorisse",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2900",
+"gemeente":"Schoten",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2223",
+"gemeente":"Schriek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8700",
+"gemeente":"Schuiferskapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3540",
+"gemeente":"Schulen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4782",
+"gemeente":"Schönberg",
+"dnb":"RESA"
+},
+{
+"postcode":"6596",
+"gemeente":"Seloignes",
+"dnb":"ORES"
+},
+{
+"postcode":"9890",
+"gemeente":"Semmerzake",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7180",
+"gemeente":"Seneffe",
+"dnb":"ORES"
+},
+{
+"postcode":"6832",
+"gemeente":"Sensenruth",
+"dnb":"ORES"
+},
+{
+"postcode":"4100",
+"gemeente":"Seraing",
+"dnb":"RESA"
+},
+{
+"postcode":"9260",
+"gemeente":"Serskamp",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5521",
+"gemeente":"Serville",
+"dnb":"ORES"
+},
+{
+"postcode":"7010",
+"gemeente":"Shape",
+"dnb":"ORES"
+},
+{
+"postcode":"8340",
+"gemeente":"Sijsele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7830",
+"gemeente":"Silly",
+"dnb":"ORES"
+},
+{
+"postcode":"9112",
+"gemeente":"Sinaai",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1082",
+"gemeente":"Sint-Agatha-Berchem",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3040",
+"gemeente":"Sint-Agatha-Rode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2890",
+"gemeente":"Sint-Amands",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9040",
+"gemeente":"Sint-Amandsberg",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8200",
+"gemeente":"Sint-Andries",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9550",
+"gemeente":"Sint-Antelinks",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8710",
+"gemeente":"Sint-Baafs-Vijve",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Sint-Blasius-Boekel",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8554",
+"gemeente":"Sint-Denijs",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Sint-Denijs-Boekel",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9051",
+"gemeente":"Sint-Denijs-Westrem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8793",
+"gemeente":"Sint-Eloois-Vijve",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8880",
+"gemeente":"Sint-Eloois-Winkel",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1640",
+"gemeente":"Sint-Genesius-Rode",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1060",
+"gemeente":"Sint-Gillis",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9170",
+"gemeente":"Sint-Gillis-Waas",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9200",
+"gemeente":"Sint-Gillis-bij-Dendermonde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9620",
+"gemeente":"Sint-Goriks-Oudenhove",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3730",
+"gemeente":"Sint-Huibrechts-Hern",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3910",
+"gemeente":"Sint-Huibrechts-Lille",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8600",
+"gemeente":"Sint-Jacobs-Kapelle",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8900",
+"gemeente":"Sint-Jan",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9982",
+"gemeente":"Sint-Jan-in-Eremo",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1080",
+"gemeente":"Sint-Jans-Molenbeek",
+"dnb":"Sibelga"
+},
+{
+"postcode":"2960",
+"gemeente":"Sint-Job-in-'t-Goor",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"1210",
+"gemeente":"Sint-Joost-ten-Node",
+"dnb":"Sibelga"
+},
+{
+"postcode":"8730",
+"gemeente":"Sint-Joris (Beernem)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8620",
+"gemeente":"Sint-Joris (Nieuwpoort)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3051",
+"gemeente":"Sint-Joris-Weert",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3390",
+"gemeente":"Sint-Joris-Winge",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2860",
+"gemeente":"Sint-Katelijne-Waver",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1742",
+"gemeente":"Sint-Katherina-Lombeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9667",
+"gemeente":"Sint-Kornelis-Horebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8310",
+"gemeente":"Sint-Kruis",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9042",
+"gemeente":"Sint-Kruis-Winkel",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1750",
+"gemeente":"Sint-Kwintens-Lennik",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3500",
+"gemeente":"Sint-Lambrechts-Herk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1200",
+"gemeente":"Sint-Lambrechts-Woluwe",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9980",
+"gemeente":"Sint-Laureins",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1600",
+"gemeente":"Sint-Laureins-Berchem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2960",
+"gemeente":"Sint-Lenaarts",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"9550",
+"gemeente":"Sint-Lievens-Esse",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9520",
+"gemeente":"Sint-Lievens-Houtem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9981",
+"gemeente":"Sint-Margriete",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3300",
+"gemeente":"Sint-Margriete-Houtem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9667",
+"gemeente":"Sint-Maria-Horebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9630",
+"gemeente":"Sint-Maria-Latem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9570",
+"gemeente":"Sint-Maria-Lierde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9620",
+"gemeente":"Sint-Maria-Oudenhove",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1700",
+"gemeente":"Sint-Martens-Bodegem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9830",
+"gemeente":"Sint-Martens-Latem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9800",
+"gemeente":"Sint-Martens-Leerne",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1750",
+"gemeente":"Sint-Martens-Lennik",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9572",
+"gemeente":"Sint-Martens-Lierde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3790",
+"gemeente":"Sint-Martens-Voeren/Fouron-Saint-Martin",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8200",
+"gemeente":"Sint-Michiels",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9100",
+"gemeente":"Sint-Niklaas",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9170",
+"gemeente":"Sint-Pauwels",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1541",
+"gemeente":"Sint-Pieters-Kapelle (Vl.Br.)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8433",
+"gemeente":"Sint-Pieters-Kapelle (W.-Vl.)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1600",
+"gemeente":"Sint-Pieters-Leeuw",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3220",
+"gemeente":"Sint-Pieters-Rode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3792",
+"gemeente":"Sint-Pieters-Voeren/Fouron-Saint-Pierre",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1150",
+"gemeente":"Sint-Pieters-Woluwe",
+"dnb":"Sibelga"
+},
+{
+"postcode":"8690",
+"gemeente":"Sint-Rijkers",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1932",
+"gemeente":"Sint-Stevens-Woluwe",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3800",
+"gemeente":"Sint-Truiden",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1700",
+"gemeente":"Sint-Ulriks-Kapelle",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7332",
+"gemeente":"Sirault",
+"dnb":"ORES"
+},
+{
+"postcode":"6470",
+"gemeente":"Sivry-Rance",
+"dnb":"ORES"
+},
+{
+"postcode":"9940",
+"gemeente":"Sleidinge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8433",
+"gemeente":"Slijpe",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3700",
+"gemeente":"Sluizen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9506",
+"gemeente":"Smeerebbe-Vloerzegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9340",
+"gemeente":"Smetlede",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8470",
+"gemeente":"Snaaskerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8490",
+"gemeente":"Snellegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7060",
+"gemeente":"Soignies",
+"dnb":"ORES"
+},
+{
+"postcode":"4861",
+"gemeente":"Soiron",
+"dnb":"RESA"
+},
+{
+"postcode":"5140",
+"gemeente":"Sombreffe",
+"dnb":"ORES"
+},
+{
+"postcode":"5523",
+"gemeente":"Sommière",
+"dnb":"ORES"
+},
+{
+"postcode":"5651",
+"gemeente":"Somzée",
+"dnb":"ORES"
+},
+{
+"postcode":"5333",
+"gemeente":"Sorinne-la-Longue",
+"dnb":"ORES"
+},
+{
+"postcode":"5503",
+"gemeente":"Sorinnes",
+"dnb":"ORES"
+},
+{
+"postcode":"4630",
+"gemeente":"Soumagne",
+"dnb":"RESA"
+},
+{
+"postcode":"6182",
+"gemeente":"Souvret",
+"dnb":"ORES"
+},
+{
+"postcode":"4900",
+"gemeente":"Spa",
+"dnb":"RESA"
+},
+{
+"postcode":"3510",
+"gemeente":"Spalbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7032",
+"gemeente":"Spiennes",
+"dnb":"ORES"
+},
+{
+"postcode":"8587",
+"gemeente":"Spiere/Espierres",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4140",
+"gemeente":"Sprimont",
+"dnb":"RESA"
+},
+{
+"postcode":"2940",
+"gemeente":"Stabroek",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8840",
+"gemeente":"Staden",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8490",
+"gemeente":"Stalhille",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"5646",
+"gemeente":"Stave",
+"dnb":"ORES"
+},
+{
+"postcode":"8691",
+"gemeente":"Stavele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4970",
+"gemeente":"Stavelot",
+"dnb":"RESA"
+},
+{
+"postcode":"9140",
+"gemeente":"Steendorp",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1840",
+"gemeente":"Steenhuffel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9550",
+"gemeente":"Steenhuize-Wijnhuize",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8630",
+"gemeente":"Steenkerke (W.-Vl.)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1820",
+"gemeente":"Steenokkerzeel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9190",
+"gemeente":"Stekene",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"4801",
+"gemeente":"Stembert",
+"dnb":"RESA"
+},
+{
+"postcode":"8400",
+"gemeente":"Stene",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1933",
+"gemeente":"Sterrebeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3920",
+"gemeente":"Stevensvennen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3512",
+"gemeente":"Stevoort",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3650",
+"gemeente":"Stokkem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3511",
+"gemeente":"Stokrooie",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4987",
+"gemeente":"Stoumont",
+"dnb":"RESA"
+},
+{
+"postcode":"9620",
+"gemeente":"Strijpen",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1853",
+"gemeente":"Strombeek-Bever",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6511",
+"gemeente":"Strée",
+"dnb":"ORES"
+},
+{
+"postcode":"8600",
+"gemeente":"Stuivekenskerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6812",
+"gemeente":"Suxy",
+"dnb":"ORES"
+},
+{
+"postcode":"6781",
+"gemeente":"Sélange",
+"dnb":"ORES"
+},
+{
+"postcode":"6661",
+"gemeente":"Tailles",
+"dnb":"ORES"
+},
+{
+"postcode":"7618",
+"gemeente":"Taintignies",
+"dnb":"AIEG"
+},
+{
+"postcode":"4163",
+"gemeente":"Tavier",
+"dnb":"RESA"
+},
+{
+"postcode":"6662",
+"gemeente":"Tavigny",
+"dnb":"ORES"
+},
+{
+"postcode":"6927",
+"gemeente":"Tellin",
+"dnb":"ORES"
+},
+{
+"postcode":"7520",
+"gemeente":"Templeuve",
+"dnb":"ORES"
+},
+{
+"postcode":"9140",
+"gemeente":"Temse",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"6970",
+"gemeente":"Tenneville",
+"dnb":"ORES"
+},
+{
+"postcode":"1790",
+"gemeente":"Teralfene",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2840",
+"gemeente":"Terhagen",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"6813",
+"gemeente":"Termes",
+"dnb":"ORES"
+},
+{
+"postcode":"1740",
+"gemeente":"Ternat",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"7333",
+"gemeente":"Tertre",
+"dnb":"ORES"
+},
+{
+"postcode":"3080",
+"gemeente":"Tervuren",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3980",
+"gemeente":"Tessenderlo",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3272",
+"gemeente":"Testelt",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3793",
+"gemeente":"Teuven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4910",
+"gemeente":"Theux",
+"dnb":"RESA"
+},
+{
+"postcode":"7901",
+"gemeente":"Thieulain",
+"dnb":"ORES"
+},
+{
+"postcode":"4890",
+"gemeente":"Thimister-Clermont",
+"dnb":"RESA"
+},
+{
+"postcode":"7533",
+"gemeente":"Thimougies",
+"dnb":"ORES"
+},
+{
+"postcode":"1402",
+"gemeente":"Thines",
+"dnb":"ORES"
+},
+{
+"postcode":"4791",
+"gemeente":"Thommen",
+"dnb":"RESA"
+},
+{
+"postcode":"6536",
+"gemeente":"Thuillies",
+"dnb":"ORES"
+},
+{
+"postcode":"6530",
+"gemeente":"Thuin",
+"dnb":"ORES"
+},
+{
+"postcode":"5502",
+"gemeente":"Thynes",
+"dnb":"ORES"
+},
+{
+"postcode":"8573",
+"gemeente":"Tiegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2460",
+"gemeente":"Tielen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9140",
+"gemeente":"Tielrode",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8700",
+"gemeente":"Tielt",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3390",
+"gemeente":"Tielt (Vl.Br.)",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3300",
+"gemeente":"Tienen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3150",
+"gemeente":"Tildonk",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4557",
+"gemeente":"Tinlot",
+"dnb":"ORES"
+},
+{
+"postcode":"6730",
+"gemeente":"Tintigny",
+"dnb":"ORES"
+},
+{
+"postcode":"2830",
+"gemeente":"Tisselt",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6941",
+"gemeente":"Tohogne",
+"dnb":"ORES"
+},
+{
+"postcode":"1570",
+"gemeente":"Tollembeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3700",
+"gemeente":"Tongeren",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2260",
+"gemeente":"Tongerlo (Antw.)",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3960",
+"gemeente":"Tongerlo (Limb.)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"7951",
+"gemeente":"Tongre-Notre-Dame",
+"dnb":"ORES"
+},
+{
+"postcode":"8820",
+"gemeente":"Torhout",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4263",
+"gemeente":"Tourinne",
+"dnb":"ORES"
+},
+{
+"postcode":"7500",
+"gemeente":"Tournai",
+"dnb":"AIESH"
+},
+{
+"postcode":"6183",
+"gemeente":"Trazegnies",
+"dnb":"ORES"
+},
+{
+"postcode":"3120",
+"gemeente":"Tremelo",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4980",
+"gemeente":"Trois-Ponts",
+"dnb":"RESA"
+},
+{
+"postcode":"4870",
+"gemeente":"Trooz",
+"dnb":"RESA"
+},
+{
+"postcode":"1480",
+"gemeente":"Tubize",
+"dnb":"ORES"
+},
+{
+"postcode":"2300",
+"gemeente":"Turnhout",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"6833",
+"gemeente":"Ucimont",
+"dnb":"ORES"
+},
+{
+"postcode":"3631",
+"gemeente":"Uikhoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9290",
+"gemeente":"Uitbergen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8370",
+"gemeente":"Uitkerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1180",
+"gemeente":"Ukkel",
+"dnb":"Sibelga"
+},
+{
+"postcode":"3832",
+"gemeente":"Ulbeek",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9910",
+"gemeente":"Ursel",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3054",
+"gemeente":"Vaalbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3770",
+"gemeente":"Val-Meer",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6741",
+"gemeente":"Vance",
+"dnb":"ORES"
+},
+{
+"postcode":"2431",
+"gemeente":"Varendonk",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8490",
+"gemeente":"Varsenare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7536",
+"gemeente":"Vaulx",
+"dnb":"ORES"
+},
+{
+"postcode":"6462",
+"gemeente":"Vaulx-lez-Chimay",
+"dnb":"ORES"
+},
+{
+"postcode":"4051",
+"gemeente":"Vaux-sous-Chèvremont",
+"dnb":"RESA"
+},
+{
+"postcode":"6640",
+"gemeente":"Vaux-sur-Sûre",
+"dnb":"ORES"
+},
+{
+"postcode":"3870",
+"gemeente":"Vechmaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2431",
+"gemeente":"Veerle",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8210",
+"gemeente":"Veldegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3620",
+"gemeente":"Veldwezelt",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3806",
+"gemeente":"Velm",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3020",
+"gemeente":"Veltem-Beisem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9620",
+"gemeente":"Velzeke-Ruddershove",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"4537",
+"gemeente":"Verlaine",
+"dnb":"ORES"
+},
+{
+"postcode":"9130",
+"gemeente":"Verrebroek",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3370",
+"gemeente":"Vertrijk",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4800",
+"gemeente":"Verviers",
+"dnb":"RESA"
+},
+{
+"postcode":"3870",
+"gemeente":"Veulen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8630",
+"gemeente":"Veurne",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7538",
+"gemeente":"Vezon",
+"dnb":"ORES"
+},
+{
+"postcode":"9500",
+"gemeente":"Viane",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8570",
+"gemeente":"Vichte",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"6690",
+"gemeente":"Vielsalm",
+"dnb":"ORES"
+},
+{
+"postcode":"2240",
+"gemeente":"Viersel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1472",
+"gemeente":"Vieux-Genappe",
+"dnb":"ORES"
+},
+{
+"postcode":"7322",
+"gemeente":"Ville-Pommeroeul",
+"dnb":"ORES"
+},
+{
+"postcode":"7813",
+"gemeente":"Villers-Notre-Dame",
+"dnb":"ORES"
+},
+{
+"postcode":"7031",
+"gemeente":"Villers-Saint-Ghislain",
+"dnb":"ORES"
+},
+{
+"postcode":"4453",
+"gemeente":"Villers-Saint-Siméon",
+"dnb":"RESA"
+},
+{
+"postcode":"4161",
+"gemeente":"Villers-aux-Tours",
+"dnb":"RESA"
+},
+{
+"postcode":"6823",
+"gemeente":"Villers-devant-Orval",
+"dnb":"ORES"
+},
+{
+"postcode":"1495",
+"gemeente":"Villers-la-Ville",
+"dnb":"ORES"
+},
+{
+"postcode":"4530",
+"gemeente":"Villers-le-Bouillet",
+"dnb":"ORES"
+},
+{
+"postcode":"1800",
+"gemeente":"Vilvoorde",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9921",
+"gemeente":"Vinderhoute",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8630",
+"gemeente":"Vinkem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9800",
+"gemeente":"Vinkt",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6461",
+"gemeente":"Virelles",
+"dnb":"ORES"
+},
+{
+"postcode":"5670",
+"gemeente":"Viroinval",
+"dnb":"AIEG"
+},
+{
+"postcode":"6760",
+"gemeente":"Virton",
+"dnb":"ORES"
+},
+{
+"postcode":"3300",
+"gemeente":"Vissenaken",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4600",
+"gemeente":"Visé",
+"dnb":"RESA"
+},
+{
+"postcode":"4683",
+"gemeente":"Vivegnis",
+"dnb":"RESA"
+},
+{
+"postcode":"8600",
+"gemeente":"Vladslo",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8908",
+"gemeente":"Vlamertinge",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9420",
+"gemeente":"Vlekkem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"1602",
+"gemeente":"Vlezenbeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3724",
+"gemeente":"Vliermaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3721",
+"gemeente":"Vliermaalroot",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9520",
+"gemeente":"Vlierzele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3770",
+"gemeente":"Vlijtingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2340",
+"gemeente":"Vlimmeren",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8421",
+"gemeente":"Vlissegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3790",
+"gemeente":"Voeren/Fourons",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9700",
+"gemeente":"Volkegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1570",
+"gemeente":"Vollezele",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9400",
+"gemeente":"Voorde",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8902",
+"gemeente":"Voormezele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3840",
+"gemeente":"Voort",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"4451",
+"gemeente":"Voroux-lez-Liers",
+"dnb":"RESA"
+},
+{
+"postcode":"2290",
+"gemeente":"Vorselaar",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3890",
+"gemeente":"Vorsen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1190",
+"gemeente":"Vorst",
+"dnb":"Sibelga"
+},
+{
+"postcode":"2430",
+"gemeente":"Vorst (Kempen)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2350",
+"gemeente":"Vosselaar",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9850",
+"gemeente":"Vosselare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3080",
+"gemeente":"Vossem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"4041",
+"gemeente":"Vottem",
+"dnb":"RESA"
+},
+{
+"postcode":"9120",
+"gemeente":"Vrasene",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"2531",
+"gemeente":"Vremde",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3700",
+"gemeente":"Vreren",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"5550",
+"gemeente":"Vresse-sur-Semois",
+"dnb":"ORES"
+},
+{
+"postcode":"3770",
+"gemeente":"Vroenhoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3630",
+"gemeente":"Vucht",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9890",
+"gemeente":"Vurste",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3473",
+"gemeente":"Waanrode",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9506",
+"gemeente":"Waarbeke",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8020",
+"gemeente":"Waardamme",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2550",
+"gemeente":"Waarloos",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8581",
+"gemeente":"Waarmaarde",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9950",
+"gemeente":"Waarschoot",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3401",
+"gemeente":"Waasmont",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9250",
+"gemeente":"Waasmunster",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9185",
+"gemeente":"Wachtebeke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"6223",
+"gemeente":"Wagnelée",
+"dnb":"ORES"
+},
+{
+"postcode":"4950",
+"gemeente":"Waimes",
+"dnb":"RESA"
+},
+{
+"postcode":"8720",
+"gemeente":"Wakken",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"5650",
+"gemeente":"Walcourt",
+"dnb":"ORES"
+},
+{
+"postcode":"2800",
+"gemeente":"Walem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1457",
+"gemeente":"Walhain",
+"dnb":"ORES"
+},
+{
+"postcode":"4711",
+"gemeente":"Walhorn",
+"dnb":"RESA"
+},
+{
+"postcode":"3401",
+"gemeente":"Walsbets",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3401",
+"gemeente":"Walshoutem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3740",
+"gemeente":"Waltwilder",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1741",
+"gemeente":"Wambeek",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"6224",
+"gemeente":"Wanfercée-Baulet",
+"dnb":"ORES"
+},
+{
+"postcode":"3400",
+"gemeente":"Wange",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"5564",
+"gemeente":"Wanlin",
+"dnb":"ORES"
+},
+{
+"postcode":"9772",
+"gemeente":"Wannegem-Lede",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4520",
+"gemeente":"Wanze",
+"dnb":"ORES"
+},
+{
+"postcode":"9340",
+"gemeente":"Wanzele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"7548",
+"gemeente":"Warchin",
+"dnb":"ORES"
+},
+{
+"postcode":"8790",
+"gemeente":"Waregem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4300",
+"gemeente":"Waremme",
+"dnb":"ORES"
+},
+{
+"postcode":"4608",
+"gemeente":"Warsage",
+"dnb":"RESA"
+},
+{
+"postcode":"4219",
+"gemeente":"Wasseiges",
+"dnb":"ORES"
+},
+{
+"postcode":"9988",
+"gemeente":"Waterland-Oudeman",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1410",
+"gemeente":"Waterloo",
+"dnb":"ORES"
+},
+{
+"postcode":"1170",
+"gemeente":"Watermaal-Bosvoorde",
+"dnb":"Sibelga"
+},
+{
+"postcode":"9988",
+"gemeente":"Watervliet",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8978",
+"gemeente":"Watou",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7131",
+"gemeente":"Waudrez",
+"dnb":"ORES"
+},
+{
+"postcode":"1474",
+"gemeente":"Ways",
+"dnb":"ORES"
+},
+{
+"postcode":"3290",
+"gemeente":"Webbekom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2275",
+"gemeente":"Wechelderzande",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2381",
+"gemeente":"Weelde",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"1982",
+"gemeente":"Weerde",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2880",
+"gemeente":"Weert",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9700",
+"gemeente":"Welden",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"4840",
+"gemeente":"Welkenraedt",
+"dnb":"RESA"
+},
+{
+"postcode":"9473",
+"gemeente":"Welle",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3830",
+"gemeente":"Wellen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"6920",
+"gemeente":"Wellin",
+"dnb":"ORES"
+},
+{
+"postcode":"1780",
+"gemeente":"Wemmel",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8420",
+"gemeente":"Wenduine",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3118",
+"gemeente":"Werchter",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8610",
+"gemeente":"Werken",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3730",
+"gemeente":"Werm",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8940",
+"gemeente":"Wervik",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3150",
+"gemeente":"Wespelaar",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8434",
+"gemeente":"Westende",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2260",
+"gemeente":"Westerlo",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"8300",
+"gemeente":"Westkapelle",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8460",
+"gemeente":"Westkerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2390",
+"gemeente":"Westmalle",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"2235",
+"gemeente":"Westmeerbeek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8954",
+"gemeente":"Westouter",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9230",
+"gemeente":"Westrem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8840",
+"gemeente":"Westrozebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8640",
+"gemeente":"Westvleteren",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9230",
+"gemeente":"Wetteren",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8560",
+"gemeente":"Wevelgem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3111",
+"gemeente":"Wezemaal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"1970",
+"gemeente":"Wezembeek-Oppem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3401",
+"gemeente":"Wezeren",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"6666",
+"gemeente":"Wibrin",
+"dnb":"ORES"
+},
+{
+"postcode":"9260",
+"gemeente":"Wichelen",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3700",
+"gemeente":"Widooie (Haren)",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"2222",
+"gemeente":"Wiekevorst",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8710",
+"gemeente":"Wielsbeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"7608",
+"gemeente":"Wiers",
+"dnb":"ORES"
+},
+{
+"postcode":"5571",
+"gemeente":"Wiesme",
+"dnb":"ORES"
+},
+{
+"postcode":"9280",
+"gemeente":"Wieze",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"3990",
+"gemeente":"Wijchmaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3850",
+"gemeente":"Wijer",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3018",
+"gemeente":"Wijgmaal",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2110",
+"gemeente":"Wijnegem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3670",
+"gemeente":"Wijshagen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8953",
+"gemeente":"Wijtschate",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3803",
+"gemeente":"Wilderen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"3370",
+"gemeente":"Willebringen",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"2830",
+"gemeente":"Willebroek",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"7506",
+"gemeente":"Willemeau",
+"dnb":"ORES"
+},
+{
+"postcode":"2610",
+"gemeente":"Wilrijk",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3012",
+"gemeente":"Wilsele",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8431",
+"gemeente":"Wilskerke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3501",
+"gemeente":"Wimmertingen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8750",
+"gemeente":"Wingene",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3020",
+"gemeente":"Winksele",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3722",
+"gemeente":"Wintershoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8640",
+"gemeente":"Woesten",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1861",
+"gemeente":"Wolvertem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"1861",
+"gemeente":"Wolvertem (grens Londerzeel)",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"2160",
+"gemeente":"Wommelgem",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3350",
+"gemeente":"Wommersom",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"9032",
+"gemeente":"Wondelgem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9800",
+"gemeente":"Wontergem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9790",
+"gemeente":"Wortegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2323",
+"gemeente":"Wortel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"9550",
+"gemeente":"Woubrechtegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8600",
+"gemeente":"Woumen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8670",
+"gemeente":"Wulpen",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8952",
+"gemeente":"Wulvergem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8630",
+"gemeente":"Wulveringem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2990",
+"gemeente":"Wuustwezel",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"4652",
+"gemeente":"Xhendelesse",
+"dnb":"RESA"
+},
+{
+"postcode":"5530",
+"gemeente":"Yvoir",
+"dnb":"ORES"
+},
+{
+"postcode":"9080",
+"gemeente":"Zaffelare",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9506",
+"gemeente":"Zandbergen",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8680",
+"gemeente":"Zande",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2240",
+"gemeente":"Zandhoven",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2040",
+"gemeente":"Zandvliet",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"8400",
+"gemeente":"Zandvoorde (Oostende)",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8980",
+"gemeente":"Zandvoorde (Zonnebeke)",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9500",
+"gemeente":"Zarlardinge",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8610",
+"gemeente":"Zarren",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"1930",
+"gemeente":"Zaventem",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"8210",
+"gemeente":"Zedelgem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8380",
+"gemeente":"Zeebrugge",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9660",
+"gemeente":"Zegelsem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"9240",
+"gemeente":"Zele",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3545",
+"gemeente":"Zelem",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"1731",
+"gemeente":"Zellik",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"9060",
+"gemeente":"Zelzate",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"1980",
+"gemeente":"Zemst",
+"dnb":"Fluvius Halle-Vilvoorde"
+},
+{
+"postcode":"3800",
+"gemeente":"Zepperen",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8490",
+"gemeente":"Zerkegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"8470",
+"gemeente":"Zevekote",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9080",
+"gemeente":"Zeveneken",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9800",
+"gemeente":"Zeveren",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9840",
+"gemeente":"Zevergem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"3271",
+"gemeente":"Zichem",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"3770",
+"gemeente":"Zichen-Zussen-Bolder",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8902",
+"gemeente":"Zillebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9750",
+"gemeente":"Zingem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"2260",
+"gemeente":"Zoerle-Parwijs",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"2980",
+"gemeente":"Zoersel",
+"dnb":"Fluvius Antwerpen"
+},
+{
+"postcode":"3550",
+"gemeente":"Zolder",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"9930",
+"gemeente":"Zomergem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2387",
+"gemeente":"Zondereigen",
+"dnb":"Fluvius Kempen"
+},
+{
+"postcode":"3520",
+"gemeente":"Zonhoven",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8980",
+"gemeente":"Zonnebeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9520",
+"gemeente":"Zonnegem",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9620",
+"gemeente":"Zottegem",
+"dnb":"Fluvius Midden-Vlaanderen"
+},
+{
+"postcode":"8630",
+"gemeente":"Zoutenaaie",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3440",
+"gemeente":"Zoutleeuw",
+"dnb":"Fluvius Zenne-Dijle"
+},
+{
+"postcode":"8904",
+"gemeente":"Zuidschote",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8377",
+"gemeente":"Zuienkerke",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"9870",
+"gemeente":"Zulte",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9690",
+"gemeente":"Zulzeke",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"3690",
+"gemeente":"Zutendaal",
+"dnb":"Fluvius Limburg"
+},
+{
+"postcode":"8550",
+"gemeente":"Zwevegem",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"8750",
+"gemeente":"Zwevezele",
+"dnb":"Fluvius West"
+},
+{
+"postcode":"9052",
+"gemeente":"Zwijnaarde",
+"dnb":"Fluvius Imewo"
+},
+{
+"postcode":"2070",
+"gemeente":"Zwijndrecht",
+"dnb":"Fluvius Antwerpen"
+}
+]
