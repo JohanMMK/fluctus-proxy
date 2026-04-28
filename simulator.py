@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Fluctus Battery Dispatch Simulator v1.1
+Fluctus Battery Dispatch Simulator v1.2
 ========================================
 Lees JSON van stdin, schrijf JSON naar stdout.
+
+Wijzigingen v1.2:
+  - PV-KPI labels gecorrigeerd:
+    * pct_zelfconsumptie  = pv_eigen / pv_totaal × 100   (was verwisseld)
+    * pct_zelfvoorziening = pv_eigen / verbruik × 100    (was verwisseld)
+  - Nieuwe expliciete velden: pv_eigen_verbruik_mwh, pv_injectie_mwh
 
 Wijzigingen v1.1:
   - Leveringscontract werkt nu met staffel (Enwyse-stijl)
@@ -680,7 +686,7 @@ def bereken_jaarfactuur(
 # =============================================================================
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.1 — start ===")
+    log.info("=== Fluctus Simulator v1.2 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -854,8 +860,11 @@ def run_simulation(inp: dict) -> dict:
     pv_naar_eigen_verbruik = sum(min(consumption_kw[i], pv_kw[i]) * 0.25 / 1000.0 for i in range(N))
     totaal_verbruik_mwh = sum(consumption_kw) * 0.25 / 1000.0
     totaal_pv_mwh = sum(pv_kw) * 0.25 / 1000.0
-    pct_zelfconsumptie = (pv_naar_eigen_verbruik / totaal_verbruik_mwh * 100) if totaal_verbruik_mwh > 0 else 0
-    pct_zelfvoorziening = (pv_naar_eigen_verbruik / totaal_pv_mwh * 100) if totaal_pv_mwh > 0 else 0
+    # Industriestandaard (v1.2: hersteld na verwisseling in v1.1):
+    #   Zelfconsumptie  = % van PV-productie dat zelf wordt verbruikt (rest = injectie)
+    #   Zelfvoorziening = % van verbruik dat door eigen PV wordt gedekt (rest = afname)
+    pct_zelfconsumptie = (pv_naar_eigen_verbruik / totaal_pv_mwh * 100) if totaal_pv_mwh > 0 else 0
+    pct_zelfvoorziening = (pv_naar_eigen_verbruik / totaal_verbruik_mwh * 100) if totaal_verbruik_mwh > 0 else 0
 
     aantal_overschr_zacht = sum(1 for v in over_afn_zacht_all if v > 0.01)
     aantal_overschr_hard = sum(1 for v in over_afn_hard_all if v > 0.01)
@@ -882,6 +891,9 @@ def run_simulation(inp: dict) -> dict:
         'levensduur_jaren': levensduur_jaren,
         'totaal_afname_mwh': totaal_verbruik_mwh,
         'totaal_pv_mwh': totaal_pv_mwh,
+        # v1.2: expliciete PV-flow-velden zodat UI niet hoeft af te leiden
+        'pv_eigen_verbruik_mwh': pv_naar_eigen_verbruik,
+        'pv_injectie_mwh': max(0.0, totaal_pv_mwh - pv_naar_eigen_verbruik),
         'totaal_grid_in_mwh': sum(grid_in_all) * 0.25 / 1000.0,
         'totaal_grid_out_mwh': sum(grid_out_all) * 0.25 / 1000.0,
     }
