@@ -1428,6 +1428,23 @@ async function buildSimulatorInput(uiInput) {
     out.pv_curtailment = { actief: false };
   }
 
+  // v15.6: BSP-modus block (Niveau 3b — perfect IMB-foresight)
+  // Default: niet actief (= v1.3 gedrag = standaard PV-passthrough)
+  // forecast_modus: conservatief / realistic / optimistisch (× 0.67/1.0/1.5)
+  if (uiInput.bsp) {
+    out.bsp = {
+      actief: !!uiInput.bsp.actief,
+      forecast_modus: uiInput.bsp.forecast_modus || 'realistic',
+      pv_curtailment_allowed: uiInput.bsp.pv_curtailment_allowed !== false  // default true
+    };
+    // Custom capture rate override (advanced, slider in UI)
+    if (uiInput.bsp.paper_capture_rate !== undefined) {
+      out.bsp.paper_capture_rate = parseFloat(uiInput.bsp.paper_capture_rate);
+    }
+  } else {
+    out.bsp = { actief: false };
+  }
+
   // --- 3. Batterij ---
   if (uiInput.batterijId) {
     const batterijen = loadDataFile('batterijen.json');
@@ -1907,4 +1924,4 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   });
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v15.5 (PV curtailment passthrough) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v15.6 (BSP-modus passthrough + simulator-v1.4) draait op poort ' + PORT));
