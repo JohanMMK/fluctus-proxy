@@ -776,7 +776,7 @@ app.post('/cache-update', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.get('/', (req, res) => res.json({
   status: 'ok',
-  versie: '15.4',
+  versie: '15.5',
   model: 'claude-opus-4-7',
   tools: ['web_search_20250305'],
   cache: 'multi-bestand (5 datasets) + gzip compressie',
@@ -1416,6 +1416,18 @@ async function buildSimulatorInput(uiInput) {
     capex_eur: 0
   };
 
+  // v15.5: PV-curtailment block (negatieve-prijs vermijding)
+  // Default: niet actief (= v1.2 gedrag = nominatie volgt productie)
+  if (uiInput.pv_curtailment) {
+    out.pv_curtailment = {
+      actief: !!uiInput.pv_curtailment.actief,
+      trigger_eur_mwh: parseFloat(uiInput.pv_curtailment.trigger_eur_mwh) || 0,
+      strategie: uiInput.pv_curtailment.strategie || 'cap_op_verbruik'
+    };
+  } else {
+    out.pv_curtailment = { actief: false };
+  }
+
   // --- 3. Batterij ---
   if (uiInput.batterijId) {
     const batterijen = loadDataFile('batterijen.json');
@@ -1895,4 +1907,4 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   });
 
 
-app.listen(PORT, () => console.log('Fluctus Worker v15.4 (1 postcodes.json met rijke shape) draait op poort ' + PORT));
+app.listen(PORT, () => console.log('Fluctus Worker v15.5 (PV curtailment passthrough) draait op poort ' + PORT));
