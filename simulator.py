@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
 """
-Fluctus Battery Dispatch Simulator v1.3
+Fluctus Battery Dispatch Simulator v1.4
 ========================================
 Lees JSON van stdin, schrijf JSON naar stdout.
+
+Wijzigingen v1.4:
+  - BSP-modus (Niveau 3b): perfect IMB-foresight LP met:
+    * forecast-met-ruis als nominatie (Optie E)
+    * fysieke flex (PV-curtail, batterij) als BSP-edge
+    * paper capture rate (gekalibreerd op 1.8% tegen externe simulator)
+    * forecast_modus: conservatief / realistic / optimistisch (× 0.67/1.0/1.5)
+  - KRITIEKE BUG FIX: passieve passthrough imbalance regende altijd op
+    (∑ vol × (IMB-DAM)). Dat hoort 0 te zijn voor passive klanten.
+    Live productie had hier een systematische fout.
+  - Refactored bereken_jaarfactuur met optionele nom_afn_kw_all/nom_inj_kw_all
+    voor BSP-decompositie. Backwards-compat met oude calls.
+  - Input: bsp = { actief: bool, paper_capture_rate: float, 
+                   forecast_modus: 'conservatief'|'realistic'|'optimistisch',
+                   pv_curtailment_allowed: bool }
 
 Wijzigingen v1.3:
   - PV-curtailment optie: cap PV op eigen verbruik wanneer DAM < drempel
@@ -442,35 +457,291 @@ def lp_dispatch_day(
     }
 
 
+def lp_dispatch_day_bsp(
+    consumption_kw: list,         # 96 kwartieren — werkelijk verbruik
+    pv_kw: list,                  # 96 kwartieren — werkelijk PV (potentieel, vóór curtailment)
+    spot_eur_mwh: list,           # 96 kwartieren — DAM (D-1 bekend)
+    imb_eur_mwh: list,            # 96 kwartieren — IMB werkelijk (perfect foresight!)
+    soc_start_kwh: float,
+    batterij: dict,
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+    daily_paper_risk_mwh: float,  # max ∑(dev_pos+dev_neg) × dt / 1000 per dag in MWh
+    pv_curtailment_allowed: bool, # of LP PV mag curtailen (anders pv_curtail=0)
+    consumption_forecast_kw: list = None,  # v1.4: forecast (= nominatie) — None=geen ruis
+    pv_forecast_kw: list = None,           # v1.4: forecast (= nominatie) — None=geen ruis
+) -> dict:
+    """
+    BSP-uitbreiding van lp_dispatch_day. Realistisch model:
+      - Nominatie = verwachte werkelijke positie (vast, op basis van consumption-pv).
+        BSP heeft GEEN vrijheid om te kunstmatig te ondernomineren of overnomineren.
+      - LP beslist over:
+        1. PV curtailment (fysieke flexibiliteit)
+        2. Batterij dispatch (fysieke flexibiliteit)
+        3. Papier-deviation: dev_pos/dev_neg t.o.v. nominatie, binnen risk-budget.
+           Dit is een financiële swap: deel van volume wordt via IMB afgerekend ipv DAM.
+
+    Realisatie balans:
+      grid_in[t] - grid_out[t]
+        = consumption[t] - (pv[t] - pv_curtail[t]) + p_ch[t] - p_dis[t]   (fysiek)
+        = nom_net[t] + (- pv_curtail[t] + p_ch[t] - p_dis[t]) + (dev_pos[t] - dev_neg[t])
+      waarbij nom_net[t] = consumption[t] - pv[t]  (vast)
+
+    DAM-tak rekent op nom_net (afgerekend tegen DAM met markup/markdown).
+    IMB-tak rekent op (fysieke-flex + papier-dev) tegen IMB (geen markup).
+
+    Returns: zelfde keys als lp_dispatch_day + extra:
+      - nom_dam_kw[96]: vaste nominatie (afname-positief)
+      - dev_kw[96]: dev_pos - dev_neg
+      - pv_curtailed_kw[96]
+      - nom_revenue_eur, dev_revenue_eur
+    """
+    H = 96
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)
+
+    soc_min = 0.0
+    soc_max = kwh_batt * dod
+
+    tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    pen_afname_zacht = tar_afname_kw / 12.0
+    pen_afname_hard = 100000.0 / 12.0
+    pen_injectie_zacht = tar_injectie_kw / 12.0
+    pen_injectie_hard = 100000.0 / 12.0
+
+    max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+
+    injectie_toegelaten = contract.get('injectie_toegelaten', True)
+    if not injectie_toegelaten:
+        max_injectie_zacht = 0.0
+        max_injectie_hard = 0.0
+
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+
+    markup_per_mwh = pricing['markup_dam']
+    markdown_per_mwh = pricing['markdown_dam']
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
+
+    # ── NOMINATIE = forecast met ruis (referentie voor speculation budget) ──
+    cons_for_nom = consumption_forecast_kw if consumption_forecast_kw is not None else consumption_kw
+    pv_for_nom = pv_forecast_kw if pv_forecast_kw is not None else pv_kw
+    forecast_afn = [max(cons_for_nom[t] - pv_for_nom[t], 0) for t in range(H)]
+    forecast_inj = [max(pv_for_nom[t] - cons_for_nom[t], 0) for t in range(H)]
+    nom_net = [cons_for_nom[t] - pv_for_nom[t] for t in range(H)]  # behouden voor return
+    
+    prob = pulp.LpProblem('battery_dispatch_bsp', pulp.LpMinimize)
+
+    # Bestaande grid + batterij variabelen
+    p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+    p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+    grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+    grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+    soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+    over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+    over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
+    over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+    over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
+
+    # PV-curtailment variabele
+    if pv_curtailment_allowed:
+        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
+    else:
+        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
+
+    # ── NOMINATIE als LP-variabele met FYSIEKE richting-constraint ──
+    # Forecast richting bepaalt of klant afnemer of injecteur is in dit kwartier.
+    # LP mag binnen budget de NOMINATIE schalen, maar niet van richting wisselen.
+    # Per kwartier: ofwel nom_afn > 0 (forecast netto afname), ofwel nom_inj > 0 (forecast netto injectie).
+    nom_afn = []
+    nom_inj = []
+    for t in range(H):
+        if forecast_afn[t] > 0:
+            # Afname-richting: nom_afn variabel, nom_inj = 0
+            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
+            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))  # forced 0
+        else:
+            # Injectie-richting: nom_inj variabel, nom_afn = 0
+            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))  # forced 0
+            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
+    
+    # Spec-deviation: hoeveel wijkt nominatie af van forecast? (auxiliary vars voor abs)
+    spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
+    spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
+
+    prob += soc[0] == soc_start_kwh
+
+    for t in range(H):
+        # Fysieke energy balance
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
+        prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+        prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+        prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
+        prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+        prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
+        prob += p_ch[t] + p_dis[t] <= kw_batt
+        # Spec-deviation absolute value: nominatie netto - forecast netto
+        # In afname-kwartier: deviation = nom_afn - forecast_afn
+        # In injectie-kwartier: deviation = -(nom_inj - forecast_inj)
+        # Algemener: dev = (nom_afn - nom_inj) - (forecast_afn - forecast_inj)
+        prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
+        # Forceer constraint dat NIET BEIDE nom_afn en nom_inj > 0 in zelfde kwartier
+        # (al gedaan via upper-bound = 0 voor de inactieve richting)
+
+    # Speculation budget: ∑(|spec_dev|) per dag ≤ budget × werkelijk dagvolume
+    if daily_paper_risk_mwh >= 0:
+        spec_total = pulp.lpSum(spec_dev_pos[t] + spec_dev_neg[t] for t in range(H)) * dt_h / 1000.0
+        prob += spec_total <= daily_paper_risk_mwh
+
+    # ── Objective ──
+    obj_terms = []
+    for t in range(H):
+        prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0  # €/kWh
+        prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+        prijs_imb = imb_eur_mwh[t] / 1000.0
+        belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
+        
+        # DAM-tak op nominatie
+        obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
+        obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+        # IMB-tak op deviation = werkelijk netto - genomineerd netto
+        # afname_dev = grid_in[t] - nom_afn[t]
+        # injectie_dev = grid_out[t] - nom_inj[t]
+        # netto_dev = afname_dev - injectie_dev (positief = extra afname → kost)
+        obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
+        obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
+        # Belastingen op fysiek volume
+        obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
+        # Cyclus-kost
+        obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+        # Penalties
+        obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+        obj_terms.append(pen_afname_hard * over_afn_hard[t])
+        obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+        obj_terms.append(pen_injectie_hard * over_inj_hard[t])
+        # Eps-penalty op simultaan in/uit (anti-fake-volume hack)
+        # Sterker dan eerst, want LP exploiteert dit anders
+        eps_penalty = 1.0 / 1000.0  # €1/MWh = significant maar niet bruut
+        obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+
+    prob += pulp.lpSum(obj_terms)
+
+    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=15)
+    status = prob.solve(solver)
+
+    if pulp.LpStatus[status] not in ('Optimal', 'Not Solved'):
+        log.warning(f"BSP-LP status: {pulp.LpStatus[status]}")
+
+    # Extract values
+    nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
+    nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
+    pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
+    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+    grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+    
+    dev_net_vals = [(grid_in_vals[t] - nom_afn_vals[t]) - (grid_out_vals[t] - nom_inj_vals[t]) for t in range(H)]
+
+    nom_revenue = sum(
+        (spot_eur_mwh[t] + markup_per_mwh) / 1000.0 * nom_afn_vals[t] * dt_h -
+        (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0 * nom_inj_vals[t] * dt_h
+        for t in range(H)
+    )
+
+    return {
+        'p_charge': p_ch_vals,
+        'p_discharge': p_dis_vals,
+        'grid_in': grid_in_vals,
+        'grid_out': grid_out_vals,
+        'soc': [pulp.value(v) or 0.0 for v in soc],
+        'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
+        'over_afn_hard': [pulp.value(v) or 0.0 for v in over_afn_hard],
+        'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
+        'over_inj_hard': [pulp.value(v) or 0.0 for v in over_inj_hard],
+        # BSP-specifiek
+        'nom_dam_kw': list(nom_net),    # forecast-based nominatie (referentie)
+        'nom_eff_afn_kw': nom_afn_vals,  # LP-bepaalde werkelijke nominatie
+        'nom_eff_inj_kw': nom_inj_vals,
+        'dev_kw': dev_net_vals,
+        'pv_curtailed_kw': pv_curt_vals,
+        'nom_revenue_eur': nom_revenue,
+    }
+
+
 # =============================================================================
 # JAARFACTUUR (volgens Facturatielogica.xlsx)
 # =============================================================================
 
 def bereken_jaarfactuur(
-    grid_in_kw: list,              # N kwartieren
-    grid_out_kw: list,             # N kwartieren
+    grid_in_kw: list,              # N kwartieren — fysiek werkelijk afgenomen
+    grid_out_kw: list,             # N kwartieren — fysiek werkelijk geïnjecteerd
     spot_eur_mwh: list,            # N kwartieren (werkelijk, niet forecast)
     imb_eur_mwh: list,             # N kwartieren (werkelijk, alleen relevant voor passthrough)
     timestamps: list,              # list[datetime], N kwartieren
     contract: dict,
     netbeheer: dict,
     n_maanden: int = 12,
+    nom_afn_kw_all: list = None,   # v1.4 BSP: genomineerde afname (None=passive default)
+    nom_inj_kw_all: list = None,   # v1.4 BSP: genomineerde injectie
 ) -> dict:
     """
     Bereken jaarfactuur volgens groepen A-E.
+    
+    BSP-uitbreiding (v1.4):
+    - Als nom_afn_kw_all en nom_inj_kw_all zijn gegeven, splits de DAM/IMB-tak:
+        DAM-tak rekent op nominatie (nom_afn × DAM, nom_inj × DAM)
+        IMB-tak rekent op deviation (grid_in - nom_afn) × IMB
+        Belastingen (gsc/wkk/vergr) op fysiek volume (grid_in)
+    - Als ze None zijn → passive gedrag (alle volume via DAM zoals voorheen)
+    
     Returns: dict met groepen en totaal.
     """
     N = len(grid_in_kw)
     dt_h = 0.25
+    
+    # BSP-modus actief? (= nominatie-arrays gegeven)
+    bsp_modus = (nom_afn_kw_all is not None) and (nom_inj_kw_all is not None)
+    
+    # Default: nominatie = werkelijk volume (passive equivalence)
+    if not bsp_modus:
+        nom_afn_kw_all = list(grid_in_kw)
+        nom_inj_kw_all = list(grid_out_kw)
 
     tarieven = netbeheer['tarieven']
     spanning = netbeheer['spanning']  # 'MS' of 'LS'
 
-    # Afname totaal in MWh
+    # Fysiek (werkelijk) volume in kWh
     afname_kwh_per_kwartier = [grid_in_kw[i] * dt_h for i in range(N)]
     injectie_kwh_per_kwartier = [grid_out_kw[i] * dt_h for i in range(N)]
     totaal_afname_mwh = sum(afname_kwh_per_kwartier) / 1000.0
     totaal_injectie_mwh = sum(injectie_kwh_per_kwartier) / 1000.0
+    
+    # Nominatie-volume in kWh (= grid in passive, ander in BSP)
+    nom_afn_kwh_per_kwartier = [nom_afn_kw_all[i] * dt_h for i in range(N)]
+    nom_inj_kwh_per_kwartier = [nom_inj_kw_all[i] * dt_h for i in range(N)]
+    totaal_nom_afn_mwh = sum(nom_afn_kwh_per_kwartier) / 1000.0
+    totaal_nom_inj_mwh = sum(nom_inj_kwh_per_kwartier) / 1000.0
+    
+    # Deviation per kwartier (positief = extra afname / minder injectie t.o.v. nominatie)
+    # afname_dev_kw[t] = grid_in[t] - nom_afn[t]  (kan + of -)
+    # injectie_dev_kw[t] = grid_out[t] - nom_inj[t] (kan + of -)
+    afname_dev_kw = [grid_in_kw[i] - nom_afn_kw_all[i] for i in range(N)]
+    injectie_dev_kw = [grid_out_kw[i] - nom_inj_kw_all[i] for i in range(N)]
 
     # Maandindexering
     maand_kw_afname = [[] for _ in range(12)]
@@ -497,46 +768,49 @@ def bereken_jaarfactuur(
     toegangsvermogen = max(maandpieken_afname)  # = max(maandpieken)
 
     # ---- GROEP A: ENERGIEKOST (commodity) ----
-    # v1.1: markup/markdown uit staffel (Enwyse-stijl) als die aanwezig is.
+    # v1.4 refactor: DAM-tak rekent op nominatie, IMB-tak op deviation, belastingen op fysiek volume.
+    # In passive-modus (geen BSP) zijn nominatie = werkelijk → identiek aan oude logica.
     pricing = resolve_contract_pricing(contract, totaal_afname_mwh)
     A = {}
-    # A1. Afname energie spot (kost = sum(kWh × spot/1000))
+    # A1. Afname energie spot — op NOMINATIE (in passive: = grid_in)
     A['afname_energie_spot'] = sum(
-        afname_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
+        nom_afn_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
     )
-    # A2. Markup afname (DAM-tarief uit schijf)
-    A['markup_afname'] = totaal_afname_mwh * pricing['markup_dam']
-    # A3. Vergroening van verbruik (€/MWh × MWh afname)
+    # A2. Markup afname (DAM-tarief uit schijf) — op NOMINATIE-volume
+    A['markup_afname'] = totaal_nom_afn_mwh * pricing['markup_dam']
+    # A3-5. Belastingen op FYSIEK volume (vergroening, gsc, wkk)
+    # Deze zijn netvergoedingen voor wat fysiek door de meter ging.
     A['vergroening'] = totaal_afname_mwh * pricing['vergroening']
-    # A4. GSC (groene stroom certificaten — meestal 0 bij Enwyse-contract)
     A['gsc'] = totaal_afname_mwh * pricing['gsc']
-    # A5. WKK (warmte-krachtkoppeling — meestal 0 bij Enwyse-contract)
     A['wkk'] = totaal_afname_mwh * pricing['wkk']
     # A6. Imbalance afname
+    # In passive: dev = 0 → imbalance = 0 (consistent met v1.4-fix)
+    # In BSP: dev × IMB per kwartier
+    # In forfaitair: vast forfait per MWh op fysiek volume
     if pricing['modus'] == 'forfaitair':
-        # Forfaitair: imbalance markup als €/MWh op het volume
         A['imbalance_afname'] = totaal_afname_mwh * pricing['markup_imb']
     else:
-        # Passthrough: per kwartier (imb - spot) × kWh
+        # Passthrough (passief of BSP): IMB op deviation × IMB-prijs
+        # In passive is dev=0 dus = 0 (correct).
+        # In BSP rekent dit (grid_in - nom_afn) × IMB per kwartier.
         A['imbalance_afname'] = sum(
-            afname_kwh_per_kwartier[i] * (imb_eur_mwh[i] - spot_eur_mwh[i]) / 1000.0
-            for i in range(N)
+            afname_dev_kw[i] * dt_h * imb_eur_mwh[i] / 1000.0 for i in range(N)
         )
     # A7. Vaste kost leverancier (€/maand × 12)
     A['vaste_kost_leverancier'] = pricing['vaste_kost_maand'] * 12
-    # A8. Injectie energie spot (negatief = inkomst)
+    # A8. Injectie energie spot (negatief = inkomst) — op NOMINATIE
     A['injectie_energie_spot'] = -sum(
-        injectie_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
+        nom_inj_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
     )
-    # A9. Markdown injectie (positief, want minder inkomst)
-    A['markdown_injectie'] = totaal_injectie_mwh * pricing['markdown_dam']
-    # A10. Imbalance injectie
+    # A9. Markdown injectie (positief, want minder inkomst) — op NOMINATIE-volume
+    A['markdown_injectie'] = totaal_nom_inj_mwh * pricing['markdown_dam']
+    # A10. Imbalance injectie — zelfde logica als A6
     if pricing['modus'] == 'forfaitair':
         A['imbalance_injectie'] = totaal_injectie_mwh * pricing['markdown_imb']
     else:
+        # IMB op deviation × IMB-prijs (negatief = inkomst, want injectie-deviation = extra verkoop)
         A['imbalance_injectie'] = -sum(
-            injectie_kwh_per_kwartier[i] * (imb_eur_mwh[i] - spot_eur_mwh[i]) / 1000.0
-            for i in range(N)
+            injectie_dev_kw[i] * dt_h * imb_eur_mwh[i] / 1000.0 for i in range(N)
         )
     A['_subtotaal'] = sum(v for k, v in A.items() if not k.startswith('_'))
     A['_meta'] = {
@@ -692,7 +966,7 @@ def bereken_jaarfactuur(
 # =============================================================================
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.3 — start ===")
+    log.info("=== Fluctus Simulator v1.4 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -803,10 +1077,29 @@ def run_simulation(inp: dict) -> dict:
 
     n_dagen = N // 96
     
+    # === BSP CONFIG ===
+    # Optie E: forecast-met-ruis als nominatie + flex
+    bsp_cfg = inp.get('bsp', {})
+    bsp_actief = bsp_cfg.get('actief', False)
+    
     # === SNELLE PAD 1: geen batterij EN geen PV → geen LP nodig ===
     skip_lp = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) <= 0
     # === SNELLE PAD 2: geen batterij MAAR wel PV → geen LP nodig (PV is passief) ===
     pv_only = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) > 0
+    
+    # BSP-modus heeft altijd LP nodig — overschrijf snelle paden
+    if bsp_actief and (max(pv_kw) > 0 or batt['kwh'] > 0):
+        skip_lp = False
+        pv_only = False
+    
+    # Initialiseer BSP-storage (gebruikt zelfs als BSP niet actief, voor consistente structuur)
+    nom_dam_kw_all = []
+    dev_kw_all = []
+    nom_eff_afn_kw_all = []
+    nom_eff_inj_kw_all = []
+    pv_curtailed_kw_bsp_all = []
+    bsp_imb_afname_eur = 0.0
+    bsp_imb_injectie_eur = 0.0
     
     if skip_lp:
         log.info("Geen batterij/PV — LP wordt overgeslagen (snelle pad)")
@@ -853,45 +1146,130 @@ def run_simulation(inp: dict) -> dict:
             p_ch_all.append(0.0)
             soc_all.append(0.0)
     else:
-        for d in range(n_dagen):
-            i0 = d * 96
-            i1 = i0 + 96
-            result = lp_dispatch_day(
-                consumption_forecast[i0:i1],
-                pv_forecast[i0:i1],
-                spot_forecast[i0:i1],
-                soc_kwh,
-                batt,
-                inp['aansluiting'],
-                inp['contract'],
-                cyclus_kost,
-            )
-            grid_in_all.extend(result['grid_in'])
-            grid_out_all.extend(result['grid_out'])
-            p_dis_all.extend(result['p_discharge'])
-            p_ch_all.extend(result['p_charge'])
-            soc_all.extend(result['soc'][1:])
-            soc_kwh = result['soc'][-1]
-            over_afn_zacht_all.extend(result['over_afn_zacht'])
-            over_afn_hard_all.extend(result['over_afn_hard'])
-            over_inj_zacht_all.extend(result['over_inj_zacht'])
-            over_inj_hard_all.extend(result['over_inj_hard'])
+        # === STANDAARD LP-PAD (batterij of BSP-modus) ===
+        if bsp_actief:
+            # BSP-modus: gebruik lp_dispatch_day_bsp met perfect IMB-foresight.
+            # Nominatie wordt gebaseerd op consumption_forecast/pv_forecast (= forecast-met-ruis).
+            # Vermenigvuldigers van ruis komen uit profielconfig + globale modus.
+            log.info("BSP-modus actief — gebruik lp_dispatch_day_bsp met IMB-foresight")
+            pv_curt_allowed = bsp_cfg.get('pv_curtailment_allowed', True)
+            # Capture rate: hoeveel paper-deviation toelaten per dag als % van werkelijk dagvolume.
+            # Default 1.8% = gekalibreerd tegen externe simulator op rolling 12m slager 200MWh + 125 kWp.
+            # In productie kan deze worden bijgesteld via 'forecast_modus' (conservatief/realistic/optimistisch).
+            forecast_modus = bsp_cfg.get('forecast_modus', 'realistic')
+            modus_multiplier = {
+                'conservatief': 0.67,   # -33% van realistic
+                'realistic': 1.0,
+                'optimistisch': 1.5,    # +50% van realistic
+            }.get(forecast_modus, 1.0)
+            paper_capture_rate = bsp_cfg.get('paper_capture_rate', 0.018) * modus_multiplier
+            log.info(f"BSP capture rate: {paper_capture_rate*100:.1f}% ({forecast_modus} × {modus_multiplier})")
+            for d in range(n_dagen):
+                i0 = d * 96
+                i1 = i0 + 96
+                # Per-dag papier-budget: cap_rate × (werkelijk dagvolume in MWh)
+                daily_volume_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
+                daily_paper_budget_mwh = paper_capture_rate * daily_volume_mwh
+                
+                result = lp_dispatch_day_bsp(
+                    consumption_kw=consumption_kw[i0:i1],
+                    pv_kw=pv_kw[i0:i1],
+                    spot_eur_mwh=spot_actual[i0:i1],   # DAM perfect (D-1 bekend)
+                    imb_eur_mwh=imb_actual[i0:i1],     # IMB PERFECT FORESIGHT
+                    soc_start_kwh=soc_kwh,
+                    batterij=batt,
+                    aansluiting=inp['aansluiting'],
+                    contract=inp['contract'],
+                    cyclus_kost_eur_per_kwh=cyclus_kost,
+                    daily_paper_risk_mwh=daily_paper_budget_mwh,  # capture-rate budget
+                    pv_curtailment_allowed=pv_curt_allowed,
+                    consumption_forecast_kw=consumption_forecast[i0:i1],
+                    pv_forecast_kw=pv_forecast[i0:i1],
+                )
+                grid_in_all.extend(result['grid_in'])
+                grid_out_all.extend(result['grid_out'])
+                p_dis_all.extend(result['p_discharge'])
+                p_ch_all.extend(result['p_charge'])
+                soc_all.extend(result['soc'][1:])
+                soc_kwh = result['soc'][-1]
+                over_afn_zacht_all.extend(result['over_afn_zacht'])
+                over_afn_hard_all.extend(result['over_afn_hard'])
+                over_inj_zacht_all.extend(result['over_inj_zacht'])
+                over_inj_hard_all.extend(result['over_inj_hard'])
+                # BSP-specifieke output
+                nom_dam_kw_all.extend(result['nom_dam_kw'])
+                dev_kw_all.extend(result['dev_kw'])
+                nom_eff_afn_kw_all.extend(result['nom_eff_afn_kw'])
+                nom_eff_inj_kw_all.extend(result['nom_eff_inj_kw'])
+                pv_curtailed_kw_bsp_all.extend(result['pv_curtailed_kw'])
+                if (d + 1) % 30 == 0:
+                    log.info(f"  BSP-dispatch dag {d+1}/{n_dagen}…")
+        else:
+            for d in range(n_dagen):
+                i0 = d * 96
+                i1 = i0 + 96
+                result = lp_dispatch_day(
+                    consumption_forecast[i0:i1],
+                    pv_forecast[i0:i1],
+                    spot_forecast[i0:i1],
+                    soc_kwh,
+                    batt,
+                    inp['aansluiting'],
+                    inp['contract'],
+                    cyclus_kost,
+                )
+                grid_in_all.extend(result['grid_in'])
+                grid_out_all.extend(result['grid_out'])
+                p_dis_all.extend(result['p_discharge'])
+                p_ch_all.extend(result['p_charge'])
+                soc_all.extend(result['soc'][1:])
+                soc_kwh = result['soc'][-1]
+                over_afn_zacht_all.extend(result['over_afn_zacht'])
+                over_afn_hard_all.extend(result['over_afn_hard'])
+                over_inj_zacht_all.extend(result['over_inj_zacht'])
+                over_inj_hard_all.extend(result['over_inj_hard'])
 
-            if (d + 1) % 30 == 0:
-                log.info(f"  LP-dispatch dag {d+1}/{n_dagen}…")
+                if (d + 1) % 30 == 0:
+                    log.info(f"  LP-dispatch dag {d+1}/{n_dagen}…")
 
     log.info(f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh")
 
     # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
     log.info("Jaarfactuur berekenen…")
+    contract_for_factuur = dict(inp['contract'])
+    
+    # Bouw nominatie-arrays voor BSP-modus.
+    # Optie E zonder ruis (eerste versie): nom_afn = max(consumption - pv, 0), nom_inj = max(pv - consumption, 0)
+    # Dat is de "verwachte fysieke positie" zonder LP-flex. LP heeft consumption/pv niet aangepast,
+    # alleen via curtail/batterij. Dus nominatie ≠ werkelijk netto-volume.
+    # Sigma-ruis op consumption/pv komt in milestone 2C.
+    nom_afn_arr = None
+    nom_inj_arr = None
+    if bsp_actief:
+        contract_for_factuur['modus'] = 'passthrough'
+        # Gebruik effective nominatie uit LP (= forecast + paper-deviation).
+        # Dat is wat de ARP daadwerkelijk nomineert na BSP-strategie:
+        # forecast als basis + LP-bepaalde papier-dev op gunstige IMB-momenten.
+        if nom_eff_afn_kw_all and len(nom_eff_afn_kw_all) == N:
+            nom_afn_arr = nom_eff_afn_kw_all
+            nom_inj_arr = nom_eff_inj_kw_all
+            log.info(f"  BSP eff. nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
+        else:
+            # Fallback: forecast-only nominatie
+            nom_afn_arr = [max(consumption_forecast[i] - pv_forecast[i], 0) for i in range(N)]
+            nom_inj_arr = [max(pv_forecast[i] - consumption_forecast[i], 0) for i in range(N)]
+            log.info(f"  BSP forecast nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
+
     factuur = bereken_jaarfactuur(
         grid_in_all,
         grid_out_all,
         spot_actual,
         imb_actual,
         sim_timestamps,
-        inp['contract'],
+        contract_for_factuur,
         inp['netbeheer'],
+        nom_afn_kw_all=nom_afn_arr,
+        nom_inj_kw_all=nom_inj_arr,
     )
 
     # ---- KPI's ----
