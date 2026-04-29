@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
-Fluctus Battery Dispatch Simulator v1.2
+Fluctus Battery Dispatch Simulator v1.3
 ========================================
 Lees JSON van stdin, schrijf JSON naar stdout.
+
+Wijzigingen v1.3:
+  - PV-curtailment optie: cap PV op eigen verbruik wanneer DAM < drempel
+    Input: pv_curtailment = { actief: bool, trigger_eur_mwh: float, strategie: 'cap_op_verbruik' }
+  - Nieuwe KPI's: pv_curtailed_mwh, pv_curtailed_kwartieren,
+                  pv_potentiele_productie_mwh, vermeden_injectie_kost_eur
 
 Wijzigingen v1.2:
   - PV-KPI labels gecorrigeerd:
@@ -686,7 +692,7 @@ def bereken_jaarfactuur(
 # =============================================================================
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.2 — start ===")
+    log.info("=== Fluctus Simulator v1.3 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -733,6 +739,38 @@ def run_simulation(inp: dict) -> dict:
         else:
             spot_actual = spot_actual[:N]
             imb_actual = imb_actual[:N]
+
+    # ---- PV-curtailment (v1.3) ----
+    # Strategie: cap PV op eigen verbruik wanneer DAM (spot) onder een ingestelde drempel zakt.
+    # Trigger: spot_actual[i] < trigger_eur_mwh
+    # Effect:  pv_kw[i] = min(pv_kw[i], consumption_kw[i])  → injectie wordt 0, eigen verbruik blijft
+    pv_curt_cfg = inp.get('pv_curtailment', {})
+    pv_curtailed_kwh = 0.0          # totaal verloren PV-productie (kWh)
+    pv_curtailed_kwartieren = 0     # # kwartieren waarin curtailment actief was
+    vermeden_kost_eur = 0.0         # wat injectie zonder curtailment zou hebben gekost (positief = besparing)
+    pv_kw_origineel = list(pv_kw)   # bewaar zonder curtailment voor KPI
+
+    if pv_curt_cfg.get('actief', False) and max(pv_kw) > 0:
+        trigger = pv_curt_cfg.get('trigger_eur_mwh', 0.0)
+        log.info(f"PV-curtailment actief (cap op verbruik) — trigger: spot < {trigger} €/MWh")
+        for i in range(N):
+            if spot_actual[i] < trigger:
+                potentiele_injectie_kw = pv_kw[i] - consumption_kw[i]  # wat ZOU geïnjecteerd worden
+                if potentiele_injectie_kw > 0:
+                    # Cap op eigen verbruik: PV beperkt tot wat we zelf gebruiken
+                    pv_kw[i] = consumption_kw[i]
+                    pv_curtailed_kwh += potentiele_injectie_kw * 0.25
+                    pv_curtailed_kwartieren += 1
+                    # Vermeden kost: deze MWh zou tegen spot zijn geïnjecteerd
+                    # Bij negatieve spot is dat een KOST → vermeden = positief
+                    # injectie_kost = - injectie_kWh × spot/1000 (uit factuurlogica A8)
+                    # Bij negatieve spot: -kWh × negative = positief (kost)
+                    # Door curtailment vermijden we deze kost
+                    vermeden_kost_eur += potentiele_injectie_kw * 0.25 * (-spot_actual[i]) / 1000.0
+        if pv_curtailed_kwartieren > 0:
+            log.info(f"  Curtailment toegepast op {pv_curtailed_kwartieren} kwartieren ({pv_curtailed_kwh/1000:.2f} MWh verloren productie, vermeden kost ~€{vermeden_kost_eur:.0f})")
+        else:
+            log.info("  Geen curtailment-momenten in deze periode (spot bleef altijd boven drempel)")
 
     # ---- Forecasts (D-1) ----
     sf = inp.get('forecast', {})
@@ -894,6 +932,11 @@ def run_simulation(inp: dict) -> dict:
         # v1.2: expliciete PV-flow-velden zodat UI niet hoeft af te leiden
         'pv_eigen_verbruik_mwh': pv_naar_eigen_verbruik,
         'pv_injectie_mwh': max(0.0, totaal_pv_mwh - pv_naar_eigen_verbruik),
+        # v1.3: curtailment KPIs
+        'pv_curtailed_mwh': pv_curtailed_kwh / 1000.0,
+        'pv_curtailed_kwartieren': pv_curtailed_kwartieren,
+        'pv_potentiele_productie_mwh': sum(pv_kw_origineel) * 0.25 / 1000.0,
+        'vermeden_injectie_kost_eur': vermeden_kost_eur,
         'totaal_grid_in_mwh': sum(grid_in_all) * 0.25 / 1000.0,
         'totaal_grid_out_mwh': sum(grid_out_all) * 0.25 / 1000.0,
     }
