@@ -1,1927 +1,2179 @@
-const express = require('express');
-const https = require('https');
-const compression = require('compression');
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
-const app = express();
-const PORT = process.env.PORT || 3000;
-const ELIA_BASE = 'https://opendata.elia.be/api/explore/v2.1/catalog/datasets';
+#!/usr/bin/env python3
+"""
+Fluctus Battery Dispatch Simulator v1.4
+========================================
+Lees JSON van stdin, schrijf JSON naar stdout.
 
-// Pad naar lokale data-bestanden (mee gecommitteerd in repo)
-const DATA_DIR = path.join(__dirname, 'data');
+Wijzigingen v1.4:
+  - BSP-modus (Niveau 3b): perfect IMB-foresight LP met:
+    * forecast-met-ruis als nominatie (Optie E)
+    * fysieke flex (PV-curtail, batterij) als BSP-edge
+    * paper capture rate (gekalibreerd op 1.8% tegen externe simulator)
+    * forecast_modus: conservatief / realistic / optimistisch (× 0.67/1.0/1.5)
+  - KRITIEKE BUG FIX: passieve passthrough imbalance regende altijd op
+    (∑ vol × (IMB-DAM)). Dat hoort 0 te zijn voor passive klanten.
+    Live productie had hier een systematische fout.
+  - Refactored bereken_jaarfactuur met optionele nom_afn_kw_all/nom_inj_kw_all
+    voor BSP-decompositie. Backwards-compat met oude calls.
+  - Input: bsp = { actief: bool, paper_capture_rate: float, 
+                   forecast_modus: 'conservatief'|'realistic'|'optimistisch',
+                   pv_curtailment_allowed: bool }
 
-app.use(express.json({ limit: '25mb' }));
+Wijzigingen v1.3:
+  - PV-curtailment optie: cap PV op eigen verbruik wanneer DAM < drempel
+    Input: pv_curtailment = { actief: bool, trigger_eur_mwh: float, strategie: 'cap_op_verbruik' }
+  - Nieuwe KPI's: pv_curtailed_mwh, pv_curtailed_kwartieren,
+                  pv_potentiele_productie_mwh, vermeden_injectie_kost_eur
 
-// gzip/brotli compressie — grote JSON responses (imb/wind/solar ~5 MB elk)
-// comprimeren tot ~20-30% van origineel. Drastisch verschil in laadtijd.
-app.use(compression({
-  threshold: 1024, // compresseer alles >1 KB (bijna alles behalve meta)
-  level: 6         // gebalanceerde CPU vs ratio (default)
-}));
+Wijzigingen v1.2:
+  - PV-KPI labels gecorrigeerd:
+    * pct_zelfconsumptie  = pv_eigen / pv_totaal × 100   (was verwisseld)
+    * pct_zelfvoorziening = pv_eigen / verbruik × 100    (was verwisseld)
+  - Nieuwe expliciete velden: pv_eigen_verbruik_mwh, pv_injectie_mwh
 
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  // Standaard: geen cache. Individuele routes die van caching profiteren
-  // (bijv. statische Elia data per dag) kunnen dit overschrijven.
-  res.header('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.header('Pragma', 'no-cache');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+Wijzigingen v1.1:
+  - Leveringscontract werkt nu met staffel (Enwyse-stijl)
+  - Markup/markdown worden auto-bepaald op basis van jaarverbruik_mwh
+  - Vergroening (€/MWh) als aparte regel in groep A
+  - Imbalance markup/markdown is fallback wanneer modus=forfaitair
+  - Geen floor op injectievergoeding (kan negatief zijn)
+  - Backwards-compatible: oude markup_eur_mwh/markdown_eur_mwh blijven werken
 
-// ─── HTTP hulpfunctie ──────────────────────────────────────────────────────
-function httpGet(url, extraHeaders) {
-  return new Promise((resolve, reject) => {
-    const headers = Object.assign(
-      { 'Accept': 'application/json', 'User-Agent': 'Fluctus-Dashboard/2.0' },
-      extraHeaders || {}
-    );
-    https.get(url, { headers }, (resp) => {
-      let data = '';
-      resp.on('data', chunk => data += chunk);
-      resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-    }).on('error', reject);
-  });
-}
+Input-structuur (top-level keys):
+  - profiel_kwartier: list[35040]   (genormaliseerd, som=1.0, basisprofiel)
+  - aanvullingen: { laadinfra: {...}|null, elektrificatie: {...}|null }
+  - jaarverbruik_mwh: float          (basisprofiel volume)
+  - pv: { kwp, specifiek_rendement_kwh_per_kwp, vorm_kwartier[35040], capex_eur }
+  - batterij: { kw, kwh, dod_pct, rte_pct, capex_eur, max_cycli }
+  - aansluiting: { max_afname_kw_zacht, max_afname_kw_hard,
+                   max_injectie_kw_zacht, max_injectie_kw_hard,
+                   tarief_overschrijding_afname_eur_per_kw_jaar,
+                   tarief_overschrijding_injectie_eur_per_kw_jaar }
+  - contract: { modus, markup_eur_mwh, markdown_eur_mwh,
+                imb_forfait_afname, imb_forfait_injectie,
+                vaste_kost_eur_maand, gsc_eur_mwh, wkk_eur_mwh,
+                vergroening_eur_per_mwh, staffel,
+                injectie_toegelaten }
+                # NIEUW v1.1:
+                #   staffel = list[{min_mwh, max_mwh, consumption_dam_markup,
+                #                   consumption_imbalance_markup,
+                #                   injection_dam_markdown,
+                #                   injection_imbalance_markdown}]
+                #   vergroening_eur_per_mwh = float
+                # Als staffel aanwezig is wordt markup/markdown afgeleid uit schijf.
+                # Als staffel ontbreekt valt het terug op markup_eur_mwh/markdown_eur_mwh.
+  - netbeheer: { grd, spanning, tarieven: {...complete tariefset uit Overzicht 2026...} }
+  - forecast: { sigma_da, sigma_imb, sigma_volume_verbruik_pct, sigma_volume_pv_pct }
+  - markt: { spot_kwartier[N], imb_kwartier[N], timestamps[N] }
+  - simulatieperiode: { van: "YYYY-MM-DD", tot: "YYYY-MM-DD" }
+  - random_seed: int (default 42, voor deterministische ruis)
 
-function httpPut(url, token, bodyObj) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(bodyObj);
-    const options = {
-      method: 'PUT',
-      headers: {
-        'Authorization': 'token ' + token,
-        'Content-Type': 'application/json',
-        'User-Agent': 'Fluctus-Worker/2.0',
-        'Content-Length': Buffer.byteLength(body),
+Output-structuur: zie scenario-JSON spec in instructie.
+"""
+
+import sys
+import json
+import math
+import logging
+from datetime import datetime, timedelta
+from typing import Any
+import random
+
+import pulp
+
+# Logging gaat naar stderr (stdout is gereserveerd voor JSON-output)
+logging.basicConfig(
+    stream=sys.stderr,
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s: %(message)s',
+    datefmt='%H:%M:%S',
+)
+log = logging.getLogger(__name__)
+
+
+# =============================================================================
+# UTILITIES
+# =============================================================================
+
+def parse_iso_date(s: str) -> datetime:
+    """Parse YYYY-MM-DD naar datetime op middernacht."""
+    return datetime.strptime(s, '%Y-%m-%d')
+
+
+def quarter_index_in_year_2025(dt: datetime) -> int:
+    """
+    Voor weekdag-aligned profiel-lookup. Profielen starten op wo 1/1/2025.
+    Gegeven een sim-datum, vind het kwartier-index in het 2025-profiel met:
+      1. zelfde maand+dag
+      2. weekdag matchend (schuif ±1, ±2, ±3 dagen tot match)
+    """
+    target_weekday = dt.weekday()  # 0=ma, 6=zo
+    # Start: zelfde maand+dag in 2025
+    try:
+        candidate = datetime(2025, dt.month, dt.day, dt.hour, dt.minute)
+    except ValueError:
+        # 29 feb in een schrikkeljaar dat niet 2025 is → val terug op 28 feb
+        candidate = datetime(2025, 2, 28, dt.hour, dt.minute)
+
+    if candidate.weekday() == target_weekday:
+        offset_days = 0
+    else:
+        # Probeer ±1, ±2, ±3 dagen
+        offset_days = None
+        for delta in [1, -1, 2, -2, 3, -3]:
+            shifted = candidate + timedelta(days=delta)
+            if shifted.weekday() == target_weekday:
+                offset_days = delta
+                break
+        if offset_days is None:
+            offset_days = 0  # fallback: geen match binnen ±3 dagen, gebruik origineel
+        candidate = candidate + timedelta(days=offset_days)
+
+    # Bereken kwartier-index in 2025: (dag_van_jaar - 1) * 96 + uur*4 + min/15
+    jan1_2025 = datetime(2025, 1, 1)
+    minutes_diff = (candidate - jan1_2025).total_seconds() / 60.0
+    quarter_idx = int(minutes_diff / 15.0)
+    # Begrens
+    if quarter_idx < 0:
+        quarter_idx = 0
+    if quarter_idx >= 35040:
+        quarter_idx = 35040 - 1
+    return quarter_idx
+
+
+def add_gaussian_noise(values: list, sigma: float, rng: random.Random) -> list:
+    """Voeg Gaussiaanse ruis toe aan elke waarde (absoluut, niet pct)."""
+    if sigma <= 0:
+        return list(values)
+    return [v + rng.gauss(0, sigma) for v in values]
+
+
+def add_relative_noise(values: list, sigma_pct: float, rng: random.Random) -> list:
+    """Voeg relatieve Gaussiaanse ruis toe (sigma als percentage van de waarde)."""
+    if sigma_pct <= 0:
+        return list(values)
+    sigma_frac = sigma_pct / 100.0
+    return [v * (1 + rng.gauss(0, sigma_frac)) for v in values]
+
+
+# =============================================================================
+# PROFIEL-OPBOUW
+# =============================================================================
+
+def build_consumption_profile(
+    basis_profiel: list,          # 35040 waarden, som=1.0
+    jaarverbruik_mwh: float,
+    aanvullingen: dict,            # { laadinfra, elektrificatie }
+    sim_timestamps: list,          # list[datetime] van N kwartieren in sim-periode
+) -> list:
+    """
+    Bouw verbruiksprofiel in kW voor sim-periode.
+    Returns: list[N] met kW-waarden per kwartier.
+    """
+    N = len(sim_timestamps)
+    consumption_kw = [0.0] * N
+
+    # Basisprofiel: kWh per kwartier = basis_profiel[idx_2025] * jaarverbruik_kwh
+    jaarverbruik_kwh = jaarverbruik_mwh * 1000.0
+    for i, ts in enumerate(sim_timestamps):
+        idx2025 = quarter_index_in_year_2025(ts)
+        kwh_kwartier = basis_profiel[idx2025] * jaarverbruik_kwh
+        # kW = kWh / 0.25h
+        consumption_kw[i] = kwh_kwartier * 4.0
+
+    # Aanvulling laadinfra
+    if aanvullingen and aanvullingen.get('laadinfra'):
+        laadinfra = aanvullingen['laadinfra']
+        prof = laadinfra.get('profiel_kwartier', [])
+        vol_mwh = laadinfra.get('jaarvolume_mwh', 0)
+        if prof and vol_mwh > 0 and len(prof) == 35040:
+            vol_kwh = vol_mwh * 1000.0
+            for i, ts in enumerate(sim_timestamps):
+                idx2025 = quarter_index_in_year_2025(ts)
+                kwh_kwartier = prof[idx2025] * vol_kwh
+                consumption_kw[i] += kwh_kwartier * 4.0
+
+    # Aanvulling elektrificatie
+    if aanvullingen and aanvullingen.get('elektrificatie'):
+        elektr = aanvullingen['elektrificatie']
+        prof = elektr.get('profiel_kwartier', [])
+        vol_mwh = elektr.get('jaarvolume_mwh', 0)
+        if prof and vol_mwh > 0 and len(prof) == 35040:
+            vol_kwh = vol_mwh * 1000.0
+            for i, ts in enumerate(sim_timestamps):
+                idx2025 = quarter_index_in_year_2025(ts)
+                kwh_kwartier = prof[idx2025] * vol_kwh
+                consumption_kw[i] += kwh_kwartier * 4.0
+
+    return consumption_kw
+
+
+def build_pv_profile(
+    pv_vorm: list,                 # 35040 of N waarden, genormaliseerd op 1 over de periode
+    kwp: float,
+    specifiek_rendement: float,    # kWh/kWp/jaar
+    sim_timestamps: list,
+) -> list:
+    """
+    Returns: list[N] PV-productie in kW per kwartier.
+    """
+    N = len(sim_timestamps)
+    if not pv_vorm or kwp <= 0:
+        return [0.0] * N
+
+    jaarproductie_kwh = kwp * specifiek_rendement
+
+    # PV-vorm kan al N waarden zijn (uit Elia cache, sim-periode-specifiek) of 35040 (jaar).
+    # We assumen sim-periode-specifiek (door Node geleverd), genormaliseerd op 1.
+    if len(pv_vorm) == N:
+        # Direct gebruiken
+        return [pv_vorm[i] * jaarproductie_kwh * 4.0 for i in range(N)]
+    elif len(pv_vorm) == 35040:
+        # Project naar sim-periode via weekdag-alignment, daarna her-normaliseren
+        prof_proj = [pv_vorm[quarter_index_in_year_2025(ts)] for ts in sim_timestamps]
+        som = sum(prof_proj)
+        if som > 0:
+            prof_proj = [v / som for v in prof_proj]
+        return [v * jaarproductie_kwh * 4.0 for v in prof_proj]
+    else:
+        # Onbekend formaat → return nullen
+        log.warning(f"PV-vorm heeft {len(pv_vorm)} waarden, verwacht {N} of 35040. PV gezet op 0.")
+        return [0.0] * N
+
+
+# =============================================================================
+# LEVERINGSCONTRACT — STAFFEL HELPER (v1.1)
+# =============================================================================
+
+def pick_schijf(jaarverbruik_mwh: float, staffel: list) -> dict:
+    """
+    Selecteer de juiste staffel-schijf op basis van jaarverbruik (in MWh).
+    Schijven hebben min_mwh (inclusief) en max_mwh (exclusief).
+    Returns: dict met de gekozen schijf, of None als geen match.
+    """
+    if not staffel:
+        return None
+    for schijf in staffel:
+        mn = float(schijf.get('min_mwh', 0))
+        mx = float(schijf.get('max_mwh', 1e12))
+        if mn <= jaarverbruik_mwh < mx:
+            return schijf
+    # Fallback: laatste schijf (>1000)
+    return staffel[-1]
+
+
+def resolve_contract_pricing(contract: dict, jaarverbruik_mwh: float) -> dict:
+    """
+    Hydrateer markup/markdown uit staffel als die aanwezig is, anders gebruik
+    de oude markup_eur_mwh/markdown_eur_mwh keys (backwards compatible).
+
+    Returns een dict met expliciete velden voor de LP-loop:
+      markup_dam, markdown_dam, markup_imb, markdown_imb,
+      vergroening, vaste_kost_maand, modus
+    """
+    out = {}
+    staffel = contract.get('staffel') or []
+    schijf = pick_schijf(jaarverbruik_mwh, staffel) if staffel else None
+
+    if schijf is not None:
+        out['markup_dam'] = float(schijf.get('consumption_dam_markup', 0.0))
+        out['markdown_dam'] = float(schijf.get('injection_dam_markdown', 0.0))
+        out['markup_imb'] = float(schijf.get('consumption_imbalance_markup', 0.0))
+        out['markdown_imb'] = float(schijf.get('injection_imbalance_markdown', 0.0))
+        out['schijf_code'] = schijf.get('code', '')
+        out['schijf_label'] = schijf.get('label', '')
+    else:
+        # Fallback op oude keys
+        out['markup_dam'] = float(contract.get('markup_eur_mwh', 0.0))
+        out['markdown_dam'] = float(contract.get('markdown_eur_mwh', 0.0))
+        out['markup_imb'] = float(contract.get('imb_forfait_afname', 0.0))
+        out['markdown_imb'] = float(contract.get('imb_forfait_injectie', 0.0))
+        out['schijf_code'] = ''
+        out['schijf_label'] = '(legacy)'
+
+    out['vergroening'] = float(contract.get('vergroening_eur_per_mwh', 0.0))
+    out['vaste_kost_maand'] = float(contract.get('vaste_kost_eur_maand', 0.0))
+    out['modus'] = contract.get('modus', 'passthrough')  # 'passthrough' | 'forfaitair'
+    out['gsc'] = float(contract.get('gsc_eur_mwh', 0.0))
+    out['wkk'] = float(contract.get('wkk_eur_mwh', 0.0))
+    return out
+
+
+# =============================================================================
+# LP-DISPATCH PER DAG
+# =============================================================================
+
+def lp_dispatch_day(
+    consumption_kw: list,         # 96 kwartieren
+    pv_kw: list,                  # 96 kwartieren
+    spot_eur_mwh: list,           # 96 kwartieren (forecast)
+    soc_start_kwh: float,         # SoC bij start van de dag
+    batterij: dict,               # kw, kwh, dod_pct, rte_pct, capex, max_cycli
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+) -> dict:
+    """
+    Run LP voor 96 kwartieren. Maximaliseer NPV - cyclus-kost - penalties.
+    Returns: { p_charge[96], p_discharge[96], grid_in[96], grid_out[96], soc[97] }
+    """
+    H = 96
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)  # symmetrische η voor laden/ontladen
+
+    soc_min = 0.0  # absolute kWh
+    soc_max = kwh_batt * dod
+
+    # Conversie van €/kW/jaar naar €/kWh-equivalent voor LP-penalty.
+    # Bedacht zo: een overschrijding van 1 kW gedurende 1 kwartier = 0.25 kWh.
+    # Tarief €X/kW/jaar betekent: als je 1 kW het hele jaar overschrijdt, betaal je €X.
+    # Per kwartier: €X / (8760 * 4) ≈ €X / 35040 per kWh-equivalent.
+    # Maar dat is te zwak — werkelijk Vlaams tarief rekent op gemiddelde maandpiek.
+    # Pragmatische LP-keuze: zachte penalty per overschrijdingsmoment in €/kW (niet /jaar).
+    # We gebruiken het jaartarief gedeeld door 12 (per maand-piek-equivalent) en passen
+    # toe per kwartier-overschrijdingsmoment. Dit is een benadering.
+    tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+
+    pen_afname_zacht = tar_afname_kw / 12.0   # €/kW per overschrijdingskwartier (benadering)
+    pen_afname_hard = 100000.0 / 12.0
+    pen_injectie_zacht = tar_injectie_kw / 12.0
+    pen_injectie_hard = 100000.0 / 12.0
+
+    max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+
+    injectie_toegelaten = contract.get('injectie_toegelaten', True)
+    if not injectie_toegelaten:
+        max_injectie_zacht = 0.0
+        max_injectie_hard = 0.0
+
+    # Markup/markdown via staffel (v1.1) — resolve_contract_pricing kiest
+    # automatisch de juiste schijf, of valt terug op legacy markup_eur_mwh.
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        # Schat uit consumption_kw (deze functie krijgt 96-kwartier dag, dus extrapoleer)
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+
+    if pricing['modus'] == 'forfaitair':
+        # Imbalance fallback: één forfait per MWh, geen passthrough
+        markup_per_mwh = pricing['markup_imb']
+        markdown_per_mwh = pricing['markdown_imb']
+    else:
+        # Passthrough (DAM): nominatie OK
+        markup_per_mwh = pricing['markup_dam']
+        markdown_per_mwh = pricing['markdown_dam']
+
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
+
+    # LP setup
+    prob = pulp.LpProblem('battery_dispatch', pulp.LpMinimize)
+
+    p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+    p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+    grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+    grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+    soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+    over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+    over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
+    over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+    over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
+
+    # Initiële SoC
+    prob += soc[0] == soc_start_kwh
+
+    # Power balance per kwartier:
+    # consumption = pv + grid_in - grid_out + p_dis - p_ch
+    for t in range(H):
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] == consumption_kw[t]
+        # SoC update
+        prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+        # Overschrijding-tracking (lineaire activatie):
+        #   over_afn_zacht = max(0, grid_in - max_zacht)
+        #   over_afn_hard  = max(0, grid_in - max_hard)
+        # Beide zijn ondergrens-constraints; LP minimaliseert ze in objective dus ze worden
+        # zo klein mogelijk. We willen NIET de eerste constraint OOK voor 'hard' opleggen.
+        prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+        prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
+        prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+        prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
+        # Cosφ-constraint (gebundeld): laden + ontladen + grid niet allemaal tegelijk op max
+        # Vereenvoudiging: omvormer-cap p_ch + p_dis ≤ kw_batt (mutually exclusive in praktijk)
+        prob += p_ch[t] + p_dis[t] <= kw_batt
+
+    # Objective: minimaliseer kost
+    obj_terms = []
+    for t in range(H):
+        # Energiekost afname (€/kwartier): kW * 0.25 * (€/MWh) / 1000
+        # v1.1: vergroening (€/MWh) wordt opgeteld bij afnameprijs.
+        # Geen floor op injectieprijs — kan negatief zijn bij negatieve spot.
+        prijs_afn_t = (spot_eur_mwh[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
+        prijs_inj_t = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+        obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
+        obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
+        # Cyclus-kost: ontladen kost
+        obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+        # Penalty's (let op: zacht is alleen over zacht-drempel, hard is over hard-drempel,
+        # dus dubbeltelling tussen zachte band en harde band: alleen het zachte deel telt zacht,
+        # alleen het deel boven hard telt extra hard)
+        # We minimaliseren over_afn_zacht (= alles boven zacht), maar trekken het hard-deel
+        # niet af omdat over_afn_hard apart geteld wordt. Dat geeft effectief:
+        #   tot_pen = pen_zacht * over_zacht + pen_hard * over_hard
+        # waarbij over_zacht ≥ over_hard (alles boven hard valt ook boven zacht).
+        # Dat is OK: het hard-deel wordt extra belast, het zacht-deel betaalt zacht-tarief.
+        obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+        obj_terms.append(pen_afname_hard * over_afn_hard[t])
+        obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+        obj_terms.append(pen_injectie_hard * over_inj_hard[t])
+
+    prob += pulp.lpSum(obj_terms)
+
+    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=10)
+    status = prob.solve(solver)
+
+    if pulp.LpStatus[status] not in ('Optimal', 'Not Solved'):
+        log.warning(f"LP-status: {pulp.LpStatus[status]}")
+
+    return {
+        'p_charge': [pulp.value(v) or 0.0 for v in p_ch],
+        'p_discharge': [pulp.value(v) or 0.0 for v in p_dis],
+        'grid_in': [pulp.value(v) or 0.0 for v in grid_in],
+        'grid_out': [pulp.value(v) or 0.0 for v in grid_out],
+        'soc': [pulp.value(v) or 0.0 for v in soc],
+        'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
+        'over_afn_hard': [pulp.value(v) or 0.0 for v in over_afn_hard],
+        'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
+        'over_inj_hard': [pulp.value(v) or 0.0 for v in over_inj_hard],
+    }
+
+
+def lp_dispatch_day_bsp(
+    consumption_kw: list,         # 96 kwartieren — werkelijk verbruik
+    pv_kw: list,                  # 96 kwartieren — werkelijk PV (potentieel, vóór curtailment)
+    spot_eur_mwh: list,           # 96 kwartieren — DAM (D-1 bekend)
+    imb_eur_mwh: list,            # 96 kwartieren — IMB werkelijk (perfect foresight!)
+    soc_start_kwh: float,
+    batterij: dict,
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+    daily_paper_risk_mwh: float,  # max ∑(dev_pos+dev_neg) × dt / 1000 per dag in MWh
+    pv_curtailment_allowed: bool, # of LP PV mag curtailen (anders pv_curtail=0)
+    consumption_forecast_kw: list = None,  # v1.4: forecast (= nominatie) — None=geen ruis
+    pv_forecast_kw: list = None,           # v1.4: forecast (= nominatie) — None=geen ruis
+) -> dict:
+    """
+    BSP-uitbreiding van lp_dispatch_day. Realistisch model:
+      - Nominatie = verwachte werkelijke positie (vast, op basis van consumption-pv).
+        BSP heeft GEEN vrijheid om te kunstmatig te ondernomineren of overnomineren.
+      - LP beslist over:
+        1. PV curtailment (fysieke flexibiliteit)
+        2. Batterij dispatch (fysieke flexibiliteit)
+        3. Papier-deviation: dev_pos/dev_neg t.o.v. nominatie, binnen risk-budget.
+           Dit is een financiële swap: deel van volume wordt via IMB afgerekend ipv DAM.
+
+    Realisatie balans:
+      grid_in[t] - grid_out[t]
+        = consumption[t] - (pv[t] - pv_curtail[t]) + p_ch[t] - p_dis[t]   (fysiek)
+        = nom_net[t] + (- pv_curtail[t] + p_ch[t] - p_dis[t]) + (dev_pos[t] - dev_neg[t])
+      waarbij nom_net[t] = consumption[t] - pv[t]  (vast)
+
+    DAM-tak rekent op nom_net (afgerekend tegen DAM met markup/markdown).
+    IMB-tak rekent op (fysieke-flex + papier-dev) tegen IMB (geen markup).
+
+    Returns: zelfde keys als lp_dispatch_day + extra:
+      - nom_dam_kw[96]: vaste nominatie (afname-positief)
+      - dev_kw[96]: dev_pos - dev_neg
+      - pv_curtailed_kw[96]
+      - nom_revenue_eur, dev_revenue_eur
+    """
+    H = 96
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)
+
+    soc_min = 0.0
+    soc_max = kwh_batt * dod
+
+    tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    pen_afname_zacht = tar_afname_kw / 12.0
+    pen_afname_hard = 100000.0 / 12.0
+    pen_injectie_zacht = tar_injectie_kw / 12.0
+    pen_injectie_hard = 100000.0 / 12.0
+
+    max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+
+    injectie_toegelaten = contract.get('injectie_toegelaten', True)
+    if not injectie_toegelaten:
+        max_injectie_zacht = 0.0
+        max_injectie_hard = 0.0
+
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+
+    markup_per_mwh = pricing['markup_dam']
+    markdown_per_mwh = pricing['markdown_dam']
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
+
+    # ── NOMINATIE = forecast met ruis (referentie voor speculation budget) ──
+    cons_for_nom = consumption_forecast_kw if consumption_forecast_kw is not None else consumption_kw
+    pv_for_nom = pv_forecast_kw if pv_forecast_kw is not None else pv_kw
+    forecast_afn = [max(cons_for_nom[t] - pv_for_nom[t], 0) for t in range(H)]
+    forecast_inj = [max(pv_for_nom[t] - cons_for_nom[t], 0) for t in range(H)]
+    nom_net = [cons_for_nom[t] - pv_for_nom[t] for t in range(H)]  # behouden voor return
+    
+    prob = pulp.LpProblem('battery_dispatch_bsp', pulp.LpMinimize)
+
+    # Bestaande grid + batterij variabelen
+    p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+    p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+    grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+    grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+    soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+    over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+    over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
+    over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+    over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
+
+    # PV-curtailment variabele
+    if pv_curtailment_allowed:
+        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
+    else:
+        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
+
+    # ── NOMINATIE als LP-variabele met FYSIEKE richting-constraint ──
+    # Forecast richting bepaalt of klant afnemer of injecteur is in dit kwartier.
+    # LP mag binnen budget de NOMINATIE schalen, maar niet van richting wisselen.
+    # Per kwartier: ofwel nom_afn > 0 (forecast netto afname), ofwel nom_inj > 0 (forecast netto injectie).
+    nom_afn = []
+    nom_inj = []
+    for t in range(H):
+        if forecast_afn[t] > 0:
+            # Afname-richting: nom_afn variabel, nom_inj = 0
+            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
+            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))  # forced 0
+        else:
+            # Injectie-richting: nom_inj variabel, nom_afn = 0
+            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))  # forced 0
+            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
+    
+    # Spec-deviation: hoeveel wijkt nominatie af van forecast? (auxiliary vars voor abs)
+    spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
+    spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
+
+    prob += soc[0] == soc_start_kwh
+
+    for t in range(H):
+        # Fysieke energy balance
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
+        prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+        prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+        prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
+        prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+        prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
+        prob += p_ch[t] + p_dis[t] <= kw_batt
+        # Spec-deviation absolute value: nominatie netto - forecast netto
+        # In afname-kwartier: deviation = nom_afn - forecast_afn
+        # In injectie-kwartier: deviation = -(nom_inj - forecast_inj)
+        # Algemener: dev = (nom_afn - nom_inj) - (forecast_afn - forecast_inj)
+        prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
+        # Forceer constraint dat NIET BEIDE nom_afn en nom_inj > 0 in zelfde kwartier
+        # (al gedaan via upper-bound = 0 voor de inactieve richting)
+
+    # Speculation budget: ∑(|spec_dev|) per dag ≤ budget × werkelijk dagvolume
+    if daily_paper_risk_mwh >= 0:
+        spec_total = pulp.lpSum(spec_dev_pos[t] + spec_dev_neg[t] for t in range(H)) * dt_h / 1000.0
+        prob += spec_total <= daily_paper_risk_mwh
+
+    # ── Objective ──
+    obj_terms = []
+    for t in range(H):
+        prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0  # €/kWh
+        prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+        prijs_imb = imb_eur_mwh[t] / 1000.0
+        belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
+        
+        # DAM-tak op nominatie
+        obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
+        obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+        # IMB-tak op deviation = werkelijk netto - genomineerd netto
+        # afname_dev = grid_in[t] - nom_afn[t]
+        # injectie_dev = grid_out[t] - nom_inj[t]
+        # netto_dev = afname_dev - injectie_dev (positief = extra afname → kost)
+        obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
+        obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
+        # Belastingen op fysiek volume
+        obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
+        # Cyclus-kost
+        obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+        # Penalties
+        obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+        obj_terms.append(pen_afname_hard * over_afn_hard[t])
+        obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+        obj_terms.append(pen_injectie_hard * over_inj_hard[t])
+        # Eps-penalty op simultaan in/uit (anti-fake-volume hack)
+        # Sterker dan eerst, want LP exploiteert dit anders
+        eps_penalty = 1.0 / 1000.0  # €1/MWh = significant maar niet bruut
+        obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+
+    prob += pulp.lpSum(obj_terms)
+
+    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=15)
+    status = prob.solve(solver)
+
+    if pulp.LpStatus[status] not in ('Optimal', 'Not Solved'):
+        log.warning(f"BSP-LP status: {pulp.LpStatus[status]}")
+
+    # Extract values
+    nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
+    nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
+    pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
+    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+    grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+    
+    dev_net_vals = [(grid_in_vals[t] - nom_afn_vals[t]) - (grid_out_vals[t] - nom_inj_vals[t]) for t in range(H)]
+
+    nom_revenue = sum(
+        (spot_eur_mwh[t] + markup_per_mwh) / 1000.0 * nom_afn_vals[t] * dt_h -
+        (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0 * nom_inj_vals[t] * dt_h
+        for t in range(H)
+    )
+
+    return {
+        'p_charge': p_ch_vals,
+        'p_discharge': p_dis_vals,
+        'grid_in': grid_in_vals,
+        'grid_out': grid_out_vals,
+        'soc': [pulp.value(v) or 0.0 for v in soc],
+        'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
+        'over_afn_hard': [pulp.value(v) or 0.0 for v in over_afn_hard],
+        'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
+        'over_inj_hard': [pulp.value(v) or 0.0 for v in over_inj_hard],
+        # BSP-specifiek
+        'nom_dam_kw': list(nom_net),    # forecast-based nominatie (referentie)
+        'nom_eff_afn_kw': nom_afn_vals,  # LP-bepaalde werkelijke nominatie
+        'nom_eff_inj_kw': nom_inj_vals,
+        'dev_kw': dev_net_vals,
+        'pv_curtailed_kw': pv_curt_vals,
+        'nom_revenue_eur': nom_revenue,
+    }
+
+
+# =============================================================================
+# JAARFACTUUR (volgens Facturatielogica.xlsx)
+# =============================================================================
+
+def bereken_jaarfactuur(
+    grid_in_kw: list,              # N kwartieren — fysiek werkelijk afgenomen
+    grid_out_kw: list,             # N kwartieren — fysiek werkelijk geïnjecteerd
+    spot_eur_mwh: list,            # N kwartieren (werkelijk, niet forecast)
+    imb_eur_mwh: list,             # N kwartieren (werkelijk, alleen relevant voor passthrough)
+    timestamps: list,              # list[datetime], N kwartieren
+    contract: dict,
+    netbeheer: dict,
+    n_maanden: int = 12,
+    nom_afn_kw_all: list = None,   # v1.4 BSP: genomineerde afname (None=passive default)
+    nom_inj_kw_all: list = None,   # v1.4 BSP: genomineerde injectie
+) -> dict:
+    """
+    Bereken jaarfactuur volgens groepen A-E.
+    
+    BSP-uitbreiding (v1.4):
+    - Als nom_afn_kw_all en nom_inj_kw_all zijn gegeven, splits de DAM/IMB-tak:
+        DAM-tak rekent op nominatie (nom_afn × DAM, nom_inj × DAM)
+        IMB-tak rekent op deviation (grid_in - nom_afn) × IMB
+        Belastingen (gsc/wkk/vergr) op fysiek volume (grid_in)
+    - Als ze None zijn → passive gedrag (alle volume via DAM zoals voorheen)
+    
+    Returns: dict met groepen en totaal.
+    """
+    N = len(grid_in_kw)
+    dt_h = 0.25
+    
+    # BSP-modus actief? (= nominatie-arrays gegeven)
+    bsp_modus = (nom_afn_kw_all is not None) and (nom_inj_kw_all is not None)
+    
+    # Default: nominatie = werkelijk volume (passive equivalence)
+    if not bsp_modus:
+        nom_afn_kw_all = list(grid_in_kw)
+        nom_inj_kw_all = list(grid_out_kw)
+
+    tarieven = netbeheer['tarieven']
+    spanning = netbeheer['spanning']  # 'MS' of 'LS'
+
+    # Fysiek (werkelijk) volume in kWh
+    afname_kwh_per_kwartier = [grid_in_kw[i] * dt_h for i in range(N)]
+    injectie_kwh_per_kwartier = [grid_out_kw[i] * dt_h for i in range(N)]
+    totaal_afname_mwh = sum(afname_kwh_per_kwartier) / 1000.0
+    totaal_injectie_mwh = sum(injectie_kwh_per_kwartier) / 1000.0
+    
+    # Nominatie-volume in kWh (= grid in passive, ander in BSP)
+    nom_afn_kwh_per_kwartier = [nom_afn_kw_all[i] * dt_h for i in range(N)]
+    nom_inj_kwh_per_kwartier = [nom_inj_kw_all[i] * dt_h for i in range(N)]
+    totaal_nom_afn_mwh = sum(nom_afn_kwh_per_kwartier) / 1000.0
+    totaal_nom_inj_mwh = sum(nom_inj_kwh_per_kwartier) / 1000.0
+    
+    # Deviation per kwartier (positief = extra afname / minder injectie t.o.v. nominatie)
+    # afname_dev_kw[t] = grid_in[t] - nom_afn[t]  (kan + of -)
+    # injectie_dev_kw[t] = grid_out[t] - nom_inj[t] (kan + of -)
+    afname_dev_kw = [grid_in_kw[i] - nom_afn_kw_all[i] for i in range(N)]
+    injectie_dev_kw = [grid_out_kw[i] - nom_inj_kw_all[i] for i in range(N)]
+
+    # Maandindexering
+    maand_kw_afname = [[] for _ in range(12)]
+    maand_kw_injectie = [[] for _ in range(12)]
+    maand_mwh_afname = [0.0] * 12
+    maand_mwh_injectie = [0.0] * 12
+    for i, ts in enumerate(timestamps):
+        m = ts.month - 1
+        maand_kw_afname[m].append(grid_in_kw[i])
+        maand_kw_injectie[m].append(grid_out_kw[i])
+        maand_mwh_afname[m] += afname_kwh_per_kwartier[i] / 1000.0
+        maand_mwh_injectie[m] += injectie_kwh_per_kwartier[i] / 1000.0
+
+    # Maandpieken (kW, ceil)
+    maandpieken_afname = [math.ceil(max(m)) if m else 0 for m in maand_kw_afname]
+    maandpieken_injectie = [math.ceil(max(m)) if m else 0 for m in maand_kw_injectie]
+
+    # Jaarpiek (Elia: jan-mrt + nov-dec winter)
+    winter_kw = []
+    for i, ts in enumerate(timestamps):
+        if ts.month in [1, 2, 3, 11, 12]:
+            winter_kw.append(grid_in_kw[i])
+    jaarpiek_afname = math.ceil(max(winter_kw)) if winter_kw else 0
+    toegangsvermogen = max(maandpieken_afname)  # = max(maandpieken)
+
+    # ---- GROEP A: ENERGIEKOST (commodity) ----
+    # v1.4 refactor: DAM-tak rekent op nominatie, IMB-tak op deviation, belastingen op fysiek volume.
+    # In passive-modus (geen BSP) zijn nominatie = werkelijk → identiek aan oude logica.
+    pricing = resolve_contract_pricing(contract, totaal_afname_mwh)
+    A = {}
+    # A1. Afname energie spot — op NOMINATIE (in passive: = grid_in)
+    A['afname_energie_spot'] = sum(
+        nom_afn_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
+    )
+    # A2. Markup afname (DAM-tarief uit schijf) — op NOMINATIE-volume
+    A['markup_afname'] = totaal_nom_afn_mwh * pricing['markup_dam']
+    # A3-5. Belastingen op FYSIEK volume (vergroening, gsc, wkk)
+    # Deze zijn netvergoedingen voor wat fysiek door de meter ging.
+    A['vergroening'] = totaal_afname_mwh * pricing['vergroening']
+    A['gsc'] = totaal_afname_mwh * pricing['gsc']
+    A['wkk'] = totaal_afname_mwh * pricing['wkk']
+    # A6. Imbalance afname
+    # In passive: dev = 0 → imbalance = 0 (consistent met v1.4-fix)
+    # In BSP: dev × IMB per kwartier
+    # In forfaitair: vast forfait per MWh op fysiek volume
+    if pricing['modus'] == 'forfaitair':
+        A['imbalance_afname'] = totaal_afname_mwh * pricing['markup_imb']
+    else:
+        # Passthrough (passief of BSP): IMB op deviation × IMB-prijs
+        # In passive is dev=0 dus = 0 (correct).
+        # In BSP rekent dit (grid_in - nom_afn) × IMB per kwartier.
+        A['imbalance_afname'] = sum(
+            afname_dev_kw[i] * dt_h * imb_eur_mwh[i] / 1000.0 for i in range(N)
+        )
+    # A7. Vaste kost leverancier (€/maand × 12)
+    A['vaste_kost_leverancier'] = pricing['vaste_kost_maand'] * 12
+    # A8. Injectie energie spot (negatief = inkomst) — op NOMINATIE
+    A['injectie_energie_spot'] = -sum(
+        nom_inj_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
+    )
+    # A9. Markdown injectie (positief, want minder inkomst) — op NOMINATIE-volume
+    A['markdown_injectie'] = totaal_nom_inj_mwh * pricing['markdown_dam']
+    # A10. Imbalance injectie — zelfde logica als A6
+    if pricing['modus'] == 'forfaitair':
+        A['imbalance_injectie'] = totaal_injectie_mwh * pricing['markdown_imb']
+    else:
+        # IMB op deviation × IMB-prijs (negatief = inkomst, want injectie-deviation = extra verkoop)
+        A['imbalance_injectie'] = -sum(
+            injectie_dev_kw[i] * dt_h * imb_eur_mwh[i] / 1000.0 for i in range(N)
+        )
+    A['_subtotaal'] = sum(v for k, v in A.items() if not k.startswith('_'))
+    A['_meta'] = {
+        'leverancier': contract.get('leverancier', 'onbekend'),
+        'schijf_code': pricing.get('schijf_code', ''),
+        'schijf_label': pricing.get('schijf_label', ''),
+        'markup_eur_mwh': pricing['markup_dam'],
+        'markdown_eur_mwh': pricing['markdown_dam'],
+        'modus': pricing['modus'],
+    }
+
+    # ---- GROEP B: NETGEBRUIK AFNAME ----
+    B = {}
+    tar_maandpiek = tarieven.get('maandpiek_eur_kw_jaar', 0.0)
+    tar_jaarpiek = tarieven.get('toegangsvermogen_eur_kw_jaar', 0.0)
+    tar_overschr = tarieven.get('overschrijding_toegangsvermogen_eur_kw_jaar', 0.0)
+    tar_prop = tarieven.get('proportioneel_eur_mwh', 0.0)
+    tar_databeheer = tarieven.get('databeheer_eur_jaar', 0.0)
+    tar_reactief = tarieven.get('reactief_eur_mvarh', 0.0)
+
+    # Maandpiek kost (gemiddelde maandpiek voor LS, som maandpieken voor MS):
+    # Voor MS: tarief in €/kW/jaar betekent: gemiddelde maandpiek × tarief / 12 × 12 = gemiddelde × tarief.
+    # Voor LS: idem (Vlaanderen), of "gemiddelde maandpiek" formule.
+    # Vereenvoudiging v1: gemiddelde van de 12 maandpieken × tarief (€/kW/jaar).
+    if maandpieken_afname:
+        gem_maandpiek = sum(maandpieken_afname) / len(maandpieken_afname)
+    else:
+        gem_maandpiek = 0
+    B['maandpiek'] = gem_maandpiek * tar_maandpiek
+    # Jaarpiek (toegangsvermogen)
+    B['toegangsvermogen'] = toegangsvermogen * tar_jaarpiek
+    # Overschrijding toegangsvermogen (gemiddelde van max(0, maandpiek - toegangsvermogen) × tarief)
+    overschr = [max(0, p - toegangsvermogen) for p in maandpieken_afname]
+    if overschr:
+        gem_overschr = sum(overschr) / len(overschr)
+    else:
+        gem_overschr = 0
+    B['overschrijding_toegangsvermogen'] = gem_overschr * tar_overschr
+    # Proportioneel kWh
+    B['proportioneel'] = totaal_afname_mwh * tar_prop
+    # Reactief: cosφ=1 in v1 → 0
+    B['reactief'] = 0.0
+    # Databeheer
+    B['databeheer'] = tar_databeheer
+    B['_subtotaal'] = sum(v for k, v in B.items() if not k.startswith('_'))
+
+    # ---- GROEP C: NETGEBRUIK INJECTIE ----
+    C = {}
+    tar_inj_prop = tarieven.get('injectie_proportioneel_eur_mwh', 0.0)
+    tar_inj_cap = tarieven.get('injectie_capaciteit_eur_kva_maand', 0.0)
+    tar_inj_databeheer = tarieven.get('injectie_databeheer_eur_jaar', 0.0)
+    tar_inj_vaste = tarieven.get('injectie_vaste_vergoeding_eur_jaar', 0.0)
+    C['proportioneel'] = totaal_injectie_mwh * tar_inj_prop
+    # Capaciteit injectie: gemiddelde maandpiek injectie × tarief × 12
+    if maandpieken_injectie:
+        gem_maandpiek_inj = sum(maandpieken_injectie) / len(maandpieken_injectie)
+    else:
+        gem_maandpiek_inj = 0
+    C['capaciteit_injectie'] = gem_maandpiek_inj * tar_inj_cap * 12
+    C['databeheer_injectie'] = tar_inj_databeheer
+    C['vaste_vergoeding'] = tar_inj_vaste
+    C['_subtotaal'] = sum(v for k, v in C.items() if not k.startswith('_'))
+
+    # ---- GROEP D: TRANSPORT (Elia, indien apart) ----
+    D = {}
+    tar_tr_maandpiek = tarieven.get('transport_maandpiek_eur_kw_mnd', 0.0)
+    tar_tr_jaarpiek = tarieven.get('transport_jaarpiek_eur_kw_jaar', 0.0)
+    tar_tr_systeem = tarieven.get('transport_systeembeheer_eur_mwh', 0.0)
+    tar_tr_reserves = tarieven.get('transport_reserves_eur_mwh', 0.0)
+    tar_tr_markt = tarieven.get('transport_marktintegratie_eur_mwh', 0.0)
+    tar_tr_beschikb = tarieven.get('transport_beschikbaar_eur_kva_jaar', 0.0)
+    tar_tr_reactief = tarieven.get('transport_reactief_eur_mvarh', 0.0)
+
+    # Maandpiek transport: som van maandpieken × tarief/maand
+    D['maandpiek_transport'] = sum(maandpieken_afname) * tar_tr_maandpiek
+    D['jaarpiek_transport'] = jaarpiek_afname * tar_tr_jaarpiek
+    D['systeembeheer'] = totaal_afname_mwh * tar_tr_systeem
+    D['reserves'] = totaal_afname_mwh * tar_tr_reserves
+    D['marktintegratie'] = totaal_afname_mwh * tar_tr_markt
+    D['beschikbaar_vermogen'] = toegangsvermogen * tar_tr_beschikb
+    D['reactief_transport'] = 0.0  # cosφ=1
+    D['_subtotaal'] = sum(v for k, v in D.items() if not k.startswith('_'))
+
+    # ---- GROEP E: HEFFINGEN ----
+    E = {}
+    E['odv_osp'] = totaal_afname_mwh * tarieven.get('odv_eur_mwh', 0.0)
+    E['surcharges'] = totaal_afname_mwh * tarieven.get('surcharges_eur_mwh', 0.0)
+    E['soldes_regulatoires'] = totaal_afname_mwh * tarieven.get('soldes_eur_mwh', 0.0)
+
+    # Accijnzen-staffel (cumulatief per schijf) - ZAKELIJKE TARIEVEN 2026
+    # Bron: Programmawet art. 419 k) 2) zakelijke sub-categorie
+    # Geverifieerd via Ecopower tariefkaart januari 2026 + 10 echte facturen
+    accijnzen_staffel = tarieven.get('accijnzen_staffel', [])
+    # Format: [(grens_mwh, tarief_eur_mwh), ...]
+    if not accijnzen_staffel:
+        # Default ZAKELIJKE tarieven 2026 (NIET residentieel!)
+        # Schijven cumulatief in MWh op kalenderjaarbasis
+        accijnzen_staffel = [
+            (3, 14.21),       # Schijf 1: 0-3 MWh/jaar
+            (20, 14.21),      # Schijf 2: 3-20 MWh/jaar
+            (50, 12.09),      # Schijf 3: 20-50 MWh/jaar
+            (1000, 11.39),    # Schijf 4: 50-1000 MWh/jaar
+            (9999999, 10.00),  # Schijf 5: >1000 MWh/jaar (te verifiëren)
+        ]
+    accijns_basis = tarieven.get('accijns_basis_eur_mwh', 0.0)  # voor LS: 1.9261
+    accijns_totaal = totaal_afname_mwh * accijns_basis  # gewone accijns (LS only)
+    rest_mwh = totaal_afname_mwh
+    vorig_grens = 0
+    for grens, tarief in accijnzen_staffel:
+        schijf_mwh = max(0, min(rest_mwh, grens - vorig_grens))
+        if schijf_mwh <= 0:
+            break
+        accijns_totaal += schijf_mwh * tarief
+        rest_mwh -= schijf_mwh
+        vorig_grens = grens
+        if rest_mwh <= 0:
+            break
+    E['accijnzen'] = accijns_totaal
+
+    # Energiefonds Vlaanderen (vast €/jaar, BTW-vrij)
+    E['energiefonds_vlaanderen'] = tarieven.get('energiefonds_eur_jaar', 0.0)
+    E['_subtotaal'] = sum(v for k, v in E.items() if not k.startswith('_'))
+
+    # ---- TOTAAL ----
+    subtotaal_excl_btw = A['_subtotaal'] + B['_subtotaal'] + C['_subtotaal'] + D['_subtotaal'] + E['_subtotaal']
+    # BTW 21% op alles BEHALVE energiefonds
+    btw_basis = subtotaal_excl_btw - E['energiefonds_vlaanderen']
+    btw_bedrag = btw_basis * 0.21
+    totaal_incl_btw = btw_basis * 1.21 + E['energiefonds_vlaanderen']
+
+    return {
+        'groepen': {
+            'A_energiekost': A,
+            'B_netgebruik_afname': B,
+            'C_netgebruik_injectie': C,
+            'D_transport': D,
+            'E_heffingen': E,
+        },
+        'subtotaal_excl_btw': subtotaal_excl_btw,
+        'btw_bedrag': btw_bedrag,
+        'totaal_incl_btw': totaal_incl_btw,
+        'maandpieken_afname_kw': maandpieken_afname,
+        'maandpieken_injectie_kw': maandpieken_injectie,
+        'toegangsvermogen_kw': toegangsvermogen,
+        'jaarpiek_afname_kw': jaarpiek_afname,
+        'maand_mwh_afname': maand_mwh_afname,
+        'maand_mwh_injectie': maand_mwh_injectie,
+    }
+
+
+# =============================================================================
+# HOOFDSIMULATIE
+# =============================================================================
+
+def run_simulation(inp: dict) -> dict:
+    log.info("=== Fluctus Simulator v1.4 — start ===")
+
+    rng = random.Random(inp.get('random_seed', 42))
+
+    # ---- Sim-periode opbouwen ----
+    van = parse_iso_date(inp['simulatieperiode']['van'])
+    tot = parse_iso_date(inp['simulatieperiode']['tot'])
+    sim_timestamps = []
+    cur = van
+    while cur < tot:
+        sim_timestamps.append(cur)
+        cur = cur + timedelta(minutes=15)
+    N = len(sim_timestamps)
+    log.info(f"Sim-periode: {van.date()} → {tot.date()} = {N} kwartieren ({N/96:.0f} dagen)")
+
+    # ---- Profielen opbouwen ----
+    log.info("Profielen opbouwen…")
+    consumption_kw = build_consumption_profile(
+        inp['profiel_kwartier'],
+        inp['jaarverbruik_mwh'],
+        inp.get('aanvullingen', {}),
+        sim_timestamps,
+    )
+    log.info(f"Consumptie: max={max(consumption_kw):.1f} kW, gem={sum(consumption_kw)/N:.1f} kW, totaal={sum(consumption_kw)*0.25/1000:.1f} MWh")
+
+    pv_kw = build_pv_profile(
+        inp['pv'].get('vorm_kwartier', []),
+        inp['pv'].get('kwp', 0),
+        inp['pv'].get('specifiek_rendement_kwh_per_kwp', 900),
+        sim_timestamps,
+    )
+    if max(pv_kw) > 0:
+        log.info(f"PV: max={max(pv_kw):.1f} kW, totaal={sum(pv_kw)*0.25/1000:.1f} MWh")
+    else:
+        log.info("PV: geen productie")
+
+    # ---- Markt-data ----
+    spot_actual = inp['markt']['spot_kwartier']
+    imb_actual = inp['markt'].get('imb_kwartier', spot_actual)
+    if len(spot_actual) != N:
+        log.warning(f"Spot heeft {len(spot_actual)} waarden, sim heeft {N} kwartieren. Truncate/pad.")
+        if len(spot_actual) < N:
+            spot_actual = spot_actual + [spot_actual[-1]] * (N - len(spot_actual))
+            imb_actual = imb_actual + [imb_actual[-1]] * (N - len(imb_actual))
+        else:
+            spot_actual = spot_actual[:N]
+            imb_actual = imb_actual[:N]
+
+    # ---- PV-curtailment (v1.3) ----
+    # Strategie: cap PV op eigen verbruik wanneer DAM (spot) onder een ingestelde drempel zakt.
+    # Trigger: spot_actual[i] < trigger_eur_mwh
+    # Effect:  pv_kw[i] = min(pv_kw[i], consumption_kw[i])  → injectie wordt 0, eigen verbruik blijft
+    pv_curt_cfg = inp.get('pv_curtailment', {})
+    pv_curtailed_kwh = 0.0          # totaal verloren PV-productie (kWh)
+    pv_curtailed_kwartieren = 0     # # kwartieren waarin curtailment actief was
+    vermeden_kost_eur = 0.0         # wat injectie zonder curtailment zou hebben gekost (positief = besparing)
+    pv_kw_origineel = list(pv_kw)   # bewaar zonder curtailment voor KPI
+
+    if pv_curt_cfg.get('actief', False) and max(pv_kw) > 0:
+        trigger = pv_curt_cfg.get('trigger_eur_mwh', 0.0)
+        log.info(f"PV-curtailment actief (cap op verbruik) — trigger: spot < {trigger} €/MWh")
+        for i in range(N):
+            if spot_actual[i] < trigger:
+                potentiele_injectie_kw = pv_kw[i] - consumption_kw[i]  # wat ZOU geïnjecteerd worden
+                if potentiele_injectie_kw > 0:
+                    # Cap op eigen verbruik: PV beperkt tot wat we zelf gebruiken
+                    pv_kw[i] = consumption_kw[i]
+                    pv_curtailed_kwh += potentiele_injectie_kw * 0.25
+                    pv_curtailed_kwartieren += 1
+                    # Vermeden kost: deze MWh zou tegen spot zijn geïnjecteerd
+                    # Bij negatieve spot is dat een KOST → vermeden = positief
+                    # injectie_kost = - injectie_kWh × spot/1000 (uit factuurlogica A8)
+                    # Bij negatieve spot: -kWh × negative = positief (kost)
+                    # Door curtailment vermijden we deze kost
+                    vermeden_kost_eur += potentiele_injectie_kw * 0.25 * (-spot_actual[i]) / 1000.0
+        if pv_curtailed_kwartieren > 0:
+            log.info(f"  Curtailment toegepast op {pv_curtailed_kwartieren} kwartieren ({pv_curtailed_kwh/1000:.2f} MWh verloren productie, vermeden kost ~€{vermeden_kost_eur:.0f})")
+        else:
+            log.info("  Geen curtailment-momenten in deze periode (spot bleef altijd boven drempel)")
+
+    # ---- Forecasts (D-1) ----
+    sf = inp.get('forecast', {})
+    spot_forecast = add_gaussian_noise(spot_actual, sf.get('sigma_da', 0), rng)
+    consumption_forecast = add_relative_noise(consumption_kw, sf.get('sigma_volume_verbruik_pct', 0), rng)
+    pv_forecast = add_relative_noise(pv_kw, sf.get('sigma_volume_pv_pct', 0), rng)
+
+    # ---- Cyclus-kost ----
+    batt = inp['batterij']
+    max_cycli = batt.get('max_cycli', 8000)
+    dod = batt['dod_pct'] / 100.0 if batt['dod_pct'] > 1.5 else batt['dod_pct']
+    if batt['kwh'] > 0 and dod > 0 and max_cycli > 0:
+        cyclus_kost = batt['capex_eur'] / (max_cycli * dod * batt['kwh'])
+    else:
+        cyclus_kost = 0.0
+    log.info(f"Cyclus-kost: €{cyclus_kost:.4f}/kWh ontladen")
+
+    # ---- LP per dag ----
+    log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
+    soc_kwh = batt['kwh'] * dod * 0.5  # start halfvol
+    grid_in_all = []
+    grid_out_all = []
+    soc_all = [soc_kwh]
+    p_dis_all = []
+    p_ch_all = []
+    over_afn_zacht_all = []
+    over_afn_hard_all = []
+    over_inj_zacht_all = []
+    over_inj_hard_all = []
+
+    n_dagen = N // 96
+    
+    # === BSP CONFIG ===
+    # Optie E: forecast-met-ruis als nominatie + flex
+    bsp_cfg = inp.get('bsp', {})
+    bsp_actief = bsp_cfg.get('actief', False)
+    
+    # === SNELLE PAD 1: geen batterij EN geen PV → geen LP nodig ===
+    skip_lp = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) <= 0
+    # === SNELLE PAD 2: geen batterij MAAR wel PV → geen LP nodig (PV is passief) ===
+    pv_only = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) > 0
+    
+    # BSP-modus heeft altijd LP nodig — overschrijf snelle paden
+    if bsp_actief and (max(pv_kw) > 0 or batt['kwh'] > 0):
+        skip_lp = False
+        pv_only = False
+    
+    # Initialiseer BSP-storage (gebruikt zelfs als BSP niet actief, voor consistente structuur)
+    nom_dam_kw_all = []
+    dev_kw_all = []
+    nom_eff_afn_kw_all = []
+    nom_eff_inj_kw_all = []
+    pv_curtailed_kw_bsp_all = []
+    bsp_imb_afname_eur = 0.0
+    bsp_imb_injectie_eur = 0.0
+    
+    if skip_lp:
+        log.info("Geen batterij/PV — LP wordt overgeslagen (snelle pad)")
+        zacht_afn = inp['aansluiting'].get('max_afname_kw_zacht', float('inf'))
+        hard_afn = inp['aansluiting'].get('max_afname_kw_hard', float('inf'))
+        for t in range(N):
+            cons_kw = consumption_kw[t]
+            grid_in_all.append(cons_kw)
+            grid_out_all.append(0.0)
+            p_dis_all.append(0.0)
+            p_ch_all.append(0.0)
+            soc_all.append(0.0)
+            over_afn_zacht_all.append(max(0, cons_kw - zacht_afn))
+            over_afn_hard_all.append(max(0, cons_kw - hard_afn))
+            over_inj_zacht_all.append(0.0)
+            over_inj_hard_all.append(0.0)
+    elif pv_only:
+        log.info("PV zonder batterij — passieve dispatch (snelle pad)")
+        # PV gaat eerst naar zelfconsumptie, overschot naar net (injectie)
+        zacht_afn = inp['aansluiting'].get('max_afname_kw_zacht', float('inf'))
+        hard_afn = inp['aansluiting'].get('max_afname_kw_hard', float('inf'))
+        zacht_inj = inp['aansluiting'].get('max_injectie_kw_zacht', float('inf'))
+        hard_inj = inp['aansluiting'].get('max_injectie_kw_hard', float('inf'))
+        for t in range(N):
+            cons_kw = consumption_kw[t]
+            pv_t = pv_kw[t]
+            netto = cons_kw - pv_t  # > 0 = afname, < 0 = injectie
+            if netto >= 0:
+                grid_in_all.append(netto)
+                grid_out_all.append(0.0)
+                over_afn_zacht_all.append(max(0, netto - zacht_afn))
+                over_afn_hard_all.append(max(0, netto - hard_afn))
+                over_inj_zacht_all.append(0.0)
+                over_inj_hard_all.append(0.0)
+            else:
+                injectie = -netto
+                grid_in_all.append(0.0)
+                grid_out_all.append(injectie)
+                over_afn_zacht_all.append(0.0)
+                over_afn_hard_all.append(0.0)
+                over_inj_zacht_all.append(max(0, injectie - zacht_inj))
+                over_inj_hard_all.append(max(0, injectie - hard_inj))
+            p_dis_all.append(0.0)
+            p_ch_all.append(0.0)
+            soc_all.append(0.0)
+    else:
+        # === STANDAARD LP-PAD (batterij of BSP-modus) ===
+        if bsp_actief:
+            # BSP-modus: gebruik lp_dispatch_day_bsp met perfect IMB-foresight.
+            # Nominatie wordt gebaseerd op consumption_forecast/pv_forecast (= forecast-met-ruis).
+            # Vermenigvuldigers van ruis komen uit profielconfig + globale modus.
+            log.info("BSP-modus actief — gebruik lp_dispatch_day_bsp met IMB-foresight")
+            pv_curt_allowed = bsp_cfg.get('pv_curtailment_allowed', True)
+            # Capture rate: hoeveel paper-deviation toelaten per dag als % van werkelijk dagvolume.
+            # Default 1.8% = gekalibreerd tegen externe simulator op rolling 12m slager 200MWh + 125 kWp.
+            # In productie kan deze worden bijgesteld via 'forecast_modus' (conservatief/realistic/optimistisch).
+            forecast_modus = bsp_cfg.get('forecast_modus', 'realistic')
+            modus_multiplier = {
+                'conservatief': 0.67,   # -33% van realistic
+                'realistic': 1.0,
+                'optimistisch': 1.5,    # +50% van realistic
+            }.get(forecast_modus, 1.0)
+            paper_capture_rate = bsp_cfg.get('paper_capture_rate', 0.018) * modus_multiplier
+            log.info(f"BSP capture rate: {paper_capture_rate*100:.1f}% ({forecast_modus} × {modus_multiplier})")
+            for d in range(n_dagen):
+                i0 = d * 96
+                i1 = i0 + 96
+                # Per-dag papier-budget: cap_rate × (werkelijk dagvolume in MWh)
+                daily_volume_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
+                daily_paper_budget_mwh = paper_capture_rate * daily_volume_mwh
+                
+                result = lp_dispatch_day_bsp(
+                    consumption_kw=consumption_kw[i0:i1],
+                    pv_kw=pv_kw[i0:i1],
+                    spot_eur_mwh=spot_actual[i0:i1],   # DAM perfect (D-1 bekend)
+                    imb_eur_mwh=imb_actual[i0:i1],     # IMB PERFECT FORESIGHT
+                    soc_start_kwh=soc_kwh,
+                    batterij=batt,
+                    aansluiting=inp['aansluiting'],
+                    contract=inp['contract'],
+                    cyclus_kost_eur_per_kwh=cyclus_kost,
+                    daily_paper_risk_mwh=daily_paper_budget_mwh,  # capture-rate budget
+                    pv_curtailment_allowed=pv_curt_allowed,
+                    consumption_forecast_kw=consumption_forecast[i0:i1],
+                    pv_forecast_kw=pv_forecast[i0:i1],
+                )
+                grid_in_all.extend(result['grid_in'])
+                grid_out_all.extend(result['grid_out'])
+                p_dis_all.extend(result['p_discharge'])
+                p_ch_all.extend(result['p_charge'])
+                soc_all.extend(result['soc'][1:])
+                soc_kwh = result['soc'][-1]
+                over_afn_zacht_all.extend(result['over_afn_zacht'])
+                over_afn_hard_all.extend(result['over_afn_hard'])
+                over_inj_zacht_all.extend(result['over_inj_zacht'])
+                over_inj_hard_all.extend(result['over_inj_hard'])
+                # BSP-specifieke output
+                nom_dam_kw_all.extend(result['nom_dam_kw'])
+                dev_kw_all.extend(result['dev_kw'])
+                nom_eff_afn_kw_all.extend(result['nom_eff_afn_kw'])
+                nom_eff_inj_kw_all.extend(result['nom_eff_inj_kw'])
+                pv_curtailed_kw_bsp_all.extend(result['pv_curtailed_kw'])
+                if (d + 1) % 30 == 0:
+                    log.info(f"  BSP-dispatch dag {d+1}/{n_dagen}…")
+        else:
+            for d in range(n_dagen):
+                i0 = d * 96
+                i1 = i0 + 96
+                result = lp_dispatch_day(
+                    consumption_forecast[i0:i1],
+                    pv_forecast[i0:i1],
+                    spot_forecast[i0:i1],
+                    soc_kwh,
+                    batt,
+                    inp['aansluiting'],
+                    inp['contract'],
+                    cyclus_kost,
+                )
+                grid_in_all.extend(result['grid_in'])
+                grid_out_all.extend(result['grid_out'])
+                p_dis_all.extend(result['p_discharge'])
+                p_ch_all.extend(result['p_charge'])
+                soc_all.extend(result['soc'][1:])
+                soc_kwh = result['soc'][-1]
+                over_afn_zacht_all.extend(result['over_afn_zacht'])
+                over_afn_hard_all.extend(result['over_afn_hard'])
+                over_inj_zacht_all.extend(result['over_inj_zacht'])
+                over_inj_hard_all.extend(result['over_inj_hard'])
+
+                if (d + 1) % 30 == 0:
+                    log.info(f"  LP-dispatch dag {d+1}/{n_dagen}…")
+
+    log.info(f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh")
+
+    # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
+    log.info("Jaarfactuur berekenen…")
+    contract_for_factuur = dict(inp['contract'])
+    
+    # Bouw nominatie-arrays voor BSP-modus.
+    # Optie E zonder ruis (eerste versie): nom_afn = max(consumption - pv, 0), nom_inj = max(pv - consumption, 0)
+    # Dat is de "verwachte fysieke positie" zonder LP-flex. LP heeft consumption/pv niet aangepast,
+    # alleen via curtail/batterij. Dus nominatie ≠ werkelijk netto-volume.
+    # Sigma-ruis op consumption/pv komt in milestone 2C.
+    nom_afn_arr = None
+    nom_inj_arr = None
+    if bsp_actief:
+        contract_for_factuur['modus'] = 'passthrough'
+        # Gebruik effective nominatie uit LP (= forecast + paper-deviation).
+        # Dat is wat de ARP daadwerkelijk nomineert na BSP-strategie:
+        # forecast als basis + LP-bepaalde papier-dev op gunstige IMB-momenten.
+        if nom_eff_afn_kw_all and len(nom_eff_afn_kw_all) == N:
+            nom_afn_arr = nom_eff_afn_kw_all
+            nom_inj_arr = nom_eff_inj_kw_all
+            log.info(f"  BSP eff. nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
+        else:
+            # Fallback: forecast-only nominatie
+            nom_afn_arr = [max(consumption_forecast[i] - pv_forecast[i], 0) for i in range(N)]
+            nom_inj_arr = [max(pv_forecast[i] - consumption_forecast[i], 0) for i in range(N)]
+            log.info(f"  BSP forecast nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
+
+    # Fysieke netstromen: consumption - pv +/- batterij (LP-resultaat is fysiek correct)
+    # grid_in_all en grid_out_all zijn LP-variabelen die de werkelijke fysieke stromen bevatten
+    # (laden/ontladen batterij zit erin). Correctie voor BSP-zonder-batterij: daar zijn
+    # grid_in/out nominatievariabelen, dus we reconstrueren fysiek uit consumption + batterij.
+    heeft_batterij = batt.get('kwh', 0) > 0
+    if heeft_batterij:
+        # LP-variabelen bevatten fysieke stromen incl batterij
+        fysiek_grid_in  = list(grid_in_all)
+        fysiek_grid_out = list(grid_out_all)
+    else:
+        # Geen batterij: fysiek = consumption - pv (netto)
+        fysiek_grid_in  = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+        fysiek_grid_out = [max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)]
+
+    factuur = bereken_jaarfactuur(
+        fysiek_grid_in,
+        fysiek_grid_out,
+        spot_actual,
+        imb_actual,
+        sim_timestamps,
+        contract_for_factuur,
+        inp['netbeheer'],
+        nom_afn_kw_all=nom_afn_arr,
+        nom_inj_kw_all=nom_inj_arr,
+    )
+
+    # ---- KPI's ----
+    pv_naar_eigen_verbruik = sum(min(consumption_kw[i], pv_kw[i]) * 0.25 / 1000.0 for i in range(N))
+    totaal_verbruik_mwh = sum(consumption_kw) * 0.25 / 1000.0
+    totaal_pv_mwh = sum(pv_kw) * 0.25 / 1000.0
+    # Industriestandaard (v1.2: hersteld na verwisseling in v1.1):
+    #   Zelfconsumptie  = % van PV-productie dat zelf wordt verbruikt (rest = injectie)
+    #   Zelfvoorziening = % van verbruik dat door eigen PV wordt gedekt (rest = afname)
+    pct_zelfconsumptie = (pv_naar_eigen_verbruik / totaal_pv_mwh * 100) if totaal_pv_mwh > 0 else 0
+    pct_zelfvoorziening = (pv_naar_eigen_verbruik / totaal_verbruik_mwh * 100) if totaal_verbruik_mwh > 0 else 0
+
+    aantal_overschr_zacht = sum(1 for v in over_afn_zacht_all if v > 0.01)
+    aantal_overschr_hard = sum(1 for v in over_afn_hard_all if v > 0.01)
+    max_overschr_zacht_kw = max(over_afn_zacht_all) if over_afn_zacht_all else 0
+    max_overschr_hard_kw = max(over_afn_hard_all) if over_afn_hard_all else 0
+    vereist_injectie_kw = max(grid_out_all) if grid_out_all else 0
+
+    # Cycli verbruikt
+    energie_ontladen_mwh = sum(p_dis_all) * 0.25 / 1000.0
+    cycli_verbruikt = energie_ontladen_mwh * 1000.0 / (batt['kwh'] * dod) if batt['kwh'] * dod > 0 else 0
+    levensduur_jaren = max_cycli / cycli_verbruikt if cycli_verbruikt > 0 else 999
+
+    kpi = {
+        'totaal_incl_btw': factuur['totaal_incl_btw'],
+        'subtotaal_excl_btw': factuur['subtotaal_excl_btw'],
+        'pct_zelfconsumptie': pct_zelfconsumptie,
+        'pct_zelfvoorziening': pct_zelfvoorziening,
+        'aantal_piek_overschrijdingen_zacht': aantal_overschr_zacht,
+        'aantal_piek_overschrijdingen_hard': aantal_overschr_hard,
+        'max_overschr_zacht_kw': max_overschr_zacht_kw,
+        'max_overschr_hard_kw': max_overschr_hard_kw,
+        'vereist_injectievermogen_kw': vereist_injectie_kw,
+        'cycli_verbruikt': cycli_verbruikt,
+        'levensduur_jaren': levensduur_jaren,
+        'totaal_afname_mwh': totaal_verbruik_mwh,
+        'totaal_pv_mwh': totaal_pv_mwh,
+        # v1.2: expliciete PV-flow-velden zodat UI niet hoeft af te leiden
+        'pv_eigen_verbruik_mwh': pv_naar_eigen_verbruik,
+        'pv_injectie_mwh': max(0.0, totaal_pv_mwh - pv_naar_eigen_verbruik),
+        # v1.3: curtailment KPIs
+        'pv_curtailed_mwh': pv_curtailed_kwh / 1000.0,
+        'pv_curtailed_kwartieren': pv_curtailed_kwartieren,
+        'pv_potentiele_productie_mwh': sum(pv_kw_origineel) * 0.25 / 1000.0,
+        'vermeden_injectie_kost_eur': vermeden_kost_eur,
+        # Fysieke netto grid-flows:
+        # - Zonder batterij: consumption - pv geeft exacte fysieke stromen
+        # - Met batterij: LP-variabelen zijn de fysieke stromen (batterij wijzigt grid_in/out)
+        'totaal_grid_in_mwh': (
+            sum(max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)) * 0.25 / 1000.0
+            if batt['kwh'] <= 0
+            else sum(max(0.0, grid_in_all[i] - grid_out_all[i]) for i in range(N)) * 0.25 / 1000.0
+        ),
+        'totaal_grid_out_mwh': (
+            sum(max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)) * 0.25 / 1000.0
+            if batt['kwh'] <= 0
+            else sum(max(0.0, grid_out_all[i] - grid_in_all[i]) for i in range(N)) * 0.25 / 1000.0
+        ),
+    }
+
+    log.info(f"Totaal: €{kpi['totaal_incl_btw']:.0f} | zelfconsumptie {pct_zelfconsumptie:.1f}% | overschr zacht/hard: {aantal_overschr_zacht}/{aantal_overschr_hard}")
+
+    # ---- Maandstaten ----
+    maandstaten = []
+    for m in range(12):
+        if m < len(factuur['maand_mwh_afname']):
+            maandstaten.append({
+                'maand': m + 1,
+                'afname_mwh': factuur['maand_mwh_afname'][m],
+                'injectie_mwh': factuur['maand_mwh_injectie'][m],
+            })
+
+    # ---- Output JSON ----
+    output = {
+        'jaarfactuur': {
+            'groepen': factuur['groepen'],
+            'subtotaal_excl_btw': factuur['subtotaal_excl_btw'],
+            'btw_bedrag': factuur['btw_bedrag'],
+            'totaal_incl_btw': factuur['totaal_incl_btw'],
+            'maandpieken_afname_kw': factuur['maandpieken_afname_kw'],
+            'maandpieken_injectie_kw': factuur['maandpieken_injectie_kw'],
+            'toegangsvermogen_kw': factuur['toegangsvermogen_kw'],
+            'jaarpiek_afname_kw': factuur['jaarpiek_afname_kw'],
+        },
+        'kpi': kpi,
+        'maandstaten': maandstaten,
+        'soc_reeks': soc_all[:N],  # cap to N
+        'piekoverschrijdingen': {
+            'aantal_zacht': aantal_overschr_zacht,
+            'aantal_hard': aantal_overschr_hard,
+            'kwartieren_zacht': [
+                sim_timestamps[i].isoformat() for i in range(N) if over_afn_zacht_all[i] > 0.01
+            ][:100],
+            'kwartieren_hard': [
+                sim_timestamps[i].isoformat() for i in range(N) if over_afn_hard_all[i] > 0.01
+            ][:100],
+        },
+        'data_periode': {
+            'van': sim_timestamps[0].isoformat(),
+            'tot': sim_timestamps[-1].isoformat(),
+            'aantal_kwartieren': N,
+        },
+    }
+
+    log.info("=== Simulator klaar ===")
+    return output
+
+
+# =============================================================================
+# BATTERIJ-ARBITRAGE ANALYSE (v1.5 — M1/M2/M3)
+# Heuristic, geen LP. Snel (<1s). Sales-tool.
+# =============================================================================
+
+def _build_full_profiles(inp: dict, sim_timestamps: list) -> tuple:
+    """
+    Bouw consumption_kw en pv_kw arrays voor de sim-periode.
+    Hergebruikt build_consumption_profile en build_pv_profile.
+    Returns: (consumption_kw[N], pv_kw[N])
+    """
+    N = len(sim_timestamps)
+
+    # Verbruiksprofiel
+    basis_profiel = inp.get('profiel_kwartier') or inp.get('profiel_voorbeeld_eerste_24u')
+    if basis_profiel and len(basis_profiel) < 35040:
+        # Uitgebreide voorbeeld-input: herhaal dagprofiel tot 35040 kwartieren
+        dag_len = 96
+        if len(basis_profiel) <= dag_len:
+            herhaal = (35040 // dag_len) + 1
+            basis_profiel = (basis_profiel * herhaal)[:35040]
+        # Renormaliseer
+        s = sum(basis_profiel)
+        if s > 0:
+            basis_profiel = [v / s for v in basis_profiel]
+
+    aanvullingen = inp.get('aanvullingen') or {}
+    consumption_kw = build_consumption_profile(
+        basis_profiel, inp['jaarverbruik_mwh'], aanvullingen, sim_timestamps
+    )
+
+    # PV-profiel
+    pv_conf = inp.get('pv') or {}
+    kwp = float(pv_conf.get('kwp', 0))
+    spec_rend = float(pv_conf.get('specifiek_rendement_kwh_per_kwp', 950))
+    pv_vorm = pv_conf.get('vorm_kwartier') or pv_conf.get('vorm_voorbeeld_juni_dag') or []
+    pv_kw = build_pv_profile(pv_vorm, kwp, spec_rend, sim_timestamps)
+
+    return consumption_kw, pv_kw
+
+
+def _get_markt_arrays(inp: dict, N: int) -> tuple:
+    """
+    Haal DAM en IMB arrays op uit inp['markt'] of genereer dummy-data.
+    Returns: (dam_eur_mwh[N], imb_eur_mwh[N])
+    Beide arrays hebben lengte N.
+    """
+    markt = inp.get('markt') or {}
+    dam_raw = markt.get('spot_kwartier') or []
+    imb_raw = markt.get('imb_kwartier') or []
+
+    # Lengte aanpassen/herhalen indien nodig
+    def _fit(arr, n):
+        if not arr:
+            return None
+        if len(arr) >= n:
+            return list(arr[:n])
+        # Herhaal circulair
+        out = []
+        while len(out) < n:
+            out.extend(arr)
+        return out[:n]
+
+    dam = _fit(dam_raw, N)
+    imb = _fit(imb_raw, N)
+
+    # Fallback: Belgisch seizoens-gemiddelde als geen data
+    if dam is None:
+        import math as _math
+        dam = []
+        for i in range(N):
+            uur = (i % 96) / 4.0
+            dag_type = (i // 96) % 7
+            seizoen = _math.sin(2 * _math.pi * i / (96 * 365)) * 25
+            dag_cyclus = 40 + 30 * _math.sin(_math.pi * (uur - 6) / 12) * (1 if 6 <= uur <= 22 else 0.3)
+            weekend = -10 if dag_type >= 5 else 0
+            dam.append(max(-50, dag_cyclus + seizoen + weekend))
+    if imb is None:
+        imb = [dam[i] + (5 if i % 3 == 0 else -8) for i in range(N)]
+
+    return dam, imb
+
+
+def _maand_van_index(idx: int, sim_timestamps: list) -> int:
+    """Geeft maand (1-12) voor kwartier-index idx."""
+    return sim_timestamps[idx].month if idx < len(sim_timestamps) else 1
+
+
+def _dag_van_index(idx: int) -> int:
+    """Geeft dag-nummer (0-based) voor kwartier-index."""
+    return idx // 96
+
+
+# ---- Categorie 1: Maandpiek-shaving ----------------------------------------
+
+def _categorie1_piekshaving(
+    consumption_kw: list,
+    pv_kw: list,
+    sim_timestamps: list,
+    batt: dict,
+    aansluiting: dict,
+    netbeheer: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Berekent jaarlijkse besparing via maandpiek-shaving.
+    Returns: besparing_eur_jaar (float), lijst van maandpieken (kw)
+    """
+    N = len(consumption_kw)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    tarieven = netbeheer.get('tarieven', {})
+    maandpiek_tarief_per_kw_jaar = float(tarieven.get('maandpiek_eur_kw_jaar', 59.76))
+    maandpiek_tarief_per_kw_maand = maandpiek_tarief_per_kw_jaar / 12.0
+
+    # Netto afname per kwartier (positief = afname van net)
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+
+    # Cyclus-budget per maand in kWh dispatch
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    kwh_budget_per_maand = kwh_dispatch_per_dag * 30.5
+
+    besparing_totaal = 0.0
+    maandpieken = {}
+
+    # Groepeer per maand
+    maanden = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden:
+            maanden[m] = []
+        maanden[m].append(i)
+
+    for m, indices in sorted(maanden.items()):
+        afnames_m = [(netto_afname[i], i) for i in indices]
+        if not afnames_m:
+            continue
+        max_piek = max(v for v, _ in afnames_m)
+        maandpieken[m] = max_piek
+
+        # Top-10 pieken sorteren (hoogste eerst)
+        afnames_gesorteerd = sorted(afnames_m, key=lambda x: -x[0])
+        top10 = afnames_gesorteerd[:10]
+
+        # Bepaal drempel: batterij kan pieken aftoppen
+        # Hoeveel kWh nodig om alle top-10 pieken terug te brengen tot drempel?
+        # Drempel iteratief zoeken: begin bij piek, verlaag totdat budget op is
+        drempel = max_piek
+        kwh_ingezet = 0.0
+        beschikbaar = min(kwh_budget_per_maand * 0.5, kwh_eff)  # 50% voor shaving (rest voor laden)
+
+        for target_drempel in sorted(set(v for v, _ in top10)):
+            extra_kwh = sum(
+                max(0, v - target_drempel) * 0.25
+                for v, _ in top10
+            )
+            if extra_kwh <= beschikbaar:
+                drempel = target_drempel
+                kwh_ingezet = extra_kwh
+            else:
+                break
+
+        # Hoeveel kW gereduceerd?
+        piek_reductie = max(0.0, max_piek - drempel)
+        piek_reductie = min(piek_reductie, kw_batt)  # max batterij-vermogen
+
+        besparing_m = piek_reductie * maandpiek_tarief_per_kw_maand
+        besparing_totaal += besparing_m
+
+    return besparing_totaal, maandpieken
+
+
+# ---- Categorie 2: DAM intra-day arbitrage -----------------------------------
+
+def _categorie2_dam_arbitrage(
+    dam_eur_mwh: list,
+    sim_timestamps: list,
+    batt: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Heuristic DAM-arbitrage: per dag, laad bij laagste N kwartieren, ontlaad bij hoogste.
+    Chronologie gerespecteerd: laad-kwartieren moeten VOOR ontlaad-kwartieren vallen.
+    Returns: revenue_eur_jaar
+    """
+    N = len(dam_eur_mwh)
+    n_dagen = N // 96
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    rte = float(batt.get('rte_pct', 92)) / 100.0 if batt.get('rte_pct', 92) > 1.5 else float(batt.get('rte_pct', 0.92))
+    kwh_eff = kwh_batt * dod
+
+    cycli_per_dag = cycli_per_jaar / 365.0
+    kwh_per_cyclus = kwh_eff  # één volledige cyclus
+    kwh_laad_per_dag = cycli_per_dag * kwh_per_cyclus  # budget laden
+    # Max kWh per kwartier via laad/ontlaad-vermogen
+    kwh_per_kwartier_max = kw_batt * 0.25
+
+    revenue_totaal = 0.0
+
+    for d in range(n_dagen):
+        i0 = d * 96
+        i1 = min(i0 + 96, N)
+        dag_spot = dam_eur_mwh[i0:i1]
+        n_qt = len(dag_spot)
+        if n_qt < 4:
+            continue
+
+        # Aantal kwartieren voor laden/ontladen
+        n_laad_qt = max(1, int(kwh_laad_per_dag / kwh_per_kwartier_max))
+        n_laad_qt = min(n_laad_qt, n_qt // 2)
+
+        # Sorteer kwartier-indices op prijs
+        gesorteerd_asc = sorted(range(n_qt), key=lambda x: dag_spot[x])
+        gesorteerd_desc = sorted(range(n_qt), key=lambda x: -dag_spot[x])
+
+        laad_indices = set(gesorteerd_asc[:n_laad_qt])
+        ontlaad_indices = set(gesorteerd_desc[:n_laad_qt])
+
+        # Chronologie: verwijder ontlaad-momenten die VOOR laad-momenten vallen
+        # (gebruik mediaan laad-tijdstip als splitsgrens)
+        if laad_indices and ontlaad_indices:
+            laad_mediaan = sorted(laad_indices)[len(laad_indices) // 2]
+            ontlaad_indices = {t for t in ontlaad_indices if t > laad_mediaan}
+
+        if not laad_indices or not ontlaad_indices:
+            continue
+
+        laad_prijs = sum(dag_spot[t] for t in laad_indices) / len(laad_indices)
+        ontlaad_prijs = sum(dag_spot[t] for t in ontlaad_indices) / len(ontlaad_indices)
+        spread = ontlaad_prijs - laad_prijs
+
+        if spread <= 0:
+            continue
+
+        # kWh geladen = cycli_per_dag × kwh_per_cyclus (begrensd door budget)
+        kwh_geladen = min(kwh_laad_per_dag, n_laad_qt * kwh_per_kwartier_max)
+        kwh_ontladen = kwh_geladen * rte
+
+        # Revenue: ontladen × (ontlaadprijs - inkoopkost / rte)
+        # Netto: kwh_ontladen × spread / 1000 - kwh_geladen × inkoopkost / 1000
+        # Vereenvoudigd: kwh_ontladen × spread_netto / 1000
+        revenue_dag = kwh_ontladen * spread / 1000.0
+
+        # Schaal naar dag
+        dagen_in_sim = n_dagen
+        revenue_totaal += revenue_dag
+
+    # Schaal naar volledig jaar (sim kan korter zijn)
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Categorie 3: PV-curtail-vermijding ------------------------------------
+
+def _categorie3_pv_curtail(
+    consumption_kw: list,
+    pv_kw: list,
+    dam_eur_mwh: list,
+    batt: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Kwartieren met DAM<0 én PV>verbruik: batterij absorbeert overschot ipv injectie.
+    Returns: revenue_eur_jaar
+    """
+    N = len(consumption_kw)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+
+    # Alle kandidaten: DAM<0 en PV>verbruik
+    kandidaten = []
+    for i in range(N):
+        if dam_eur_mwh[i] < 0 and pv_kw[i] > consumption_kw[i]:
+            overschot_kw = pv_kw[i] - consumption_kw[i]
+            kan_laden_kw = min(overschot_kw, kw_batt)
+            kan_laden_kwh = kan_laden_kw * 0.25
+            waarde_eur = kan_laden_kwh * abs(dam_eur_mwh[i]) / 1000.0
+            dag = i // 96
+            kandidaten.append((i, dag, kan_laden_kwh, waarde_eur))
+
+    # Sorteer op hoogste marginale waarde (EUR per kWh)
+    kandidaten.sort(key=lambda x: -(x[3] / x[2] if x[2] > 0 else 0))
+
+    # Alloceer met dagbudget
+    budget_per_dag = {}
+    revenue_totaal = 0.0
+
+    for idx, dag, kwh_nodig, eur_winst in kandidaten:
+        budget_dag = budget_per_dag.get(dag, kwh_dispatch_per_dag * 0.3)  # max 30% budget voor curtail
+        if budget_dag >= kwh_nodig:
+            revenue_totaal += eur_winst
+            budget_per_dag[dag] = budget_dag - kwh_nodig
+        elif budget_dag > 0:
+            # Gedeeltelijke allocatie
+            fractie = budget_dag / kwh_nodig
+            revenue_totaal += eur_winst * fractie
+            budget_per_dag[dag] = 0.0
+
+    # Schaal naar jaar
+    n_dagen = N // 96
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Categorie 4: IMB-arbitrage --------------------------------------------
+
+def _categorie4_imb_arbitrage(
+    dam_eur_mwh: list,
+    imb_eur_mwh: list,
+    batt: dict,
+    cycli_per_jaar: int,
+    capture_rate: float = 0.018,
+) -> float:
+    """
+    BSP IMB-spread capture: capture_rate × |IMB-DAM| × flex_kWh.
+    Returns: revenue_eur_jaar
+    """
+    N = len(dam_eur_mwh)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    flex_kwh_per_kwartier = kw_batt * 0.25  # max flex per kwartier
+
+    # Alle kwartieren met spread > drempel
+    DREMPEL_EUR_MWH = 15.0
+    kandidaten = []
+    for i in range(N):
+        spread = abs(imb_eur_mwh[i] - dam_eur_mwh[i])
+        if spread > DREMPEL_EUR_MWH:
+            kwh = min(flex_kwh_per_kwartier, kwh_eff)
+            winst = capture_rate * spread * kwh / 1000.0
+            dag = i // 96
+            kandidaten.append((i, dag, kwh, winst))
+
+    # Sorteer op marginale waarde
+    kandidaten.sort(key=lambda x: -(x[3] / x[2] if x[2] > 0 else 0))
+
+    budget_per_dag = {}
+    revenue_totaal = 0.0
+
+    for idx, dag, kwh_nodig, eur_winst in kandidaten:
+        budget_dag = budget_per_dag.get(dag, kwh_dispatch_per_dag * 0.4)
+        if budget_dag >= kwh_nodig:
+            revenue_totaal += eur_winst
+            budget_per_dag[dag] = budget_dag - kwh_nodig
+        elif budget_dag > 0:
+            fractie = budget_dag / kwh_nodig
+            revenue_totaal += eur_winst * fractie
+            budget_per_dag[dag] = 0.0
+
+    # Schaal naar jaar
+    n_dagen = N // 96
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Gecombineerde allocatie met marginale waarde --------------------------
+
+def _alloceer_met_marginale_waarde(
+    consumption_kw: list,
+    pv_kw: list,
+    dam_eur_mwh: list,
+    imb_eur_mwh: list,
+    sim_timestamps: list,
+    batt: dict,
+    aansluiting: dict,
+    netbeheer: dict,
+    cycli_per_jaar: int,
+    capture_rate: float = 0.018,
+) -> dict:
+    """
+    Gecorrigeerde allocatie v1.5b:
+    - Cat2+Cat4 GECOMBINEERD per dag: gebruik min(DAM,IMB) voor laden,
+      max(DAM,IMB) voor ontladen. Dit repliceert de LP-dispatch die zowel
+      DAM-arbitrage als IMB-afrekening tegelijk maximaliseert.
+    - Cat1: maandpiek-shaving op apart budget (30% van dagtotaal).
+    - Cat3: PV-curtail-vermijding op eigen budget (negatieve DAM kwartieren).
+    - Cyclus-budget: Cat2+Cat4 deelt 70%, Cat1 krijgt 30%.
+    Returns: { piekshaving_eur, dam_arb_eur, pv_curtail_eur, imb_arb_eur, maandpieken_kw }
+    """
+    N = len(consumption_kw)
+    n_dagen = max(1, N // 96)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    rte = float(batt.get('rte_pct', 92)) / 100.0 if batt.get('rte_pct', 92) > 1.5 else float(batt.get('rte_pct', 0.92))
+    kwh_eff = kwh_batt * dod
+    kwh_per_qt = kw_batt * 0.25
+
+    kwh_budget_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    # Budget-splits: 90% voor arbitrage (Cat2+Cat4), 10% reserve voor piekshaving (Cat1)
+    # Gekalibreerd op referentie-simulator: 0.90 geeft ±1% afwijking bij BESS100/714c
+    budget_arb_per_dag = kwh_budget_per_dag * 0.90
+    budget_piek_per_dag = kwh_budget_per_dag * 0.10
+
+    tarieven = netbeheer.get('tarieven', {})
+    maandpiek_tarief_per_kw_jaar = float(tarieven.get('maandpiek_eur_kw_jaar', 59.76))
+    maandpiek_tarief_per_kw_maand = maandpiek_tarief_per_kw_jaar / 12.0
+
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+
+    # -----------------------------------------------------------------------
+    # Cat 2+4: gecombineerde DAM+IMB arbitrage per dag
+    # Laden op min(DAM, IMB), ontladen op max(DAM, IMB) — chronologie bewaard
+    # -----------------------------------------------------------------------
+    arb_winst = 0.0
+    arb_winst_dam = 0.0   # deel toewijsbaar aan DAM-arbitrage (laden/ontladen op DAM)
+    arb_winst_imb = 0.0   # deel toewijsbaar aan IMB-premium boven DAM
+
+    for d in range(n_dagen):
+        i0 = d * 96
+        i1 = min(i0 + 96, N)
+        dag_dam = dam_eur_mwh[i0:i1]
+        dag_imb = imb_eur_mwh[i0:i1]
+        n_qt = len(dag_dam)
+        if n_qt < 8:
+            continue
+
+        prijs_laden = [min(dag_dam[t], dag_imb[t]) for t in range(n_qt)]
+        prijs_ontlaad = [max(dag_dam[t], dag_imb[t]) for t in range(n_qt)]
+
+        # Budget: helft laden, helft ontladen
+        kwh_laden_dag = budget_arb_per_dag / 2.0
+        kwh_ontlaad_dag = budget_arb_per_dag / 2.0 * rte
+
+        # Sortering: laden op goedkoopste kwartieren, ontladen op duurste
+        laden_gs = sorted(range(n_qt), key=lambda t: prijs_laden[t])
+        ontlaad_gs = sorted(range(n_qt), key=lambda t: -prijs_ontlaad[t])
+
+        # Chronologie: ontlaad-kwartieren mogen niet tegelijk met laad-kwartieren zijn.
+        # Exclusie-filter (geen mediaan-split): geeft ±1% vs referentie (gekalibreerd).
+        n_laad_qt = max(1, int(kwh_laden_dag / kwh_per_qt) + 2)
+        laden_qt = laden_gs[:min(n_laad_qt, n_qt // 2)]
+        laden_set = set(laden_qt)
+        ontlaad_qt = [t for t in ontlaad_gs if t not in laden_set]
+
+        if not laden_qt or not ontlaad_qt:
+            continue
+
+        b_l, b_o = kwh_laden_dag, kwh_ontlaad_dag
+        kosten_laden = 0.0
+        kosten_laden_dam = 0.0
+        for t in laden_qt:
+            q = min(kwh_per_qt, b_l)
+            if q < 0.001:
+                break
+            kosten_laden += prijs_laden[t] * q / 1000.0
+            kosten_laden_dam += dag_dam[t] * q / 1000.0
+            b_l -= q
+
+        opbrengst_ontlaad = 0.0
+        opbrengst_ontlaad_dam = 0.0
+        for t in ontlaad_qt:
+            q = min(kwh_per_qt, b_o)
+            if q < 0.001:
+                break
+            opbrengst_ontlaad += prijs_ontlaad[t] * q / 1000.0
+            opbrengst_ontlaad_dam += dag_dam[t] * q / 1000.0
+            b_o -= q
+
+        dag_winst = opbrengst_ontlaad - kosten_laden
+        dag_winst_dam = opbrengst_ontlaad_dam - kosten_laden_dam
+        arb_winst += dag_winst
+        arb_winst_dam += dag_winst_dam
+        arb_winst_imb += dag_winst - dag_winst_dam
+
+    # -----------------------------------------------------------------------
+    # Cat 3: PV-curtail-vermijding (kwartieren met DAM<0 en PV-overschot)
+    # Eigen budget: 20% van dagtotaal
+    # -----------------------------------------------------------------------
+    budget_curtail_per_dag = kwh_budget_per_dag * 0.20
+    curtail_budget_resterend = [budget_curtail_per_dag] * n_dagen
+    curtail_winst = 0.0
+
+    kandidaten_curtail = []
+    for i in range(N):
+        if dam_eur_mwh[i] < 0 and pv_kw[i] > consumption_kw[i]:
+            overschot_kw = pv_kw[i] - consumption_kw[i]
+            kan_laden_kwh = min(overschot_kw, kw_batt) * 0.25
+            if kan_laden_kwh < 0.001:
+                continue
+            waarde = kan_laden_kwh * abs(dam_eur_mwh[i]) / 1000.0
+            dag = i // 96
+            kandidaten_curtail.append((dag, kan_laden_kwh, waarde))
+
+    kandidaten_curtail.sort(key=lambda x: -(x[2] / x[1] if x[1] > 0 else 0))
+    for dag, kwh_nodig, eur_winst in kandidaten_curtail:
+        if dag >= n_dagen:
+            continue
+        b = curtail_budget_resterend[dag]
+        if b >= kwh_nodig:
+            curtail_winst += eur_winst
+            curtail_budget_resterend[dag] -= kwh_nodig
+        elif b > 0.001:
+            curtail_winst += eur_winst * (b / kwh_nodig)
+            curtail_budget_resterend[dag] = 0.0
+
+    # -----------------------------------------------------------------------
+    # Cat 1: Maandpiek-shaving
+    # Budget: 30% van dag × 30 dagen per maand, alleen ontladen
+    # -----------------------------------------------------------------------
+    maanden_indices = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden_indices:
+            maanden_indices[m] = []
+        maanden_indices[m].append(i)
+
+    maandpieken_kw = {}
+    piekshaving_winst = 0.0
+
+    for m, indices in sorted(maanden_indices.items()):
+        if not indices:
+            continue
+        top10 = sorted(indices, key=lambda i: -netto_afname[i])[:10]
+        if not top10:
+            continue
+        max_piek = netto_afname[top10[0]]
+        maandpieken_kw[m] = max_piek
+        if max_piek < 1.0:
+            continue
+
+        kwh_budget_maand_piek = budget_piek_per_dag * (len(indices) / 96.0)
+        max_reductie = min(kw_batt, max_piek)
+        drempel_target = max_piek - max_reductie
+        kwh_nodig = sum(
+            min(max_reductie, max(0.0, netto_afname[idx] - drempel_target)) * 0.25
+            for idx in top10
+        )
+        if kwh_nodig < 0.001:
+            continue
+
+        fractie = min(1.0, kwh_budget_maand_piek / kwh_nodig)
+        piek_reductie_kw = max_reductie * fractie
+        piekshaving_winst += piek_reductie_kw * maandpiek_tarief_per_kw_maand
+
+    # -----------------------------------------------------------------------
+    # Schaal naar jaar als sim korter is
+    # -----------------------------------------------------------------------
+    scale = 365.0 / n_dagen if n_dagen < 365 else 1.0
+    arb_winst *= scale
+    arb_winst_dam *= scale
+    arb_winst_imb *= scale
+    curtail_winst *= scale
+    piekshaving_winst *= scale
+
+    return {
+        'piekshaving_eur': piekshaving_winst,
+        'dam_arb_eur': arb_winst_dam,
+        'pv_curtail_eur': curtail_winst,
+        'imb_arb_eur': arb_winst_imb,
+        'maandpieken_kw': maandpieken_kw,
+    }
+
+
+
+# ---- Hoofdfunctie: analyseer_pieken_en_arbitrage ---------------------------
+
+def analyseer_pieken_en_arbitrage(inp: dict) -> dict:
+    """
+    Batterij-arbitrage analyse als sales-tool.
+    
+    Verwacht: zelfde input als run_simulation + optioneel _analyse_config:
+      {
+        "cycli_per_jaar_default": 540,
+        "horizon_jaren": 15,
+        "vervanging_toggle": false,
+        "capture_rate": 0.018
       }
-    };
-    const req = https.request(url, options, (resp) => {
-      let data = '';
-      resp.on('data', chunk => data += chunk);
-      resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
+    
+    Returns: JSON conform design-doc batterij-analyse-design.md
+      {
+        "max_piek_huidig_kw": float,
+        "kandidaat_pieken_per_maand": [...],
+        "scenarios": [
+          { "cycli_per_jaar": 365|540|720|900,
+            "levensduur_jaren": float,
+            "kwh_dispatch_per_dag": float,
+            "per_jaar": [...],
+            "cumulatief_horizon_eur": float
+          }, ...
+        ]
+      }
+    """
+    log.info("=== Batterij-analyse start ===")
 
-function httpPostJson(url, headers, bodyObj) {
-  return new Promise((resolve, reject) => {
-    const body = JSON.stringify(bodyObj);
-    const finalHeaders = Object.assign({
-      'Content-Type': 'application/json',
-      'Content-Length': Buffer.byteLength(body),
-    }, headers || {});
-    const options = { method: 'POST', headers: finalHeaders };
-    const req = https.request(url, options, (resp) => {
-      let data = '';
-      resp.on('data', chunk => data += chunk);
-      resp.on('end', () => resolve({ status: resp.statusCode, body: data }));
-    });
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
+    # ---- Configuratie ----
+    analyse_conf = inp.get('_analyse_config') or {}
+    horizon_jaren = int(analyse_conf.get('horizon_jaren', 15))
+    vervanging_toggle = bool(analyse_conf.get('vervanging_toggle', False))
+    capture_rate = float(analyse_conf.get('capture_rate', 0.018))
 
-// ─── GitHub helpers voor kleine JSON-bestanden ─────────────────────────────
-// Lees een JSON-bestand uit de GitHub repo (via Contents API, niet de raw CDN,
-// dus altijd vers). Retourneert {json, sha} of null als het bestand niet bestaat.
-// Haal de rauwe inhoud op van een GitHub file. Werkt voor bestanden van alle
-// groottes (ook >1 MB) door de raw media type te gebruiken. Returns:
-// {raw, json, sha, parseError, exists}
-async function githubReadJson(token, owner, repo, path) {
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?t=${Date.now()}`;
+    batt = inp.get('batterij') or {}
+    aansluiting = inp.get('aansluiting') or {}
+    netbeheer = inp.get('netbeheer') or {}
 
-  // Eerste call: krijg de file content + metadata in raw formaat.
-  // application/vnd.github.raw+json werkt voor alle file-groottes.
-  const rawHeaders = {
-    'Authorization': 'token ' + token,
-    'User-Agent': 'Fluctus-Worker/4.0',
-    'Accept': 'application/vnd.github.raw+json',
-  };
-  const rawResp = await httpGet(apiUrl, rawHeaders);
-  if (rawResp.status === 404) return null;
-  if (rawResp.status !== 200) {
-    throw new Error(`GitHub read HTTP ${rawResp.status}: ${rawResp.body.slice(0, 200)}`);
-  }
+    kw_batt = float(batt.get('kw', 50))
+    kwh_batt = float(batt.get('kwh', 100))
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    max_cycli = float(batt.get('max_cycli', 8000))
+    capex_eur = float(batt.get('capex_eur', 40000))
+    kwh_eff = kwh_batt * dod
 
-  const rawContent = rawResp.body;
+    # ---- Sim-timestamps ----
+    van = parse_iso_date(inp['simulatieperiode']['van'])
+    tot = parse_iso_date(inp['simulatieperiode']['tot'])
+    sim_timestamps = []
+    cur = van
+    while cur < tot:
+        sim_timestamps.append(cur)
+        cur = cur + timedelta(minutes=15)
+    N = len(sim_timestamps)
+    log.info(f"Sim-periode: {van.date()} → {tot.date()}, {N} kwartieren")
 
-  // Tweede call: haal de SHA op via de standaard JSON media type.
-  // Voor kleine bestanden bevat deze ook de base64 content (redundant hier),
-  // voor grote bestanden alleen metadata. In beide gevallen: .sha is aanwezig.
-  const jsonHeaders = {
-    'Authorization': 'token ' + token,
-    'User-Agent': 'Fluctus-Worker/4.0',
-    'Accept': 'application/vnd.github+json',
-  };
-  const metaResp = await httpGet(apiUrl + '&_meta=1', jsonHeaders);
-  let sha = null;
-  if (metaResp.status === 200) {
-    try {
-      const metaData = JSON.parse(metaResp.body);
-      sha = metaData.sha || null;
-    } catch (_) { /* metadata parse fail is niet-kritiek; write zal sha later ophalen */ }
-  }
+    # ---- Profielen ----
+    consumption_kw, pv_kw = _build_full_profiles(inp, sim_timestamps)
 
-  let parsedJson = null;
-  let parseError = null;
-  try {
-    parsedJson = JSON.parse(rawContent);
-  } catch (e) {
-    parseError = e.message;
-  }
+    # ---- Marktdata ----
+    dam, imb = _get_markt_arrays(inp, N)
 
-  return { json: parsedJson, sha, raw: rawContent, parseError };
-}
+    # ---- Huidige max piek ----
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+    max_piek_kw = max(netto_afname) if netto_afname else 0.0
 
-// Schrijf een JSON-bestand naar de GitHub repo. Retourneert {ok, action}.
-async function githubWriteJson(token, owner, repo, path, payload, message) {
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
-  const contentBase64 = Buffer.from(JSON.stringify(payload)).toString('base64');
-  const baseBody = {
-    message: message || ('auto: ' + path + ' ' + new Date().toISOString().slice(0, 10)),
-    content: contentBase64,
-    committer: { name: 'Fluctus Bot', email: 'bot@fluctus.net' },
-  };
+    # ---- Kandidaat pieken per maand ----
+    maanden_data = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden_data:
+            maanden_data[m] = {'max_kw': 0.0, 'max_ts': ts}
+        if netto_afname[i] > maanden_data[m]['max_kw']:
+            maanden_data[m]['max_kw'] = netto_afname[i]
+            maanden_data[m]['max_ts'] = ts
 
-  // Probeer tot 3 keer: bij 409 SHA-mismatch haal verse SHA op en retry.
-  // Dit lost race-condities op tussen parallelle cache-update calls.
-  const MAX_ATTEMPTS = 3;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    // Haal huidige SHA op (null = bestand bestaat nog niet)
-    let sha = null;
-    const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
-    if (existing && existing.sha) sha = existing.sha;
-
-    const putBody = { ...baseBody };
-    if (sha) putBody.sha = sha;
-
-    const putResp = await httpPut(apiUrl, token, putBody);
-
-    if (putResp.status === 200 || putResp.status === 201) {
-      return { ok: true, action: sha ? 'updated' : 'created', attempts: attempt };
-    }
-
-    // 409 = SHA mismatch (iemand anders heeft ondertussen geschreven).
-    // 422 = content validation failed (kan ook over SHA gaan soms).
-    // Bij beide: korte pauze + retry met verse SHA.
-    if ((putResp.status === 409 || putResp.status === 422) && attempt < MAX_ATTEMPTS) {
-      console.log(`GitHub write conflict (attempt ${attempt}/${MAX_ATTEMPTS}) — retry met verse SHA`);
-      await new Promise(r => setTimeout(r, 200 + Math.random() * 300));
-      continue;
-    }
-
-    throw new Error(`GitHub write HTTP ${putResp.status} na ${attempt} poging(en): ${putResp.body.slice(0, 200)}`);
-  }
-
-  throw new Error(`GitHub write faalde na ${MAX_ATTEMPTS} pogingen (conflicts)`);
-}
-
-function fmtIso(d) {
-  return d.getUTCFullYear()
-    + '-' + String(d.getUTCMonth() + 1).padStart(2, '0')
-    + '-' + String(d.getUTCDate()).padStart(2, '0')
-    + 'T' + String(d.getUTCHours()).padStart(2, '0')
-    + ':' + String(d.getUTCMinutes()).padStart(2, '0')
-    + ':00';
-}
-
-// Splits tijdsperiode in maandelijkse segmenten (voor parallelle calls)
-function splitIntoMonths(start, end) {
-  const segments = [];
-  let cur = new Date(start);
-  while (cur < end) {
-    const segStart = new Date(cur);
-    const segEnd = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
-    segments.push({ s: segStart, e: segEnd > end ? end : segEnd });
-    cur = new Date(Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1));
-  }
-  return segments;
-}
-
-// ─── Elia Open Data — één pagina ophalen ──────────────────────────────────
-async function eliaPage(dataset, timefield, selectfields, startStr, endStr, offset, limit) {
-  const where = encodeURIComponent(`${timefield} >= "${startStr}" AND ${timefield} < "${endStr}"`);
-  const select = encodeURIComponent(selectfields);
-  const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dataset}/records`
-    + `?where=${where}`
-    + `&select=${select}`
-    + `&order_by=${encodeURIComponent(timefield + ' ASC')}`
-    + `&limit=${limit}`
-    + `&offset=${offset}`;
-  const r = await httpGet(url);
-  if (r.status !== 200) throw new Error(`Elia ${dataset} HTTP ${r.status}`);
-  return JSON.parse(r.body);
-}
-
-// ─── Elia Open Data — volledige maand ophalen (spot + imbalans tegelijk) ──
-async function eliaMonth(dataset, spotfield, imbfield, segStart, segEnd) {
-  const startStr = fmtIso(segStart);
-  const endStr = fmtIso(segEnd);
-  const selectfields = `datetime,${spotfield},${imbfield}`;
-  const results = { spot: [], imb: [] };
-  let offset = 0;
-  const limit = 100;
-
-  while (true) {
-    const json = await eliaPage(dataset, 'datetime', selectfields, startStr, endStr, offset, limit);
-    const records = json.results || [];
-
-    records.forEach(rec => {
-      const t = rec.datetime ? rec.datetime.substring(0, 19) + 'Z' : null;
-      if (!t) return;
-      const spotVal = parseFloat(rec[spotfield]);
-      const imbVal = parseFloat(rec[imbfield]);
-      if (!isNaN(spotVal)) results.spot.push({ t, v: Math.round(spotVal * 100) / 100 });
-      if (!isNaN(imbVal))  results.imb.push({ t, v: Math.round(imbVal * 100) / 100 });
-    });
-
-    if (records.length < limit) break;
-    offset += limit;
-    // Kleine pauze om Elia rate limit te respecteren
-    await new Promise(r => setTimeout(r, 100));
-  }
-
-  return results;
-}
-
-// ─── Elia Open Data — volledige periode ophalen (maanden parallel) ─────────
-async function eliaFetch(dataset, spotfield, imbfield, startDate, endDate) {
-  const segments = splitIntoMonths(startDate, endDate);
-  const allSpot = [], allImb = [];
-
-  // Max 4 maanden parallel (Elia rate limit)
-  for (let i = 0; i < segments.length; i += 4) {
-    const batch = segments.slice(i, i + 4);
-    const batchResults = await Promise.all(
-      batch.map(seg => eliaMonth(dataset, spotfield, imbfield, seg.s, seg.e))
-    );
-    batchResults.forEach(r => {
-      allSpot.push(...r.spot);
-      allImb.push(...r.imb);
-    });
-  }
-
-  return { spot: allSpot, imb: allImb };
-}
-
-// ─── Hulpfunctie: geaggregeerde data (wind/zon) — één maand ─────────────────
-async function eliaAggMonth(dataset, segStart, segEnd) {
-  const startStr = fmtIso(segStart);
-  const endStr   = fmtIso(segEnd);
-  const results  = [];
-  let offset = 0;
-  const limit = 100;
-
-  while (true) {
-    const whereClause = `datetime >= "${startStr}" AND datetime < "${endStr}"`;
-    const url = `${ELIA_BASE}/${dataset}/records`
-      + `?where=${encodeURIComponent(whereClause)}`
-      + `&select=${encodeURIComponent('datetime,sum(measured) as total_mw')}`
-      + `&group_by=${encodeURIComponent('datetime')}`
-      + `&order_by=${encodeURIComponent('datetime ASC')}`
-      + `&limit=${limit}`
-      + `&offset=${offset}`;
-
-    const r = await httpGet(url);
-    if (r.status !== 200) throw new Error(`${dataset} HTTP ${r.status}`);
-    const json = JSON.parse(r.body);
-    const records = (json.results || [])
-      .filter(rec => rec.datetime && rec.total_mw != null)
-      .map(rec => ({
-        t: rec.datetime.substring(0, 19) + 'Z',
-        v: Math.round((parseFloat(rec.total_mw) || 0) * 10) / 10
-      }));
-
-    results.push(...records);
-    if (records.length < limit) break;
-    offset += limit;
-    await new Promise(r => setTimeout(r, 80));
-  }
-  return results;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD
-//
-// Geeft ONBALANSPRIJS terug voor de gevraagde periode uit Elia's ods047/ods134.
-// Day-ahead spotprijs wordt via /entsoe-dayahead gehaald (ENTSO-E), NIET hier.
-// (Het veld 'marginalincrementalprice' in Elia's datasets is een imbalance-
-// component, geen spotprijs — vaak verward.)
-//
-// Response vorm blijft compatibel: { imb: [], spot: [], wind: [], solar: [] }
-// maar spot/wind/solar zijn altijd leeg (voor backward-compat met oude client).
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/elia-data', async (req, res) => {
-  const { from, to } = req.query;
-
-  if (!from || !to) {
-    return res.status(400).json({ error: 'from en to zijn verplicht (YYYY-MM-DD)' });
-  }
-
-  const fromDate = new Date(from + 'T00:00:00Z');
-  const toDate   = new Date(to   + 'T23:59:59Z');
-  const cutoff   = new Date('2024-05-22T00:00:00Z');
-
-  // Hergebruik eliaFetch: die haalt ook marginalincrementalprice op, maar die
-  // verdwijnt in resultaten negeren we. imbfield is wat we willen.
-  const HIST   = { id: 'ods047', spotfield: 'marginalincrementalprice', imbfield: 'positiveimbalanceprice' };
-  const RECENT = { id: 'ods134', spotfield: 'marginalincrementalprice', imbfield: 'imbalanceprice' };
-
-  try {
-    const allImb = [];
-    const warnings = [];
-
-    if (fromDate < cutoff) {
-      try {
-        const histEnd = toDate < cutoff ? toDate : cutoff;
-        const d = await eliaFetch(HIST.id, HIST.spotfield, HIST.imbfield, fromDate, histEnd);
-        allImb.push(...d.imb);
-      } catch (e) { warnings.push('ods047: ' + e.message); }
-    }
-    if (toDate >= cutoff) {
-      try {
-        const recentStart = fromDate >= cutoff ? fromDate : cutoff;
-        const d = await eliaFetch(RECENT.id, RECENT.spotfield, RECENT.imbfield, recentStart, toDate);
-        allImb.push(...d.imb);
-      } catch (e) { warnings.push('ods134: ' + e.message); }
-    }
-
-    allImb.sort((a, b) => a.t.localeCompare(b.t));
-
-    const out = {
-      spot:  [],   // Leeg — spot komt via /entsoe-dayahead
-      imb:   allImb,
-      wind:  [],
-      solar: [],
-      source: 'Elia Open Data (onbalans) — spot via ENTSO-E',
-    };
-    if (warnings.length) out.warnings = warnings;
-    res.json(out);
-
-  } catch (err) {
-    console.error('elia-data fout:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /elia-renewable?dataset=ods031&from=YYYY-MM-DD&to=YYYY-MM-DD
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/elia-renewable', async (req, res) => {
-  const { dataset, from, to } = req.query;
-
-  if (!dataset || !from || !to) {
-    return res.status(400).json({ error: 'dataset, from en to zijn verplicht' });
-  }
-  if (!['ods031', 'ods032'].includes(dataset)) {
-    return res.status(400).json({ error: 'dataset moet ods031 (wind) of ods032 (zon) zijn' });
-  }
-
-  const fromDate = new Date(from + 'T00:00:00Z');
-  const toDate   = new Date(to   + 'T23:59:59Z');
-
-  try {
-    const segments = splitIntoMonths(fromDate, toDate);
-    const all = [];
-
-    // Max 3 maanden parallel om timeout te vermijden
-    for (let i = 0; i < segments.length; i += 3) {
-      const batch = segments.slice(i, i + 3);
-      const batchResults = await Promise.all(
-        batch.map(seg => eliaAggMonth(dataset, seg.s, seg.e))
-      );
-      batchResults.forEach(r => all.push(...r));
-    }
-
-    all.sort((a, b) => a.t.localeCompare(b.t));
-    res.json({ data: all, count: all.length, dataset, source: 'Elia Open Data' });
-
-  } catch (err) {
-    console.error('elia-renewable fout:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD
-//
-// Haalt de échte day-ahead spotprijs (BELPEX/EPEX) op via de ENTSO-E
-// Transparency Platform API. Dit is de correcte prijs die Elindus en andere
-// platforms tonen — niet het 'marginalincrementalprice' veld uit Elia.
-//
-// DocumentType: A44 (Price Document)
-// BusinessType: A62 (workaround voor ENTSO-E REST API bug sinds jan 2026)
-// In/Out Domain: 10YBE----------2 (Belgische bidding zone)
-// ═══════════════════════════════════════════════════════════════════════════
-
-const ENTSOE_BASE = 'https://web-api.tp.entsoe.eu/api';
-const ENTSOE_DOMAIN_BE = '10YBE----------2';
-const ENTSOE_MAX_RANGE_DAYS = 365; // ENTSO-E max 1 jaar per call voor A44
-
-// Parse ENTSO-E XML response (Publication_MarketDocument) naar {t, v} array.
-// We gebruiken simpele regex — geen volledige XML parser nodig voor dit schema.
-function parseEntsoePriceXml(xml) {
-  const results = [];
-  // Elke TimeSeries bevat een Period met een start-tijdstip en Point-reeksen
-  // met position + price.amount. Resolution is PT60M (uurlijks) of PT15M.
-  const timeSeriesMatches = xml.match(/<TimeSeries>[\s\S]*?<\/TimeSeries>/g) || [];
-
-  timeSeriesMatches.forEach(ts => {
-    const periodMatch = ts.match(/<Period>([\s\S]*?)<\/Period>/);
-    if (!periodMatch) return;
-    const period = periodMatch[1];
-
-    const startMatch = period.match(/<start>([^<]+)<\/start>/);
-    const resMatch = period.match(/<resolution>([^<]+)<\/resolution>/);
-    if (!startMatch || !resMatch) return;
-
-    const start = new Date(startMatch[1]); // ISO UTC
-    const resolution = resMatch[1]; // bv "PT60M" of "PT15M"
-
-    // Resolution in minuten
-    let stepMin = 60;
-    const resMin = resolution.match(/PT(\d+)M/);
-    if (resMin) stepMin = parseInt(resMin[1], 10);
-
-    // Points
-    const pointRe = /<Point>\s*<position>(\d+)<\/position>\s*<price\.amount>([^<]+)<\/price\.amount>\s*<\/Point>/g;
-    let m;
-    let lastPos = 0;
-    let lastPrice = null;
-    const points = [];
-    while ((m = pointRe.exec(period)) !== null) {
-      points.push({ pos: parseInt(m[1], 10), price: parseFloat(m[2]) });
-    }
-    // ENTSO-E omits repeated values: als position 1 = 50, position 3 = 60,
-    // dan is position 2 ook 50 (gap = fill forward). Maar typisch zien we
-    // 24 opeenvolgende points voor uurlijkse data.
-    if (!points.length) return;
-
-    // Expand eventuele gaps
-    const expanded = [];
-    for (let i = 0; i < points.length; i++) {
-      expanded.push(points[i]);
-      if (i + 1 < points.length) {
-        const gap = points[i + 1].pos - points[i].pos - 1;
-        for (let g = 1; g <= gap; g++) {
-          expanded.push({ pos: points[i].pos + g, price: points[i].price });
+    kandidaat_pieken = [
+        {
+            'maand': m,
+            'max_piek_kw': round(data['max_kw'], 2),
+            'datum': data['max_ts'].isoformat(),
         }
-      }
+        for m, data in sorted(maanden_data.items())
+    ]
+
+    # ---- Scenarios: 365 / 540 / 720 / 900 cycli/jaar ----
+    scenario_cycli = [365, 540, 720, 900]
+    scenarios = []
+
+    for cycli_per_jaar in scenario_cycli:
+        levensduur_jaren = max_cycli / cycli_per_jaar
+        kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+
+        log.info(f"Scenario {cycli_per_jaar} cycli/jaar: levensduur {levensduur_jaren:.1f}j, dispatch {kwh_dispatch_per_dag:.1f} kWh/dag")
+
+        # Jaar-1 revenue via marginale-waarde allocatie
+        jaar1 = _alloceer_met_marginale_waarde(
+            consumption_kw, pv_kw, dam, imb,
+            sim_timestamps, batt, aansluiting, netbeheer,
+            cycli_per_jaar, capture_rate
+        )
+        piekshaving_j1 = jaar1['piekshaving_eur']
+        dam_arb_j1 = jaar1['dam_arb_eur']
+        pv_curtail_j1 = jaar1['pv_curtail_eur']
+        imb_arb_j1 = jaar1['imb_arb_eur']
+        totaal_j1 = piekshaving_j1 + dam_arb_j1 + pv_curtail_j1 + imb_arb_j1
+
+        # Per-jaar met lineaire degradatie (M2)
+        per_jaar = []
+        cumulatief = 0.0
+        vervanging_jaar = levensduur_jaren
+        vorige_vervanging = 0
+
+        for j in range(1, horizon_jaren + 1):
+            # Bepaal huidige batterij-leeftijd (na vervanging)
+            leeftijd = j - vorige_vervanging
+            huidige_levensduur = max_cycli / cycli_per_jaar
+
+            if leeftijd <= huidige_levensduur:
+                # Lineaire degradatie: 100% → 80% over volledige levensduur
+                cap_pct = 1.0 - (leeftijd / huidige_levensduur) * 0.20
+                cap_pct = max(0.80, min(1.0, cap_pct))
+                actief = True
+                vervanging_capex = 0.0
+            elif vervanging_toggle:
+                # Vervanging: nieuwe batterij
+                vorige_vervanging = j - 1
+                leeftijd = 1
+                cap_pct = 1.0 - (leeftijd / (max_cycli / cycli_per_jaar)) * 0.20
+                actief = True
+                vervanging_capex = -capex_eur  # negatief = uitgave
+            else:
+                cap_pct = 0.0
+                actief = False
+                vervanging_capex = 0.0
+
+            jaar_piekshaving = round(piekshaving_j1 * cap_pct, 2) if actief else 0.0
+            jaar_dam = round(dam_arb_j1 * cap_pct, 2) if actief else 0.0
+            jaar_pv_curtail = round(pv_curtail_j1 * cap_pct, 2) if actief else 0.0
+            jaar_imb = round(imb_arb_j1 * cap_pct, 2) if actief else 0.0
+            jaar_totaal = round(jaar_piekshaving + jaar_dam + jaar_pv_curtail + jaar_imb + vervanging_capex, 2)
+
+            cumulatief += jaar_totaal
+
+            per_jaar.append({
+                'jaar': j,
+                'piekshaving_eur': jaar_piekshaving,
+                'dam_arb_eur': jaar_dam,
+                'pv_curtail_eur': jaar_pv_curtail,
+                'imb_arb_eur': jaar_imb,
+                'totaal_eur': jaar_totaal,
+                'batterij_capaciteit_pct': round(cap_pct * 100, 1),
+                'actief': actief,
+                'vervanging_capex_eur': vervanging_capex,
+            })
+
+        scenarios.append({
+            'cycli_per_jaar': cycli_per_jaar,
+            'levensduur_jaren': round(levensduur_jaren, 1),
+            'kwh_dispatch_per_dag': round(kwh_dispatch_per_dag, 2),
+            'per_jaar': per_jaar,
+            'cumulatief_horizon_eur': round(cumulatief, 2),
+            '_jaar1_detail': {
+                'piekshaving_eur': round(piekshaving_j1, 2),
+                'dam_arb_eur': round(dam_arb_j1, 2),
+                'pv_curtail_eur': round(pv_curtail_j1, 2),
+                'imb_arb_eur': round(imb_arb_j1, 2),
+                'totaal_eur': round(totaal_j1, 2),
+            },
+        })
+
+    log.info(f"Analyse klaar: {len(scenarios)} scenarios")
+
+    return {
+        'max_piek_huidig_kw': round(max_piek_kw, 2),
+        'kandidaat_pieken_per_maand': kandidaat_pieken,
+        'scenarios': scenarios,
+        '_versie': 'v1.5-M1M2M3',
     }
 
-    expanded.forEach(p => {
-      const t = new Date(start.getTime() + (p.pos - 1) * stepMin * 60000);
-      const tStr = t.toISOString().substring(0, 19) + 'Z';
-      if (!isNaN(p.price)) {
-        results.push({ t: tStr, v: Math.round(p.price * 100) / 100 });
-      }
-    });
-  });
 
-  return results;
-}
-
-function fmtEntsoeDate(d) {
-  // Format: YYYYMMDDhhmm in UTC
-  return d.getUTCFullYear()
-    + String(d.getUTCMonth() + 1).padStart(2, '0')
-    + String(d.getUTCDate()).padStart(2, '0')
-    + String(d.getUTCHours()).padStart(2, '0')
-    + String(d.getUTCMinutes()).padStart(2, '0');
-}
-
-async function entsoeDayAhead(token, startDate, endDate) {
-  const url = ENTSOE_BASE
-    + '?securityToken=' + encodeURIComponent(token)
-    + '&documentType=A44'
-    + '&businessType=A62'  // workaround voor REST API bug sinds jan 2026
-    + '&in_Domain=' + ENTSOE_DOMAIN_BE
-    + '&out_Domain=' + ENTSOE_DOMAIN_BE
-    + '&periodStart=' + fmtEntsoeDate(startDate)
-    + '&periodEnd=' + fmtEntsoeDate(endDate);
-
-  const r = await httpGet(url, {
-    'Accept': 'application/xml',
-    'User-Agent': 'Fluctus-Dashboard/3.1',
-  });
-
-  if (r.status === 401) throw new Error('ENTSO-E 401: ongeldig securityToken');
-  if (r.status === 429) throw new Error('ENTSO-E 429: rate limit bereikt');
-  if (r.status !== 200) {
-    // ENTSO-E geeft soms 400 met een XML body die een Reason bevat
-    const reasonMatch = r.body.match(/<text>([^<]+)<\/text>/);
-    const detail = reasonMatch ? reasonMatch[1] : r.body.slice(0, 200);
-    throw new Error(`ENTSO-E HTTP ${r.status}: ${detail}`);
-  }
-
-  // Als er geen data is voor de periode: ENTSO-E geeft 200 met een Acknowledgement_MarketDocument
-  if (r.body.indexOf('Acknowledgement_MarketDocument') !== -1) {
-    return []; // Geen data, geen fout
-  }
-
-  return parseEntsoePriceXml(r.body);
-}
-
-// Splits een periode in segmenten van maximaal N dagen (voor ENTSO-E 1-jaar limiet)
-function splitIntoYears(start, end, maxDays) {
-  maxDays = maxDays || ENTSOE_MAX_RANGE_DAYS;
-  const segments = [];
-  let cur = new Date(start);
-  while (cur < end) {
-    const segEnd = new Date(Math.min(cur.getTime() + maxDays * 86400000, end.getTime()));
-    segments.push({ s: new Date(cur), e: segEnd });
-    cur = new Date(segEnd);
-  }
-  return segments;
-}
-
-app.get('/entsoe-dayahead', async (req, res) => {
-  const { from, to } = req.query;
-
-  if (!from || !to) {
-    return res.status(400).json({ error: 'from en to zijn verplicht (YYYY-MM-DD)' });
-  }
-
-  const token = process.env.ENTSOE_TOKEN;
-  if (!token) {
-    return res.status(500).json({ error: 'ENTSOE_TOKEN niet ingesteld op de server' });
-  }
-
-  const fromDate = new Date(from + 'T00:00:00Z');
-  const toDate   = new Date(to   + 'T23:59:59Z');
-
-  try {
-    // Split in 1-jaar segmenten, sequentieel opvragen (ENTSO-E rate limit is strict)
-    const segments = splitIntoYears(fromDate, toDate);
-    const all = [];
-    const warnings = [];
-
-    for (const seg of segments) {
-      try {
-        const data = await entsoeDayAhead(token, seg.s, seg.e);
-        all.push(...data);
-      } catch (e) {
-        warnings.push(`${seg.s.toISOString().slice(0,10)} → ${seg.e.toISOString().slice(0,10)}: ${e.message}`);
-      }
-      // Kleine pauze tussen segmenten — ENTSO-E rate limit respecteren
-      if (segments.length > 1) await new Promise(r => setTimeout(r, 300));
-    }
-
-    // Dedupe en sorteer (overlapping periodes kunnen dubbele punten geven)
-    const seen = {};
-    const deduped = [];
-    all.forEach(p => {
-      if (!seen[p.t]) {
-        seen[p.t] = true;
-        deduped.push(p);
-      }
-    });
-    deduped.sort((a, b) => a.t.localeCompare(b.t));
-
-    const out = {
-      data: deduped,
-      count: deduped.length,
-      source: 'ENTSO-E Transparency Platform (BELPEX day-ahead)',
-      domain: ENTSOE_DOMAIN_BE
-    };
-    if (warnings.length) out.warnings = warnings;
-    res.json(out);
-
-  } catch (err) {
-    console.error('entsoe-dayahead fout:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// CACHE ROUTES — multi-bestand architectuur
-//
-// De cache is opgesplitst in 5 GitHub-bestanden om onder de GitHub API
-// onbetrouwbaarheidsgrens (~10 MB) te blijven:
-//   data/fluctus-cache-meta.json    (meta: lastDate, cacheVersion, ...)
-//   data/fluctus-cache-spot.json    (ENTSO-E day-ahead, uurlijks)
-//   data/fluctus-cache-imb.json     (Elia onbalans, kwartierlijks)
-//   data/fluctus-cache-wind.json    (wind productie, kwartierlijks)
-//   data/fluctus-cache-solar.json   (zon productie, kwartierlijks)
-//
-// Elk bestand is een plain JSON array met {t,v} objecten. Meta is een object.
-// ═══════════════════════════════════════════════════════════════════════════
-
-const CACHE_DATASETS = ['meta', 'spot', 'imb', 'wind', 'solar'];
-const CACHE_BASE = 'data/fluctus-cache';
-
-function cachePathFor(dataset) {
-  if (!CACHE_DATASETS.includes(dataset)) return null;
-  return `${CACHE_BASE}-${dataset}.json`;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /cache-read?dataset=meta|spot|imb|wind|solar
-// Leest één cache-bestand via de GitHub API (no-CDN).
-// Als het bestand niet bestaat of corrupt is, retourneert het een lege default
-// i.p.v. een fout — zo blijft de snippet eenvoudig.
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/cache-read', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-
-  if (!token || !owner || !repo) {
-    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
-  }
-
-  const dataset = req.query.dataset || 'meta';
-  const path = cachePathFor(dataset);
-  if (!path) {
-    return res.status(400).json({ error: `Ongeldige dataset: ${dataset}. Geldig: ${CACHE_DATASETS.join(', ')}` });
-  }
-
-  res.set('Cache-Control', 'no-store, no-cache, must-revalidate');
-  res.set('Pragma', 'no-cache');
-
-  try {
-    const result = await githubReadJson(token, owner, repo, path);
-    if (!result) {
-      // Bestand bestaat niet — retourneer default lege structuur
-      return res.json(dataset === 'meta'
-        ? { cacheVersion: 'entsoe-v1', lastDate: null, lastUpdated: null, _missing: true }
-        : []);
-    }
-    if (!result.json) {
-      // Corrupt JSON — retourneer lege default en markeer als corrupt
-      console.error(`cache-read ${dataset}: corrupt JSON — ${result.parseError}`);
-      return res.json(dataset === 'meta'
-        ? { cacheVersion: 'entsoe-v1', lastDate: null, lastUpdated: null, _corrupted: true, _error: result.parseError }
-        : []);
-    }
-    res.json(result.json);
-  } catch (err) {
-    console.error(`cache-read ${dataset} fout:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: POST /cache-init
-// Initialiseert alle 5 cache-bestanden met lege structuur. Idempotent.
-// Gebruikt om corrupte cache te resetten.
-// ═══════════════════════════════════════════════════════════════════════════
-app.post('/cache-init', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-
-  if (!token || !owner || !repo) {
-    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
-  }
-
-  const results = {};
-  const now = new Date().toISOString();
-
-  try {
-    // Meta bestand
-    const metaPath = cachePathFor('meta');
-    const metaContent = {
-      cacheVersion: 'entsoe-v1',
-      lastDate: null,
-      lastUpdated: now,
-      _initializedAt: now
-    };
-    const metaRes = await githubWriteJson(token, owner, repo, metaPath, metaContent,
-      'init: reset ' + metaPath);
-    results.meta = metaRes;
-
-    // Data bestanden (allemaal lege arrays)
-    for (const ds of ['spot', 'imb', 'wind', 'solar']) {
-      const dsPath = cachePathFor(ds);
-      const dsRes = await githubWriteJson(token, owner, repo, dsPath, [],
-        'init: reset ' + dsPath);
-      results[ds] = dsRes;
-      // Kleine pauze om concurrent writes te vermijden
-      await new Promise(r => setTimeout(r, 150));
-    }
-
-    res.json({ ok: true, initialized: true, results });
-  } catch (err) {
-    console.error('cache-init fout:', err.message);
-    res.status(500).json({ error: err.message, partialResults: results });
-  }
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: POST /cache-update?dataset=meta|spot|imb|wind|solar
-// Schrijft één cache-bestand. Body = de volledige nieuwe inhoud (array voor
-// data-sets, object voor meta). Gebruikt 409-retry mechanisme van githubWriteJson.
-// ═══════════════════════════════════════════════════════════════════════════
-app.post('/cache-update', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-
-  if (!token || !owner || !repo) {
-    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
-  }
-
-  const dataset = req.query.dataset || 'meta';
-  const path = cachePathFor(dataset);
-  if (!path) {
-    return res.status(400).json({ error: `Ongeldige dataset: ${dataset}` });
-  }
-
-  try {
-    const payload = req.body;
-    // Validatie: arrays voor data-sets, object voor meta
-    if (dataset === 'meta') {
-      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-        return res.status(400).json({ error: 'meta body moet een object zijn' });
-      }
-    } else {
-      if (!Array.isArray(payload)) {
-        return res.status(400).json({ error: `${dataset} body moet een array zijn` });
-      }
-    }
-
-    const result = await githubWriteJson(token, owner, repo, path, payload,
-      `auto: ${dataset} ${new Date().toISOString().slice(0, 10)}`);
-
-    const sizeKb = Math.round(JSON.stringify(payload).length / 1024);
-    res.json({
-      ok: true,
-      dataset,
-      size_kb: sizeKb,
-      action: result.action,
-      attempts: result.attempts
-    });
-
-  } catch (err) {
-    console.error(`cache-update ${dataset} fout:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /   (status pagina)
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/', (req, res) => res.json({
-  status: 'ok',
-  versie: '15.5',
-  model: 'claude-opus-4-7',
-  tools: ['web_search_20250305'],
-  cache: 'multi-bestand (5 datasets) + gzip compressie',
-  routes: [
-    '/elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD   (onbalans uit Elia)',
-    '/elia-renewable?dataset=ods031|ods032&...  (wind/zon uit Elia)',
-    '/entsoe-dayahead?from=...&to=...           (BELPEX spot uit ENTSO-E)',
-    'GET  /cache-read?dataset=meta|spot|imb|wind|solar',
-    'POST /cache-update?dataset=...             (body = array, behalve meta=object)',
-    'POST /cache-init                           (reset alle 5 cache-bestanden)',
-    'GET  /explanation?chartId=c1',
-    'POST /claude-explain-refresh',
-    '── SIMULATOR (v15) ──',
-    'GET  /api/profielen-lijst                  (25 profielen + beschrijvingen)',
-    'GET  /api/profiel?naam=Slager              (35040-kwartier-array)',
-    'GET  /api/postcode-grd?postcode=8500       (GRD + gemeente lookup)',
-    'GET  /api/gemeenten-lijst                  (autocomplete: alle 1783 BE gemeenten)',
-    'GET  /api/regio-tarieven?grd=...&spanning=MS|LS',
-    'GET  /api/leveringscontract-staffel        (default markup/markdown per MWh)',
-    'GET  /api/batterijen                       (lijst beschikbare batterijen)',
-    'POST /api/batterij-toevoegen               (voeg batterij toe)',
-    'POST /api/nominatie-sim                    (run simulator.py met JSON-input)',
-    'GET  /api/projecten                        (lijst projecten in fluctus-scenarios)',
-    'GET  /api/scenarios?project=X              (lijst scenarios in project X)',
-    'GET  /api/scenario?project=X&scenario=Y    (lees scenario JSON)',
-    'POST /api/scenario-bewaren                 (body = {project, scenario, data})',
-  ]
-}));
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: GET /explanation?chartId=c1
-//
-// Leest de gecachede uitleg voor een chart uit de GitHub repo.
-// Retourneert {cached: true, date, text, citations} of {cached: false}
-// als er nog geen uitleg van vandaag bestaat.
-// ═══════════════════════════════════════════════════════════════════════════
-app.get('/explanation', async (req, res) => {
-  const chartId = req.query.chartId;
-  if (!chartId || !/^[a-zA-Z0-9_-]+$/.test(chartId)) {
-    return res.status(400).json({ error: 'chartId is verplicht (alleen a-z, 0-9, _, -)' });
-  }
-
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-  if (!token || !owner || !repo) {
-    return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld.' });
-  }
-
-  const path = `data/explanations/${chartId}.json`;
-
-  try {
-    const result = await githubReadJson(token, owner, repo, path);
-    if (!result) {
-      return res.json({ cached: false, reason: 'nog niet gegenereerd' });
-    }
-
-    const today = new Date().toISOString().slice(0, 10);
-    const cachedDate = (result.json && result.json.date) ? result.json.date : null;
-
-    if (cachedDate !== today) {
-      return res.json({
-        cached: false,
-        reason: 'cache van andere dag',
-        stale_date: cachedDate
-      });
-    }
-
-    return res.json({
-      cached: true,
-      date: cachedDate,
-      text: result.json.text || '',
-      citations: result.json.citations || [],
-      generated_at: result.json.generated_at || null,
-      model: result.json.model || null
-    });
-
-  } catch (err) {
-    console.error('GET /explanation fout:', err.message);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// Anthropic API helpers
-// ═══════════════════════════════════════════════════════════════════════════
-
-// Haal alle tekst + citaties uit de content blocks van een Claude response.
-// Strategie: alleen het LAATSTE substantiële tekstblok is het eigenlijke antwoord.
-// Eerdere tekstblokken zijn "ik ga zoeken..." redeneringen tussen tool-calls door.
-// Citaties verzamelen we uit ALLE text blocks (niet enkel het laatste) zodat
-// bronnen niet verloren gaan als Claude ze in een vroeg blok vermeldde.
-function extractTextAndCitations(content) {
-  const allTexts = [];
-  const citations = [];
-  const seenUrls = {};
-
-  (content || []).forEach(block => {
-    if (block.type === 'text' && typeof block.text === 'string' && block.text.trim().length > 0) {
-      allTexts.push(block.text);
-      (block.citations || []).forEach(c => {
-        const url = c.url;
-        const title = c.title || c.cited_text || url;
-        if (url && !seenUrls[url]) {
-          seenUrls[url] = true;
-          citations.push({ url, title });
-        }
-      });
-    }
-  });
-
-  // Filter: het finale antwoord kan uit meerdere text-blocks bestaan verdeeld
-  // rond tool_use calls. We nemen ALLE substantiële blocks (>50 chars) in
-  // volgorde en voegen ze slim samen.
-  //
-  // Slim samenvoegen: als een block eindigt midden in een zin (geen . ! ? ) en
-  // het volgende block begint met een kleine letter, dan voegen we samen met
-  // één spatie. Anders met een dubbele newline (paragraaf-break).
-  //
-  // Let op: vroeger namen we alleen een achterwaartse reeks. Dat was fout
-  // want een kort block tussen twee lange blocks zorgde voor het weglaten
-  // van het eerste lange block (zoals de header "**1) Algemeen beeld**").
-  let finalText = '';
-  if (allTexts.length === 0) {
-    finalText = '';
-  } else if (allTexts.length === 1) {
-    finalText = allTexts[0];
-  } else {
-    const substantialBlocks = allTexts
-      .map(t => t.trim())
-      .filter(t => t.length > 50);
-    if (substantialBlocks.length > 0) {
-      finalText = substantialBlocks[0];
-      for (let i = 1; i < substantialBlocks.length; i++) {
-        const prev = finalText;
-        const next = substantialBlocks[i];
-        // Eindigt vorig block in midden van zin? (geen punt/vraag/uitroep aan einde
-        // en geen dubbele newline)
-        const endsMidSentence = !/[.!?:]["')]*\s*$/.test(prev) && !prev.endsWith('\n\n');
-        // Begint volgende block met kleine letter of leesteken? (vervolg van zin)
-        const startsMidSentence = /^[a-z,;)\-–—]/.test(next);
-        if (endsMidSentence && startsMidSentence) {
-          finalText = prev + ' ' + next;
-        } else if (endsMidSentence) {
-          // Midden in zin maar volgende start nieuwe zin/kop → spatie
-          finalText = prev + ' ' + next;
-        } else {
-          // Complete zin → paragraaf-break
-          finalText = prev + '\n\n' + next;
-        }
-      }
-    } else {
-      // Fallback: geen enkel block >50 chars — neem gewoon alles samen
-      finalText = allTexts.map(t => t.trim()).filter(Boolean).join(' ');
-    }
-  }
-
-  // Strip Engelse meta-prefixes die Claude soms uitspreekt vóór het echte antwoord.
-  // Deze patronen zijn overleg-tekst die onbedoeld in het antwoord belandt.
-  // We strippen regel-voor-regel tot we een regel vinden die geen meta is.
-  const metaPrefixes = [
-    /^i have (enough |now |)\s*(gathered |collected |gotten |)\s*(enough |sufficient |)?\s*(information|data|context).*$/i,
-    /^i (now |)\s*have (what i need|sufficient|enough).*$/i,
-    /^i'?ll now (compose|write|put together|structure|draft|provide).*$/i,
-    /^let me (now |)\s*(compose|write|put together|structure|draft|provide|analyze).*$/i,
-    /^based on (the |my |)(research|search|data|analysis), (i|let me).*$/i,
-    /^(now |)\s*i can (compose|write|provide|give|analyze).*$/i,
-    /^(now |)\s*let'?s (compose|analyze|look).*$/i,
-    /^here'?s (the|my|a) (analysis|breakdown|summary|overview).*$/i,
-    /^i'?ll (structure|format|organize).*$/i,
-  ];
-  const lines = finalText.split('\n');
-  let skipUntil = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (!line) { skipUntil = i + 1; continue; } // lege regels meenemen in skip
-    const isMeta = metaPrefixes.some(re => re.test(line));
-    if (isMeta) {
-      skipUntil = i + 1;
-    } else {
-      break; // eerste niet-meta regel → stop
-    }
-  }
-  if (skipUntil > 0) {
-    finalText = lines.slice(skipUntil).join('\n').trimStart();
-  }
-
-  return { text: finalText.trim(), citations };
-}
-
-async function callClaudeMessages(apiKey, requestBody) {
-  const headers = {
-    'x-api-key': apiKey,
-    'anthropic-version': '2023-06-01',
-    'User-Agent': 'Fluctus-Dashboard/3.0',
-  };
-  const r = await httpPostJson('https://api.anthropic.com/v1/messages', headers, requestBody);
-  if (r.status !== 200) {
-    throw new Error(`Anthropic HTTP ${r.status}: ${r.body.slice(0, 300)}`);
-  }
-  return JSON.parse(r.body);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ROUTE: POST /claude-explain-refresh
-// Body: { chartId: 'c1', prompt: '...' }
-//
-// Genereert een nieuwe uitleg via Claude + web search, schrijft ze naar
-// GitHub cache, en retourneert het resultaat. Beschermt tegen race-condities:
-// als er tussen read en generatie al een cache van vandaag bestaat wordt die
-// teruggegeven zonder tweede API call.
-// ═══════════════════════════════════════════════════════════════════════════
-app.post('/claude-explain-refresh', async (req, res) => {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-
-  if (!apiKey) return res.status(500).json({ error: 'ANTHROPIC_API_KEY niet ingesteld' });
-  if (!token || !owner || !repo) return res.status(500).json({ error: 'GitHub omgevingsvariabelen niet ingesteld' });
-
-  const { chartId, prompt } = req.body || {};
-  if (!chartId || !/^[a-zA-Z0-9_-]+$/.test(chartId)) {
-    return res.status(400).json({ error: 'chartId is verplicht (alleen a-z, 0-9, _, -)' });
-  }
-  if (!prompt) return res.status(400).json({ error: 'prompt is verplicht' });
-
-  const path = `data/explanations/${chartId}.json`;
-  const today = new Date().toISOString().slice(0, 10);
-
-  try {
-    // Race-condition check: misschien heeft een andere klik net gegenereerd
-    const existing = await githubReadJson(token, owner, repo, path).catch(() => null);
-    if (existing && existing.json && existing.json.date === today) {
-      return res.json({
-        text: existing.json.text || '',
-        citations: existing.json.citations || [],
-        stop_reason: 'from_cache',
-        model: existing.json.model || null,
-        from_cache: true,
-        generated_at: existing.json.generated_at || null
-      });
-    }
-
-    // Genereer nieuwe uitleg
-    const MODEL = 'claude-opus-4-7';
-    const MAX_CONTINUATIONS = 3;
-
-    const baseRequest = {
-      model: MODEL,
-      max_tokens: 1500,
-      tools: [{
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 4,
-        user_location: { type: 'approximate', country: 'BE', timezone: 'Europe/Brussels' }
-      }],
-      messages: [{ role: 'user', content: prompt }]
-    };
-
-    let response = await callClaudeMessages(apiKey, baseRequest);
-    let conversation = [
-      { role: 'user', content: prompt },
-      { role: 'assistant', content: response.content }
-    ];
-
-    let continuations = 0;
-    while (response.stop_reason === 'pause_turn' && continuations < MAX_CONTINUATIONS) {
-      continuations++;
-      const continueReq = Object.assign({}, baseRequest, { messages: conversation });
-      response = await callClaudeMessages(apiKey, continueReq);
-      conversation.push({ role: 'assistant', content: response.content });
-    }
-
-    const { text, citations } = extractTextAndCitations(response.content);
-
-    // Schrijf naar GitHub cache
-    const payload = {
-      chartId,
-      date: today,
-      generated_at: new Date().toISOString(),
-      model: response.model || MODEL,
-      text: text || '',
-      citations,
-      stop_reason: response.stop_reason
-    };
-
-    try {
-      await githubWriteJson(
-        token, owner, repo, path, payload,
-        `auto: uitleg ${chartId} ${today}`
-      );
-    } catch (writeErr) {
-      // Cache-schrijven mislukt, maar we hebben wel tekst — log en stuur terug
-      console.error('Cache write fout (niet-fataal):', writeErr.message);
-    }
-
-    res.json({
-      text: payload.text || 'Geen antwoord.',
-      citations: payload.citations,
-      stop_reason: payload.stop_reason,
-      model: payload.model,
-      from_cache: false,
-      generated_at: payload.generated_at
-    });
-
-  } catch (err) {
-    console.error('claude-explain-refresh fout:', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.options('/explanation', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.sendStatus(200);
-});
-app.options('/claude-explain-refresh', (req, res) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  res.sendStatus(200);
-});
-
-
-
-
-
-// ═══════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════
-//                         SIMULATOR ENDPOINTS (v15)
-// ═══════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
-// Cache voor data-bestanden (geladen bij eerste call)
-const dataCache = {};
-
-function loadDataFile(filename) {
-  if (dataCache[filename]) return dataCache[filename];
-  const fullPath = path.join(DATA_DIR, filename);
-  if (!fs.existsSync(fullPath)) {
-    throw new Error(`Data bestand niet gevonden: ${filename}`);
-  }
-  const content = fs.readFileSync(fullPath, 'utf8');
-  const parsed = JSON.parse(content);
-  dataCache[filename] = parsed;
-  return parsed;
-}
-
-function safeFilename(naam) {
-  return String(naam).toLowerCase().replace(/\//g, '_').replace(/\s+/g, '_').replace(/[^a-z0-9_-]/g, '');
-}
-
-// ─── ROUTE: GET /api/profielen-lijst ──────────────────────────────────────
-// Retourneert: [{naam, beschrijving}, ...] (25 profielen)
-app.get('/api/profielen-lijst', (req, res) => {
-  try {
-    const lijst = loadDataFile('profielen-lijst.json');
-    res.json(lijst);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/profiel?naam=Slager ──────────────────────────────────
-// Retourneert: {naam, beschrijving, kwartier: [35040 floats genormaliseerd]}
-app.get('/api/profiel', (req, res) => {
-  const naam = req.query.naam;
-  if (!naam) return res.status(400).json({ error: 'naam is verplicht' });
-
-  try {
-    const lijst = loadDataFile('profielen-lijst.json');
-    const meta = lijst.find(p => p.naam === naam);
-    if (!meta) return res.status(404).json({ error: `Profiel '${naam}' niet gevonden` });
-
-    const safe = safeFilename(naam);
-    const fullPath = path.join(DATA_DIR, 'profielen', `${safe}.json`);
-    if (!fs.existsSync(fullPath)) {
-      return res.status(404).json({ error: `Profiel-bestand niet gevonden: ${safe}.json` });
-    }
-    const kwartier = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
-    res.json({
-      naam: meta.naam,
-      beschrijving: meta.beschrijving,
-      kwartier: kwartier,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// GRD-normalisatie: postcode-tabel naam → tarieven-tabel naam
-const GRD_NORMALISATIE = {
-  'Fluvius Antwerpen': 'Antwerpen',
-  'Fluvius Halle-Vilvoorde': 'Halle-Vilv.',
-  'Fluvius Imewo': 'Imewo',
-  'Fluvius Kempen': 'Kempen',
-  'Fluvius Limburg': 'Limburg',
-  'Fluvius Midden-Vlaanderen': 'Midden-Vl.',
-  'Fluvius West': 'West',
-  'Fluvius Zenne-Dijle': 'Zenne-Dijle',
-  'ORES': 'ORES',
-  'RESA': 'RESA',
-  'AIEG': 'AIEG',
-  'AIESH': 'ORES',  // fallback: AIESH gebruikt ORES-tarieven
-  'REW': 'ORES',    // fallback: REW gebruikt ORES-tarieven (proxy)
-  'Sibelga': 'Sibelga',
-};
-
-// ─── ROUTE: GET /api/postcode-grd?postcode=8500 ──────────────────────────
-// Retourneert: {postcode, gemeenten, gemeente_label, grd_origineel, grd, dnb_volledig, fallback_naar?}
-// v15.4: Leest uit postcodes.json met rijke shape: { "8500": {gemeenten: [...], dnb: "Fluvius West"}, ... }
-app.get('/api/postcode-grd', (req, res) => {
-  const pc = String(req.query.postcode || '').trim();
-  if (!/^\d{4}$/.test(pc)) {
-    return res.status(400).json({ error: 'postcode moet 4 cijfers zijn' });
-  }
-  try {
-    let postcodeRecord = null;
-    try {
-      const map = loadDataFile('postcodes.json');
-      if (map && map[pc]) postcodeRecord = map[pc];
-    } catch (e) { /* leeg */ }
-
-    let grdOrigineel = null;
-    let gemeenten = [];
-    let dnb_volledig = null;
-    let grd, fallback = null;
-
-    if (postcodeRecord && typeof postcodeRecord === 'object') {
-      // Rijke shape: { gemeenten: [...], dnb: "Fluvius West" }
-      gemeenten = postcodeRecord.gemeenten || [];
-      dnb_volledig = postcodeRecord.dnb || null;
-      grdOrigineel = dnb_volledig;
-      grd = GRD_NORMALISATIE[dnb_volledig] || dnb_volledig;
-      if (grd !== dnb_volledig && (dnb_volledig === 'AIESH' || dnb_volledig === 'REW')) {
-        fallback = `${dnb_volledig} gebruikt ORES-tarieven als proxy`;
-      }
-    } else if (typeof postcodeRecord === 'string') {
-      // Backwards-compat met oude platte shape: { "8500": "Fluvius West", ... }
-      grdOrigineel = postcodeRecord;
-      grd = GRD_NORMALISATIE[grdOrigineel] || grdOrigineel;
-      if (grd !== grdOrigineel && (grdOrigineel === 'AIESH' || grdOrigineel === 'REW')) {
-        fallback = `${grdOrigineel} gebruikt ORES-tarieven als proxy`;
-      }
-    } else {
-      // Onbekende postcode: gewest-fallback op basis van eerste cijfer
-      const eerste = pc[0];
-      if (eerste === '1' && pc[1] === '0' && parseInt(pc) >= 1000 && parseInt(pc) <= 1299) {
-        grd = 'Sibelga';
-        fallback = `Postcode ${pc} niet exact bekend, fallback naar Sibelga (Brussel)`;
-      } else if (['1', '2', '3', '8', '9'].includes(eerste)) {
-        grd = 'West';
-        fallback = `Postcode ${pc} niet exact bekend, fallback naar Fluvius West (Vlaanderen)`;
-      } else {
-        grd = 'ORES';
-        fallback = `Postcode ${pc} niet exact bekend, fallback naar ORES (Wallonië)`;
-      }
-    }
-
-    const gemeente_label = gemeenten.length > 0 ? gemeenten.join(' / ') : null;
-
-    res.json({
-      postcode: pc,
-      gemeenten,
-      gemeente_label,
-      grd_origineel: grdOrigineel,
-      grd,
-      dnb_volledig,
-      fallback_naar: fallback,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/gemeenten-lijst ───────────────────────────────────────
-// Retourneert flat array van {postcode, gemeente, dnb} voor autocomplete-UI.
-// Bron: data/gemeenten.json (1783 entries).
-app.get('/api/gemeenten-lijst', (req, res) => {
-  try {
-    const lijst = loadDataFile('gemeenten.json');
-    if (!Array.isArray(lijst)) {
-      return res.status(500).json({ error: 'gemeenten.json heeft onverwachte vorm' });
-    }
-    // Cache-Control: deze data verandert nooit binnen een sessie → 1u client cache
-    res.set('Cache-Control', 'public, max-age=3600');
-    res.json({ aantal: lijst.length, gemeenten: lijst });
-  } catch (err) {
-    res.status(500).json({ error: 'gemeenten.json niet leesbaar: ' + err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/regio-tarieven?grd=West&spanning=MS ─────────────────
-// Retourneert: alle tarief-velden voor die GRD/spanning combinatie
-app.get('/api/regio-tarieven', (req, res) => {
-  const grd = req.query.grd;
-  const spanning = (req.query.spanning || 'MS').toUpperCase();
-  if (!grd) return res.status(400).json({ error: 'grd is verplicht' });
-  if (!['MS', 'LS'].includes(spanning)) {
-    return res.status(400).json({ error: 'spanning moet MS of LS zijn' });
-  }
-  try {
-    const tarieven = loadDataFile('tarieven.json');
-    const key = `${grd}|${spanning}`;
-    const tar = tarieven[key];
-    if (!tar) {
-      return res.status(404).json({
-        error: `Geen tarieven voor ${key}. Beschikbaar: ${Object.keys(tarieven).join(', ')}`
-      });
-    }
-
-    // Construeer accijns-staffel in juiste formaat voor simulator
-    const accijnzen_staffel = [
-      [3, tar.accijns_schijf1_3mwh || 14.21],
-      [20, tar.accijns_schijf2_20mwh || 14.21],
-      [50, tar.accijns_schijf3_50mwh || 12.09],
-      [1000, tar.accijns_schijf4_1000mwh || 11.39],
-      [9999999, tar.accijns_schijf5_inf || 10.00],
-    ];
-
-    res.json({
-      grd: grd,
-      spanning: spanning,
-      tarieven: tar,
-      accijnzen_staffel: accijnzen_staffel,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/leveringscontract-staffel ────────────────────────────
-app.get('/api/leveringscontract-staffel', (req, res) => {
-  try {
-    const lc = loadDataFile('leveringscontract.json');
-    res.json(lc);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/batterijen ───────────────────────────────────────────
-app.get('/api/batterijen', (req, res) => {
-  try {
-    const list = loadDataFile('batterijen.json');
-    res.json(list);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: POST /api/batterij-toevoegen ──────────────────────────────────
-// Body: {Battery, "Vermogen omvormer kW", "Capaciteit kWh", ...}
-// Append in batterijen.json (lokaal cache + GitHub commit)
-app.post('/api/batterij-toevoegen', async (req, res) => {
-  const nieuwe = req.body;
-  if (!nieuwe || !nieuwe.Battery) {
-    return res.status(400).json({ error: 'body moet Battery-veld bevatten' });
-  }
-  try {
-    const list = loadDataFile('batterijen.json');
-    list.push(nieuwe);
-    // Schrijf lokaal (overleeft niet container restart, maar voor sessie OK)
-    fs.writeFileSync(path.join(DATA_DIR, 'batterijen.json'), JSON.stringify(list, null, 2));
-    dataCache['batterijen.json'] = list;
-
-    // Commit naar GitHub indien mogelijk (best effort)
-    const token = process.env.GITHUB_TOKEN;
-    const owner = process.env.GITHUB_OWNER;
-    const proxyRepo = process.env.GITHUB_PROXY_REPO || 'fluctus-proxy';
-    if (token && owner) {
-      try {
-        await githubWriteJson(token, owner, proxyRepo, 'data/batterijen.json', list,
-          `add: batterij ${nieuwe.Battery}`);
-      } catch (e) {
-        console.warn('GitHub commit batterij gefaald:', e.message);
-      }
-    }
-    res.json({ ok: true, totaal: list.length });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: POST /api/nominatie-sim ──────────────────────────────────────
-// SMART ENDPOINT v15.1
-// Body kan één van twee shapes hebben:
-//   1. UI-payload (high-level): { profielNaam, jaarverbruik_mwh, postcode, grd,
-//        spanning, pv_kwp, batterijId, contract: { staffel, modus, ... },
-//        aansluiting_kva, simulatieperiode: { van, tot } }
-//   2. Volledige sim-input (low-level): wordt direct doorgepiped naar simulator.py
-//
-// We detecteren shape via aanwezigheid van 'profiel_kwartier' (low-level) of
-// 'profielNaam' (high-level). High-level → buildSimulatorInput() draait alle
-// data-loads en mappings, dan spawn.
-
-// Helper: bouw de complete simulator-input vanaf high-level UI keys
-async function buildSimulatorInput(uiInput) {
-  const errors = [];
-  const out = {};
-
-  // --- 1. Profiel ---
-  if (!uiInput.profielNaam) errors.push('profielNaam ontbreekt');
-  let profielKwartier = null;
-  if (uiInput.profielNaam) {
-    const safe = safeFilename(uiInput.profielNaam);
-    const profPath = path.join(DATA_DIR, 'profielen', `${safe}.json`);
-    if (!fs.existsSync(profPath)) {
-      errors.push(`Profiel '${uiInput.profielNaam}' niet gevonden (bestand ${safe}.json)`);
-    } else {
-      profielKwartier = JSON.parse(fs.readFileSync(profPath, 'utf8'));
-      if (!Array.isArray(profielKwartier) || profielKwartier.length !== 35040) {
-        errors.push(`Profiel ${uiInput.profielNaam} heeft ${profielKwartier?.length || 0} elementen, verwacht 35040`);
-      }
-    }
-  }
-  out.profiel_kwartier = profielKwartier || [];
-  out.aanvullingen = { laadinfra: null, elektrificatie: null };
-  out.jaarverbruik_mwh = parseFloat(uiInput.jaarverbruik_mwh) || 0;
-  if (out.jaarverbruik_mwh <= 0) errors.push('jaarverbruik_mwh moet > 0');
-
-  // --- 2. PV ---
-  const pv_kwp = parseFloat(uiInput.pv_kwp) || 0;
-  // Generieke Belgische PV-vorm (35040 floats, som=1) — sinusoidale dagcurve × seizoensmodulatie
-  // Lazy-laad of genereer een keer en cache
-  if (!dataCache._pvShape) {
-    dataCache._pvShape = generateBelgianPvShape();
-  }
-  out.pv = {
-    kwp: pv_kwp,
-    specifiek_rendement_kwh_per_kwp: 950,
-    vorm_kwartier: dataCache._pvShape,
-    capex_eur: 0
-  };
-
-  // v15.5: PV-curtailment block (negatieve-prijs vermijding)
-  // Default: niet actief (= v1.2 gedrag = nominatie volgt productie)
-  if (uiInput.pv_curtailment) {
-    out.pv_curtailment = {
-      actief: !!uiInput.pv_curtailment.actief,
-      trigger_eur_mwh: parseFloat(uiInput.pv_curtailment.trigger_eur_mwh) || 0,
-      strategie: uiInput.pv_curtailment.strategie || 'cap_op_verbruik'
-    };
-  } else {
-    out.pv_curtailment = { actief: false };
-  }
-
-  // v15.6: BSP-modus block (Niveau 3b — perfect IMB-foresight)
-  // Default: niet actief (= v1.3 gedrag = standaard PV-passthrough)
-  // forecast_modus: conservatief / realistic / optimistisch (× 0.67/1.0/1.5)
-  if (uiInput.bsp) {
-    out.bsp = {
-      actief: !!uiInput.bsp.actief,
-      forecast_modus: uiInput.bsp.forecast_modus || 'realistic',
-      pv_curtailment_allowed: uiInput.bsp.pv_curtailment_allowed !== false  // default true
-    };
-    // Custom capture rate override (advanced, slider in UI)
-    if (uiInput.bsp.paper_capture_rate !== undefined) {
-      out.bsp.paper_capture_rate = parseFloat(uiInput.bsp.paper_capture_rate);
-    }
-  } else {
-    out.bsp = { actief: false };
-  }
-
-  // --- 3. Batterij ---
-  if (uiInput.batterijId) {
-    const batterijen = loadDataFile('batterijen.json');
-    const list = batterijen.batterijen || batterijen;
-    const b = list.find(x => (x.id || x.naam) === uiInput.batterijId);
-    if (!b) {
-      errors.push(`Batterij '${uiInput.batterijId}' niet gevonden`);
-    } else {
-      out.batterij = {
-        kw: parseFloat(b.kw) || 0,
-        kwh: parseFloat(b.kwh) || 0,
-        dod_pct: parseFloat(b.dod_pct || b.dod) || 0.95,
-        rte_pct: parseFloat(b.eta || b.rte_pct) || 0.92,
-        capex_eur: parseFloat(b.capex || b.capex_eur) || 0,
-        max_cycli: parseFloat(b.max_cycli) || 5000
-      };
-    }
-  } else {
-    // geen batterij — kw=0, kwh=0
-    out.batterij = { kw: 0, kwh: 0, dod_pct: 0.95, rte_pct: 0.92, capex_eur: 0, max_cycli: 5000 };
-  }
-
-  // --- 4. Aansluiting ---
-  const kva = parseFloat(uiInput.aansluiting_kva) || 50;
-  const cosphi = 0.95;  // typisch
-  const max_kw = kva * cosphi;
-  out.aansluiting = {
-    max_afname_kw_zacht: max_kw,
-    max_afname_kw_hard: max_kw * 1.5,
-    max_injectie_kw_zacht: max_kw,
-    max_injectie_kw_hard: max_kw * 1.5,
-    tarief_overschrijding_afname_eur_per_kw_jaar: 50,
-    tarief_overschrijding_injectie_eur_per_kw_jaar: 30
-  };
-
-  // --- 5. Contract (passthrough vanuit UI met fallback defaults) ---
-  out.contract = uiInput.contract || {};
-  // Zorg dat staffel een lijst is
-  if (!Array.isArray(out.contract.staffel)) {
-    try {
-      const lc = loadDataFile('leveringscontract.json');
-      out.contract.staffel = lc.schijven || lc.staffel || [];
-      if (typeof out.contract.vergroening_eur_per_mwh !== 'number') {
-        out.contract.vergroening_eur_per_mwh = lc.vergroening_eur_per_mwh || 2.5;
-      }
-      if (typeof out.contract.vaste_kost_eur_maand !== 'number') {
-        out.contract.vaste_kost_eur_maand = lc.vast_eur_per_maand || 10;
-      }
-      if (!out.contract.leverancier) out.contract.leverancier = lc.leverancier || 'Enwyse';
-    } catch (e) {
-      errors.push('leveringscontract.json niet leesbaar: ' + e.message);
-    }
-  }
-  if (!out.contract.modus) out.contract.modus = 'passthrough';
-  if (typeof out.contract.injectie_toegelaten !== 'boolean') out.contract.injectie_toegelaten = true;
-  // backwards-compat keys voor simulator
-  out.contract.gsc_eur_mwh = out.contract.gsc_eur_mwh || 0;
-  out.contract.wkk_eur_mwh = out.contract.wkk_eur_mwh || 0;
-
-  // --- 6. Netbeheer (tarieven) ---
-  const grd = uiInput.grd || 'West';
-  const spanning = uiInput.spanning || 'MS';
-  let tariefset = null;
-  try {
-    const tarieven = loadDataFile('tarieven.json');
-    // tarieven.json shape: flat { "West|MS": {...}, "West|LS": {...}, ... }
-    // (NIET nested { "West": { "MS": {...}, ... } })
-    const key = `${grd}|${spanning}`;
-    if (tarieven[key]) {
-      tariefset = tarieven[key];
-    } else {
-      // Fallback op eerste beschikbare GRD voor deze spanning
-      const matchingKeys = Object.keys(tarieven).filter(k => k.endsWith('|' + spanning));
-      if (matchingKeys.length > 0) {
-        const fallbackKey = matchingKeys[0];
-        tariefset = tarieven[fallbackKey];
-        errors.push(`WAARSCHUWING: GRD '${grd}' niet gevonden voor ${spanning}, fallback op '${fallbackKey}'`);
-      }
-    }
-  } catch (e) {
-    errors.push('tarieven.json niet leesbaar: ' + e.message);
-  }
-  if (!tariefset) {
-    errors.push(`Geen tarieven voor GRD=${grd} spanning=${spanning}`);
-    tariefset = {};
-  }
-  out.netbeheer = { grd, spanning, tarieven: tariefset };
-
-  // --- 7. Forecast (defaults) ---
-  out.forecast = uiInput.forecast || {
-    sigma_da: 0,
-    sigma_imb: 0,
-    sigma_volume_verbruik_pct: 0,
-    sigma_volume_pv_pct: 0
-  };
-
-  // --- 8. Simulatieperiode ---
-  out.simulatieperiode = uiInput.simulatieperiode || { van: '2024-01-01', tot: '2024-12-31' };
-
-  // --- 9. Marktdata (BELPEX spot + imbalance) ---
-  // Lees uit GitHub cache via githubReadJson, projecteer op simulatieperiode
-  const markt = await loadMarktData(out.simulatieperiode.van, out.simulatieperiode.tot);
-  out.markt = markt;
-  if (markt._warning) errors.push(markt._warning);
-
-  // --- 10. Random seed ---
-  out.random_seed = parseInt(uiInput.random_seed) || 42;
-
-  return { input: out, errors };
-}
-
-// PV-vorm generator: 35040 kwartiers, sinus-curve × seizoens-modulatie
-// Genormaliseerd op som=1 (zodat × jaarproductie_kwh × 4 = kw per kwartier)
-function generateBelgianPvShape() {
-  const N = 35040;
-  const arr = new Array(N).fill(0);
-  for (let i = 0; i < N; i++) {
-    // Dag van het jaar (0-364), uur van de dag (0-23.75)
-    const day = Math.floor(i / 96);
-    const quartUur = i % 96;
-    const hour = quartUur / 4;  // 0..23.75
-    // Daglengte en zonnemax: zomer ~16h, winter ~8h
-    const seasonRad = ((day - 80) / 365) * 2 * Math.PI;  // 0 op equinox
-    const dayLength = 12 + 4 * Math.sin(seasonRad);  // 8..16
-    const noon = 13;  // CET zonnehoogte
-    const sunStart = noon - dayLength / 2;
-    const sunEnd = noon + dayLength / 2;
-    if (hour < sunStart || hour > sunEnd) continue;
-    // Sinus-piek tijdens daglicht
-    const t = (hour - sunStart) / (sunEnd - sunStart);
-    const dailyShape = Math.sin(t * Math.PI);
-    // Seizoens-amplitude: zomer × 1.5, winter × 0.5
-    const seasonScale = 1.0 + 0.5 * Math.sin(seasonRad);
-    arr[i] = Math.max(0, dailyShape * seasonScale);
-  }
-  // Normaliseer som=1
-  const som = arr.reduce((a, b) => a + b, 0);
-  if (som > 0) {
-    for (let i = 0; i < N; i++) arr[i] /= som;
-  }
-  return arr;
-}
-
-// Laad BELPEX spot + imbalance data uit GitHub cache, projecteer op periode
-async function loadMarktData(vanISO, totISO) {
-  const token = process.env.GITHUB_TOKEN;
-  const owner = process.env.GITHUB_OWNER;
-  const repo  = process.env.GITHUB_REPO;
-  if (!token || !owner || !repo) {
-    return generateDummyMarkt(vanISO, totISO, 'GitHub env-vars niet ingesteld');
-  }
-  let spotRaw = null, imbRaw = null;
-  try {
-    const r1 = await githubReadJson(token, owner, repo, cachePathFor('spot'));
-    if (r1 && r1.json && Array.isArray(r1.json)) spotRaw = r1.json;
-  } catch (e) { /* leeg */ }
-  try {
-    const r2 = await githubReadJson(token, owner, repo, cachePathFor('imb'));
-    if (r2 && r2.json && Array.isArray(r2.json)) imbRaw = r2.json;
-  } catch (e) { /* leeg */ }
-  if (!spotRaw || !imbRaw || spotRaw.length === 0 || imbRaw.length === 0) {
-    return generateDummyMarkt(vanISO, totISO, 'Marktdata-cache leeg of niet beschikbaar — dummy data gebruikt');
-  }
-  // Spot/imb data shape (uit ENTSO-E + Elia): [{datum: 'YYYY-MM-DD', uur: 0-23, prijs_eur_mwh: ...}]
-  // OF kwartier: [{datum, kwartier: 0-95, ...}]. We reconstrueren een 1-uur of 15-min array.
-  // Simpele projectie: bouw timestamps array op kwartierbasis tussen vanISO en totISO.
-  return buildMarktArrayFromCache(spotRaw, imbRaw, vanISO, totISO);
-}
-
-function generateDummyMarkt(vanISO, totISO, warning) {
-  const start = new Date(vanISO + 'T00:00:00');
-  const end = new Date(totISO + 'T23:45:00');
-  const N = Math.floor((end - start) / (15 * 60 * 1000)) + 1;
-  const spot = new Array(N), imb = new Array(N), timestamps = new Array(N);
-  for (let i = 0; i < N; i++) {
-    const t = new Date(start.getTime() + i * 15 * 60 * 1000);
-    timestamps[i] = t.toISOString();
-    // Dummy: ~80 €/MWh + sinus daycycle
-    const hour = t.getHours() + t.getMinutes() / 60;
-    const daily = 80 + 30 * Math.sin((hour - 7) * Math.PI / 12);
-    spot[i] = daily;
-    imb[i] = daily + (Math.random() - 0.5) * 20;
-  }
-  return { spot_kwartier: spot, imb_kwartier: imb, timestamps, _warning: warning };
-}
-
-function buildMarktArrayFromCache(spotRaw, imbRaw, vanISO, totISO) {
-  // CACHE SHAPE: [{t: 1619215200000, v: 68.51}, ...]
-  //   t = Unix milliseconds (UTC), 15-minute resolution
-  //   v = prijs in €/MWh
-  // Sim-periode: vanISO/totISO zijn YYYY-MM-DD (lokale dag, behandelen we als UTC)
-  const start = new Date(vanISO + 'T00:00:00Z').getTime();
-  const end = new Date(totISO + 'T23:45:00Z').getTime();
-  const N = Math.floor((end - start) / (15 * 60 * 1000)) + 1;
-
-  // Bouw lookup map: timestamp_ms → prijs
-  // We rounden de cache-timestamps naar de dichtsbijzijnde 15-min grid om missende
-  // datapunten op te vangen (sommige bronnen geven uurdata, sommige kwartierdata).
-  function buildLookup(arr) {
-    const map = new Map();
-    for (const r of arr) {
-      const t = r.t;
-      const v = r.v;
-      if (typeof t !== 'number' || typeof v !== 'number') continue;
-      // Round naar dichtsbijzijnde 15-min boundary (kwartier-grid)
-      const rounded = Math.round(t / (15 * 60 * 1000)) * (15 * 60 * 1000);
-      map.set(rounded, v);
-    }
-    return map;
-  }
-  const spotMap = buildLookup(spotRaw);
-  const imbMap = buildLookup(imbRaw);
-
-  const spot = new Array(N), imb = new Array(N), timestamps = new Array(N);
-  let missing = 0;
-  // Track laatste bekende waarde voor forward-fill (bij uurdata: 4 kwartieren krijgen zelfde uur-prijs)
-  let lastSpot = null, lastImb = null;
-
-  for (let i = 0; i < N; i++) {
-    const t = start + i * 15 * 60 * 1000;
-    timestamps[i] = new Date(t).toISOString();
-
-    // Probeer exacte 15-min match, anders zoek naar uur-grid (00,15,30,45 → 00)
-    let sp = spotMap.get(t);
-    let im = imbMap.get(t);
-
-    // Fallback: probeer uur-grid (rond af naar uur)
-    if (sp == null) {
-      const hourT = Math.floor(t / (60 * 60 * 1000)) * (60 * 60 * 1000);
-      sp = spotMap.get(hourT);
-    }
-    if (im == null) {
-      const hourT = Math.floor(t / (60 * 60 * 1000)) * (60 * 60 * 1000);
-      im = imbMap.get(hourT);
-    }
-
-    // Forward-fill bij gat
-    if (sp != null) lastSpot = sp; else if (lastSpot != null) sp = lastSpot;
-    if (im != null) lastImb = im; else if (lastImb != null) im = lastImb;
-
-    if (sp == null || im == null) {
-      missing++;
-      sp = sp != null ? sp : 80;
-      im = im != null ? im : (sp != null ? sp : 80);
-    }
-    spot[i] = sp;
-    imb[i] = im;
-  }
-  const result = { spot_kwartier: spot, imb_kwartier: imb, timestamps };
-  if (missing > N * 0.5) {
-    result._warning = `Marktdata: ${missing}/${N} kwartieren ontbraken — fallback 80 €/MWh gebruikt`;
-  }
-  return result;
-}
-
-app.post('/api/nominatie-sim', async (req, res) => {
-  let input = req.body;
-  if (!input) return res.status(400).json({ error: 'body is verplicht' });
-
-  // SHAPE-DETECTIE: high-level UI payload (profielNaam aanwezig) vs low-level (profiel_kwartier)
-  let buildErrors = [];
-  if (!Array.isArray(input.profiel_kwartier) && input.profielNaam) {
-    try {
-      const built = await buildSimulatorInput(input);
-      input = built.input;
-      buildErrors = built.errors || [];
-    } catch (e) {
-      return res.status(400).json({ error: 'Input-build fout: ' + e.message });
-    }
-  }
-
-  const startTime = Date.now();
-  const simulatorPath = path.join(__dirname, 'simulator.py');
-  if (!fs.existsSync(simulatorPath)) {
-    return res.status(500).json({ error: 'simulator.py niet gevonden op server' });
-  }
-
-  // Spawn Python process
-  const proc = spawn('python3', [simulatorPath], {
-    cwd: __dirname,
-    env: { ...process.env, PYTHONUNBUFFERED: '1' },
-  });
-
-  let stdoutData = '';
-  let stderrData = '';
-  let timedOut = false;
-
-  // Timeout: 90s
-  const timeout = setTimeout(() => {
-    timedOut = true;
-    proc.kill('SIGKILL');
-  }, 90000);
-
-  proc.stdout.on('data', chunk => stdoutData += chunk.toString());
-  proc.stderr.on('data', chunk => stderrData += chunk.toString());
-
-  proc.on('close', (code) => {
-    clearTimeout(timeout);
-    const elapsed = Date.now() - startTime;
-
-    if (timedOut) {
-      return res.status(504).json({
-        error: 'simulator.py time-out na 90s',
-        log: stderrData.slice(-2000),
-        build_errors: buildErrors,
-      });
-    }
-    if (code !== 0) {
-      return res.status(500).json({
-        error: `simulator.py exit code ${code}`,
-        log: stderrData.slice(-2000),
-        build_errors: buildErrors,
-      });
-    }
-    try {
-      const out = JSON.parse(stdoutData);
-      res.json({
-        ok: true,
-        elapsed_ms: elapsed,
-        log: stderrData.slice(-3000),  // laatste 3KB van log
-        build_errors: buildErrors,
-        result: out,
-      });
-    } catch (e) {
-      res.status(500).json({
-        error: 'simulator.py output niet parseerbaar als JSON: ' + e.message,
-        stdout_preview: stdoutData.slice(0, 500),
-        log: stderrData.slice(-2000),
-        build_errors: buildErrors,
-      });
-    }
-  });
-
-  proc.on('error', (err) => {
-    clearTimeout(timeout);
-    res.status(500).json({ error: 'spawn fout: ' + err.message });
-  });
-
-  // Schrijf JSON naar stdin
-  try {
-    proc.stdin.write(JSON.stringify(input));
-    proc.stdin.end();
-  } catch (e) {
-    clearTimeout(timeout);
-    proc.kill();
-    res.status(500).json({ error: 'stdin write fout: ' + e.message });
-  }
-});
-
-// ─── ROUTE: GET /api/profiel-aanvulling-genereren ─────────────────────────
-// Stub voor toekomst: synthetisch profiel uit beschrijving genereren
-app.post('/api/profiel-aanvulling-genereren', (req, res) => {
-  res.status(501).json({
-    error: 'Nog niet geïmplementeerd in v15',
-    geplant_voor: 'v16',
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════
-// SCENARIO STORAGE — via fluctus-scenarios GitHub repo
-// ═══════════════════════════════════════════════════════════════════════════
-
-const SCEN_OWNER = process.env.GITHUB_SCENARIOS_OWNER || 'JohanMMK';
-const SCEN_REPO = process.env.GITHUB_SCENARIOS_REPO || 'fluctus-scenarios';
-
-function safeProjectName(s) {
-  return String(s || '').trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60);
-}
-
-// Lijst alle directories onder /projecten via GitHub-API
-async function githubListDirs(token, owner, repo, parentPath) {
-  const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${parentPath}?t=${Date.now()}`;
-  const resp = await httpGet(apiUrl, {
-    'Authorization': 'token ' + token,
-    'User-Agent': 'Fluctus-Worker/15.0',
-    'Accept': 'application/vnd.github+json',
-  });
-  if (resp.status === 404) return [];
-  if (resp.status !== 200) {
-    throw new Error(`GitHub list HTTP ${resp.status}: ${resp.body.slice(0, 200)}`);
-  }
-  const arr = JSON.parse(resp.body);
-  return Array.isArray(arr) ? arr : [];
-}
-
-// ─── ROUTE: GET /api/projecten ────────────────────────────────────────────
-app.get('/api/projecten', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
-  try {
-    const items = await githubListDirs(token, SCEN_OWNER, SCEN_REPO, 'projecten');
-    const projecten = items
-      .filter(i => i.type === 'dir')
-      .map(i => ({ naam: i.name, path: i.path }));
-    res.json({ projecten });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/scenarios?project=X ─────────────────────────────────
-app.get('/api/scenarios', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
-  const project = safeProjectName(req.query.project);
-  if (!project) return res.status(400).json({ error: 'project is verplicht' });
-  try {
-    const items = await githubListDirs(token, SCEN_OWNER, SCEN_REPO, `projecten/${project}`);
-    const scenarios = items
-      .filter(i => i.type === 'file' && i.name.endsWith('.json') && i.name !== '.gitkeep')
-      .map(i => ({
-        naam: i.name.replace(/\.json$/, ''),
-        size: i.size,
-        sha: i.sha,
-      }));
-    res.json({ project, scenarios });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: GET /api/scenario?project=X&scenario=Y ───────────────────────
-app.get('/api/scenario', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
-  const project = safeProjectName(req.query.project);
-  const scenario = safeProjectName(req.query.scenario);
-  if (!project || !scenario) {
-    return res.status(400).json({ error: 'project en scenario zijn verplicht' });
-  }
-  try {
-    const filePath = `projecten/${project}/${scenario}.json`;
-    const result = await githubReadJson(token, SCEN_OWNER, SCEN_REPO, filePath);
-    if (!result) return res.status(404).json({ error: `Scenario niet gevonden: ${filePath}` });
-    if (!result.json) {
-      return res.status(500).json({ error: 'Scenario JSON corrupt: ' + result.parseError });
-    }
-    res.json({ project, scenario, data: result.json });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ─── ROUTE: POST /api/scenario-bewaren ───────────────────────────────────
-// Body: {project: 'X', scenario: 'Y', data: {...}}
-app.post('/api/scenario-bewaren', async (req, res) => {
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) return res.status(500).json({ error: 'GITHUB_TOKEN niet ingesteld' });
-  const project = safeProjectName(req.body.project);
-  const scenario = safeProjectName(req.body.scenario);
-  const data = req.body.data;
-  if (!project || !scenario || !data) {
-    return res.status(400).json({ error: 'project, scenario en data zijn verplicht' });
-  }
-  try {
-    const filePath = `projecten/${project}/${scenario}.json`;
-    const result = await githubWriteJson(token, SCEN_OWNER, SCEN_REPO, filePath, data,
-      `save: ${project}/${scenario}`);
-    res.json({ ok: true, project, scenario, action: result.action });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// CORS preflight voor nieuwe endpoints
-['/api/profielen-lijst', '/api/profiel', '/api/postcode-grd', '/api/gemeenten-lijst', '/api/regio-tarieven',
- '/api/leveringscontract-staffel', '/api/batterijen', '/api/batterij-toevoegen',
- '/api/nominatie-sim', '/api/profiel-aanvulling-genereren',
- '/api/projecten', '/api/scenarios', '/api/scenario', '/api/scenario-bewaren']
-  .forEach(route => {
-    app.options(route, (req, res) => {
-      res.header('Access-Control-Allow-Origin', '*');
-      res.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-      res.header('Access-Control-Allow-Headers', 'Content-Type');
-      res.sendStatus(200);
-    });
-  });
-
-
-app.listen(PORT, () => console.log('Fluctus Worker v15.6 (BSP-modus passthrough + simulator-v1.4) draait op poort ' + PORT));
+# =============================================================================
+# MAIN
+# =============================================================================
+
+def main():
+    try:
+        inp = json.load(sys.stdin)
+    except Exception as e:
+        log.error(f"Kon input-JSON niet lezen: {e}")
+        sys.exit(1)
+
+    # Kies modus: analyse of simulatie
+    modus = inp.get('_modus', 'simulatie')
+
+    try:
+        if modus == 'analyse':
+            out = analyseer_pieken_en_arbitrage(inp)
+        else:
+            out = run_simulation(inp)
+    except Exception as e:
+        log.error(f"Verwerking gefaald: {e}", exc_info=True)
+        sys.exit(2)
+
+    json.dump(out, sys.stdout, indent=2, default=str)
+
+
+if __name__ == '__main__':
+    main()
