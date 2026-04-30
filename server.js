@@ -350,6 +350,16 @@ function buildSimInput(ui) {
   const bspActief    = !!(ui.bsp && ui.bsp.actief);
   const curtailActief = !!(ui.pv_curtailment && ui.pv_curtailment.actief);
 
+  // Gebruik de dynamisch bepaalde marktperiode als rolling12 gevraagd wordt
+  let simPeriode = ui.simulatieperiode || {};
+  if (!simPeriode.van || ui.jaar === 'rolling12') {
+    // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
+    simPeriode = {
+      van: (MARKT && MARKT.van) ? MARKT.van : simPeriode.van || '2025-04-28',
+      tot: (MARKT && MARKT.tot) ? MARKT.tot : simPeriode.tot || '2026-04-27',
+    };
+  }
+
   // PV solar vorm — gebruik pre-built solar_norm als UI geen vorm stuurt
   // pvVorm: solar reeks hernormaliseerd voor de exacte simulatieperiode (van→tot)
   // Simulator verwacht N waarden genormaliseerd op 1, waarbij N = aantal kwartieren in periode
@@ -377,16 +387,6 @@ function buildSimInput(ui) {
     console.log('[sim] pvVorm gebouwd:', pvVorm.length, 'kwartieren, niet-nul:', pvVorm.filter(v=>v>0).length);
   } else if (pvKwp > 0) {
     console.warn('[sim] solar_norm niet beschikbaar, pvVorm=[]. PV-productie = 0.');
-  }
-
-  // Gebruik de dynamisch bepaalde marktperiode als rolling12 gevraagd wordt
-  let simPeriode = ui.simulatieperiode || {};
-  if (!simPeriode.van || ui.jaar === 'rolling12') {
-    // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
-    simPeriode = {
-      van: (MARKT && MARKT.van) ? MARKT.van : simPeriode.van || '2025-04-28',
-      tot: (MARKT && MARKT.tot) ? MARKT.tot : simPeriode.tot || '2026-04-27',
-    };
   }
 
   return {
