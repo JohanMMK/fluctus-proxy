@@ -13,13 +13,19 @@ VAN = datetime(2025, 4, 1)
 TOT = datetime(2026, 4, 1)
 
 def load_cache(naam):
-    p = BASE / naam
-    if not p.exists():
-        sys.stderr.write(f"WARN: {naam} niet gevonden\n")
-        return {}
-    with open(p) as f:
-        data = json.load(f)
-    return {int(x['t']): x['v'] for x in data}
+    # Marktdata staat in market-data/data/
+    for zoekpad in [
+        BASE / 'market-data' / 'data' / naam,
+        BASE / 'data' / naam,
+        BASE / naam,
+    ]:
+        if zoekpad.exists():
+            with open(zoekpad) as f:
+                data = json.load(f)
+            sys.stderr.write(f"OK: {zoekpad}\n")
+            return {int(x['t']): x['v'] for x in data}
+    sys.stderr.write(f"WARN: {naam} niet gevonden\n")
+    return {}
 
 spot_dict  = load_cache('fluctus-cache-spot.json')
 imb_dict   = load_cache('fluctus-cache-imb.json')
@@ -38,13 +44,14 @@ while cur < TOT:
 solar_sum = sum(solar_q)
 solar_norm = [x / solar_sum for x in solar_q] if solar_sum > 0 else solar_q
 
-# Profiel laden
+# Profiel laden — staat in data/profielen/
 profiel = []
-for naam in ['slager.json', 'data/slager.json']:
+for naam in ['data/profielen/slager.json', 'data/slager.json', 'slager.json']:
     p = BASE / naam
     if p.exists():
         with open(p) as f:
             profiel = json.load(f)
+        sys.stderr.write(f"Profiel geladen: {p}\n")
         break
 
 out = {
