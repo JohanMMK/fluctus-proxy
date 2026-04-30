@@ -296,7 +296,16 @@ app.post('/api/nominatie-sim', (req, res) => {
     return res.status(500).json({ error:'simulator.py niet gevonden' });
 
   const startTime = Date.now();
+  // Debug: log MARKT status
+  console.log('[sim] MARKT status:', MARKT ? {
+    n_kwartieren: MARKT.n_kwartieren,
+    solar_kwartieren: MARKT.solar_norm ? MARKT.solar_norm.length : 0,
+    solar_nonzero: MARKT.solar_norm ? MARKT.solar_norm.filter(v=>v>0).length : 0,
+    van: MARKT.van, tot: MARKT.tot
+  } : 'NULL');
   const simInput  = buildSimInput(input);
+  console.log('[sim] pvVorm length:', simInput.pv ? simInput.pv.vorm_kwartier.length : 0,
+    'nonzero:', simInput.pv ? simInput.pv.vorm_kwartier.filter(v=>v>0).length : 0);
   const proc = spawn('python3', [simulatorPath], { env:{...process.env, PYTHONUNBUFFERED:'1'} });
 
   let stdout = '', stderr = '';
@@ -354,9 +363,15 @@ function buildSimInput(ui) {
   let simPeriode = ui.simulatieperiode || {};
   if (!simPeriode.van || ui.jaar === 'rolling12') {
     // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
+    // MARKT.van/tot zijn inclusieve datums uit prebuild
+    // Simulator verwacht exclusieve tot (dag erna)
+    const marktTot = (MARKT && MARKT.tot) ? MARKT.tot : '2026-04-27';
+    const marktTotExcl = new Date(marktTot + 'T00:00:00Z');
+    marktTotExcl.setUTCDate(marktTotExcl.getUTCDate() + 1);
+    const marktTotStr = marktTotExcl.toISOString().slice(0, 10);
     simPeriode = {
       van: (MARKT && MARKT.van) ? MARKT.van : simPeriode.van || '2025-04-28',
-      tot: (MARKT && MARKT.tot) ? MARKT.tot : simPeriode.tot || '2026-04-27',
+      tot: marktTotStr,
     };
   }
 
