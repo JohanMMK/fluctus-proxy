@@ -62,6 +62,7 @@ addRange([[5000,6000],[6000,7000],[7000,8000]], 'ORES',             'ORES');
 for (const pc of [2800,2801,2811,2812,2820,2830])
   POSTCODE_GRD[String(pc)] = { grd: 'Fluvius Mechelen', dnb: 'Fluvius Mechelen' };
 
+const TARIEVEN_MAP = {};  // wordt gevuld vanuit data/tarieven.json
 const TARIEVEN_LS = {
   maandpiek_eur_kw_jaar: 57.4, toegangsvermogen_eur_kw_jaar: 0,
   overschrijding_toegangsvermogen_eur_kw_jaar: 62.47,
@@ -93,11 +94,7 @@ const CONTRACT_STAFFEL = [
   { min_mwh:5000, max_mwh:999999, label:'>5 GWh',       code:'S13',consumption_dam_markup:3.5,  consumption_imbalance_markup:5.0, injection_dam_markdown:0.0, injection_imbalance_markdown:11.0 },
 ];
 
-let BATTERIJEN = [
-  { id:'bess-50',  naam:'BESS 50 kWh / 25 kW',  kwh:50,  kw:25, eta:0.85, dod:0.90, capex:20000, max_cycli:8000 },
-  { id:'bess-100', naam:'BESS 100 kWh / 49 kW', kwh:100, kw:49, eta:0.85, dod:0.90, capex:35000, max_cycli:8000 },
-  { id:'bess-200', naam:'BESS 200 kWh / 79 kW', kwh:200, kw:79, eta:0.85, dod:0.90, capex:62000, max_cycli:8000 },
-];
+// BATTERIJEN wordt geladen vanuit data/batterijen.json (zie hieronder)
 
 const PROFIELEN = [
   { naam:'slager',     beschrijving:'Slager / voedingszaak — dagprofiel met ochtend- en middagpiek' },
@@ -108,21 +105,83 @@ const PROFIELEN = [
   { naam:'horeca',     beschrijving:'Horeca — middaglunch + avondspits' },
 ];
 
-// Gemeenten laden uit data/gemeenten.json
-let GEMEENTEN_LIJST = [];
-const gemeentenPath = path.join(__dirname, 'data', 'gemeenten.json');
-if (fs.existsSync(gemeentenPath)) {
-  GEMEENTEN_LIJST = JSON.parse(fs.readFileSync(gemeentenPath, 'utf8'));
-  console.log(`[gemeenten] ${GEMEENTEN_LIJST.length} gemeenten geladen`);
-} else {
-  console.warn('[gemeenten] data/gemeenten.json niet gevonden');
+// ── Laad alle data-bestanden uit data/ bij startup ──────────────────────────
+function loadJson(relPath, fallback = null) {
+  const fp = path.join(__dirname, relPath);
+  if (fs.existsSync(fp)) {
+    try {
+      const d = JSON.parse(fs.readFileSync(fp, 'utf8'));
+      console.log(`[data] geladen: ${relPath}`);
+      return d;
+    } catch(e) { console.error(`[data] parse fout ${relPath}: ${e.message}`); }
+  } else {
+    console.warn(`[data] niet gevonden: ${relPath}`);
+  }
+  return fallback;
 }
 
-// Bouw postcode→gemeente index voor snelle lookup
+// Gemeenten
+let GEMEENTEN_LIJST = loadJson('data/gemeenten.json', []);
 const PC_GEMEENTE_INDEX = {};
 for (const g of GEMEENTEN_LIJST) {
   if (!PC_GEMEENTE_INDEX[g.postcode]) PC_GEMEENTE_INDEX[g.postcode] = [];
   PC_GEMEENTE_INDEX[g.postcode].push(g.gemeente);
+}
+
+// Postcodes (rijke shape met dnb per postcode)
+const POSTCODES_DATA = loadJson('data/postcodes.json', null);
+// Bouw GRD index uit postcodes.json als die bestaat, anders gebruik inline POSTCODE_GRD
+if (POSTCODES_DATA) {
+  const entries = Array.isArray(POSTCODES_DATA) ? POSTCODES_DATA : Object.entries(POSTCODES_DATA).map(([pc,v]) => ({postcode:pc,...(typeof v==='string'?{grd:v,dnb:v}:v)}));
+  for (const e of entries) {
+    POSTCODE_GRD[String(e.postcode)] = { grd: e.grd || e.dnb, dnb: e.dnb || e.grd };
+    if (e.gemeente) {
+      if (!PC_GEMEENTE_INDEX[String(e.postcode)]) PC_GEMEENTE_INDEX[String(e.postcode)] = [];
+      if (!PC_GEMEENTE_INDEX[String(e.postcode)].includes(e.gemeente))
+        PC_GEMEENTE_INDEX[String(e.postcode)].push(e.gemeente);
+    }
+  }
+  console.log(`[postcodes] ${entries.length} postcodes geladen`);
+}
+
+// Batterijen
+let BATTERIJEN = loadJson('data/batterijen.json', [
+  { id:'bess-50',  naam:'BESS 50 kWh / 25 kW',  kwh:50,  kw:25, eta:0.85, dod:0.90, capex:20000, max_cycli:8000 },
+  { id:'bess-100', naam:'BESS 100 kWh / 49 kW', kwh:100, kw:49, eta:0.85, dod:0.90, capex:35000, max_cycli:8000 },
+  { id:'bess-200', naam:'BESS 200 kWh / 79 kW', kwh:200, kw:79, eta:0.85, dod:0.90, capex:62000, max_cycli:8000 },
+]);
+if (!Array.isArray(BATTERIJEN)) BATTERIJEN = BATTERIJEN.batterijen || [];
+
+// Leveringscontract
+const CONTRACT_RAW = loadJson('data/leveringscontract.json', null);
+if (CONTRACT_RAW) {
+  if (CONTRACT_RAW.schijven) CONTRACT_STAFFEL.splice(0, CONTRACT_STAFFEL.length, ...CONTRACT_RAW.schijven);
+  else if (CONTRACT_RAW.staffel) CONTRACT_STAFFEL.splice(0, CONTRACT_STAFFEL.length, ...CONTRACT_RAW.staffel);
+  else if (Array.isArray(CONTRACT_RAW)) CONTRACT_STAFFEL.splice(0, CONTRACT_STAFFEL.length, ...CONTRACT_RAW);
+}
+
+// Tarieven
+const TARIEVEN_RAW = loadJson('data/tarieven.json', null);
+if (TARIEVEN_RAW) {
+  if (Array.isArray(TARIEVEN_RAW)) {
+    for (const t of TARIEVEN_RAW) { if (t.grd) TARIEVEN_MAP[t.grd] = t; }
+  } else {
+    Object.assign(TARIEVEN_MAP, TARIEVEN_RAW);
+  }
+}
+
+// Profielen laden uit data/profielen-lijst.json
+let PROFIELEN_LIJST = [
+  { naam:'Slager',     beschrijving:'sterk weekdagprofiel, overwegend dag, seizoensstabiel, piek 7u' },
+  { naam:'Kantoor',    beschrijving:'weekdagprofiel, overwegend dag, sterk seizoensgebonden, variabel, piek 11u' },
+  { naam:'Horeca',     beschrijving:'weekdagprofiel, overwegend dag, zomerpiek, variabel, piek 17u' },
+];
+const profielenLijstPath = path.join(__dirname, 'data', 'profielen-lijst.json');
+if (fs.existsSync(profielenLijstPath)) {
+  PROFIELEN_LIJST = JSON.parse(fs.readFileSync(profielenLijstPath, 'utf8'));
+  console.log(`[profielen] ${PROFIELEN_LIJST.length} profielen geladen`);
+} else {
+  console.warn('[profielen] data/profielen-lijst.json niet gevonden');
 }
 
 const SCENARIOS_DB = {};
@@ -146,7 +205,8 @@ app.get('/api/gemeenten-lijst', (req, res) => {
 });
 
 app.get('/api/regio-tarieven', (req, res) => {
-  const t = TARIEVEN_LS;
+  const grdKey = req.query.grd || 'Fluvius West';
+  const t = TARIEVEN_MAP[grdKey] || TARIEVEN_LS;
   res.json({ grd:req.query.grd, spanning:req.query.spanning, tarieven:{
     distributie: t.proportioneel_eur_mwh,
     capaciteit:  t.maandpiek_eur_kw_jaar,
@@ -156,26 +216,43 @@ app.get('/api/regio-tarieven', (req, res) => {
 });
 
 app.get('/api/leveringscontract-staffel', (req, res) => {
-  res.json({ leverancier:'Enwyse', schijven:CONTRACT_STAFFEL, staffel:CONTRACT_STAFFEL,
-             vergroening_eur_per_mwh:2.50, vast_eur_per_maand:10.00,
-             gsc_eur_mwh:11.0, wkk_eur_mwh:4.20 });
+  const meta = CONTRACT_RAW || {};
+  res.json({ leverancier: meta.leverancier||'Enwyse', schijven:CONTRACT_STAFFEL, staffel:CONTRACT_STAFFEL,
+             vergroening_eur_per_mwh: meta.vergroening_eur_per_mwh||2.50,
+             vast_eur_per_maand: meta.vast_eur_per_maand||10.00,
+             gsc_eur_mwh: meta.gsc_eur_mwh||11.0,
+             wkk_eur_mwh: meta.wkk_eur_mwh||4.20 });
 });
 
-app.get('/api/profielen-lijst', (req, res) => res.json({ profielen:PROFIELEN }));
+app.get('/api/profielen-lijst', (req, res) => res.json({ profielen:PROFIELEN_LIJST }));
 
 app.get('/api/profiel', (req, res) => {
-  const naam = req.query.naam || 'slager';
-  // Geef het profiel terug vanuit MARKT (al geladen bij startup)
-  if (MARKT && MARKT.profiel && MARKT.profiel.length === 35040) {
-    return res.json({ naam, kwartier: MARKT.profiel });
-  }
-  // Fallback: lees slager.json direct
-  for (const p of ['slager.json', 'data/slager.json']) {
-    const fp = path.join(__dirname, p);
-    if (fs.existsSync(fp)) {
-      const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
-      return res.json({ naam, kwartier: Array.isArray(data) ? data : data.profiel_kwartier || [] });
+  const naam = req.query.naam || 'Slager';
+  // Zoek profiel in data/profielen/<naam>.json (case-insensitive bestandsnaam)
+  const profielDir = path.join(__dirname, 'data', 'profielen');
+  if (fs.existsSync(profielDir)) {
+    // Probeer exacte naam, dan lowercase
+    for (const kandidaat of [naam + '.json', naam.toLowerCase() + '.json']) {
+      const fp = path.join(profielDir, kandidaat);
+      if (fs.existsSync(fp)) {
+        const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        return res.json({ naam, kwartier: Array.isArray(data) ? data : data.profiel_kwartier || [] });
+      }
     }
+    // Probeer case-insensitive match in de directory
+    try {
+      const files = fs.readdirSync(profielDir);
+      const match = files.find(f => f.toLowerCase() === naam.toLowerCase() + '.json');
+      if (match) {
+        const data = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
+        return res.json({ naam, kwartier: Array.isArray(data) ? data : data.profiel_kwartier || [] });
+      }
+    } catch(e) {}
+  }
+  // Fallback: gebruik MARKT profiel (slager als default)
+  if (MARKT && MARKT.profiel && MARKT.profiel.length === 35040) {
+    console.warn(`[profiel] '${naam}' niet gevonden, gebruik default (slager)`);
+    return res.json({ naam, kwartier: MARKT.profiel });
   }
   res.status(404).json({ error:`Profiel '${naam}' niet gevonden` });
 });
@@ -279,7 +356,20 @@ function buildSimInput(ui) {
   const simPeriode = ui.simulatieperiode || { van:'2025-04-01', tot:'2026-04-01' };
 
   return {
-    profiel_kwartier: (MARKT && MARKT.profiel) || [],
+    profiel_kwartier: (() => {
+      // Laad het gevraagde profiel uit data/profielen/
+      const pNaam = ui.profielNaam || ui.profiel_naam || 'Slager';
+      const profielDir = path.join(__dirname, 'data', 'profielen');
+      if (fs.existsSync(profielDir)) {
+        const files = fs.readdirSync(profielDir);
+        const match = files.find(f => f.toLowerCase() === pNaam.toLowerCase() + '.json');
+        if (match) {
+          const d = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
+          return Array.isArray(d) ? d : d.profiel_kwartier || [];
+        }
+      }
+      return (MARKT && MARKT.profiel) || [];
+    })(),
     jaarverbruik_mwh: jaarverbruik,
     aanvullingen: {},
     pv: {
