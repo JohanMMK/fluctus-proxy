@@ -351,9 +351,43 @@ function buildSimInput(ui) {
   const curtailActief = !!(ui.pv_curtailment && ui.pv_curtailment.actief);
 
   // PV solar vorm — gebruik pre-built solar_norm als UI geen vorm stuurt
-  const pvVorm = (pvKwp > 0 && MARKT && MARKT.solar_norm) ? MARKT.solar_norm : [];
+  // pvVorm: solar reeks hernormaliseerd voor de exacte simulatieperiode (van→tot)
+  // Simulator verwacht N waarden genormaliseerd op 1, waarbij N = aantal kwartieren in periode
+  let pvVorm = [];
+  if (pvKwp > 0 && MARKT && MARKT.solar_norm && MARKT.solar_norm.length === 35040) {
+    // Bouw periode-specifieke solar reeks vanuit de 2025-kalender solar_norm
+    // via quarter_index: zelfde logica als simulator's quarter_index_in_year_2025
+    const van = new Date(simPeriode.van + 'T00:00:00');
+    const tot = new Date(simPeriode.tot + 'T00:00:00');
+    const solarNorm2025 = MARKT.solar_norm;
+    const jan2025 = Date.UTC(2025, 0, 1); // ms timestamp van 1 jan 2025
+    const periodeSolar = [];
+    for (let d = new Date(van); d < tot; d = new Date(d.getTime() + 15*60*1000)) {
+      // Bereken de corresponderende index in 2025
+      const maand = d.getUTCMonth();
+      const dag = d.getUTCDate() - 1;
+      const kwartier = Math.floor((d.getUTCHours() * 60 + d.getUTCMinutes()) / 15);
+      // Schat index in 2025 via maand/dag/kwartier (geen weekdag-alignment nodig voor solar)
+      const maandDagen2025 = [0,31,59,90,120,151,181,212,243,273,304,334];
+      const idx2025 = (maandDagen2025[maand] + dag) * 96 + kwartier;
+      periodeSolar.push(idx2025 < solarNorm2025.length ? solarNorm2025[idx2025] : 0);
+    }
+    const solarSum = periodeSolar.reduce((a,b) => a+b, 0);
+    pvVorm = solarSum > 0 ? periodeSolar.map(v => v/solarSum) : periodeSolar;
+    console.log('[sim] pvVorm gebouwd:', pvVorm.length, 'kwartieren, niet-nul:', pvVorm.filter(v=>v>0).length);
+  } else if (pvKwp > 0) {
+    console.warn('[sim] solar_norm niet beschikbaar, pvVorm=[]. PV-productie = 0.');
+  }
 
-  const simPeriode = ui.simulatieperiode || { van:'2025-04-01', tot:'2026-04-01' };
+  // Gebruik de dynamisch bepaalde marktperiode als rolling12 gevraagd wordt
+  let simPeriode = ui.simulatieperiode || {};
+  if (!simPeriode.van || ui.jaar === 'rolling12') {
+    // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
+    simPeriode = {
+      van: (MARKT && MARKT.van) ? MARKT.van : simPeriode.van || '2025-04-28',
+      tot: (MARKT && MARKT.tot) ? MARKT.tot : simPeriode.tot || '2026-04-27',
+    };
+  }
 
   return {
     profiel_kwartier: (() => {
