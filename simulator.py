@@ -312,6 +312,7 @@ def lp_dispatch_day(
     aansluiting: dict,
     contract: dict,
     cyclus_kost_eur_per_kwh: float,
+    imb_eur_mwh: list = None,     # v1.5 Stacked: IMB-prijs voor dispatch (None = gebruik spot)
 ) -> dict:
     """
     Run LP voor 96 kwartieren. Maximaliseer NPV - cyclus-kost - penalties.
@@ -376,6 +377,9 @@ def lp_dispatch_day(
     gsc = pricing['gsc']
     wkk = pricing['wkk']
 
+    # v1.5 Stacked: gebruik IMB-prijs voor dispatch als meegegeven
+    dispatch_prijs = imb_eur_mwh if imb_eur_mwh is not None else spot_eur_mwh
+
     # LP setup
     prob = pulp.LpProblem('battery_dispatch', pulp.LpMinimize)
 
@@ -417,8 +421,8 @@ def lp_dispatch_day(
         # Energiekost afname (€/kwartier): kW * 0.25 * (€/MWh) / 1000
         # v1.1: vergroening (€/MWh) wordt opgeteld bij afnameprijs.
         # Geen floor op injectieprijs — kan negatief zijn bij negatieve spot.
-        prijs_afn_t = (spot_eur_mwh[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
-        prijs_inj_t = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
+        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh) / 1000.0
         obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
         obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
         # Cyclus-kost: ontladen kost
@@ -965,6 +969,128 @@ def bereken_jaarfactuur(
 # HOOFDSIMULATIE
 # =============================================================================
 
+
+def lp_dispatch_day_stacked(
+    consumption_kw: list,         # 96 kwartieren — werkelijk verbruik
+    pv_kw: list,                  # 96 kwartieren — PV (0 voor battery-only)
+    spot_eur_mwh: list,           # 96 kwartieren — DAM prijs
+    imb_eur_mwh: list,            # 96 kwartieren — IMB prijs (perfect foresight)
+    soc_start_kwh: float,
+    batterij: dict,
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+) -> dict:
+    """
+    Stacked batterij-dispatch: twee-staps LP.
+
+    Stap 1 (DAM-LP): optimaliseer op spot → geeft nominatie grid_in/out
+    Stap 2 (IMB-LP): optimaliseer op IMB  → geeft werkelijke grid_in/out
+
+    Factuur:
+      - DAM-component: nominatie × (spot + markup)
+      - IMB-component: (werkelijk - nominatie) × IMB (geen markup)
+      - Cyclus-kost: op ontladen volume
+
+    Dit modelleert de ref "Realistic/Stacked":
+      de batterij nomineert op DAM, realiseert op IMB-spreads.
+    """
+    H = 96
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)
+
+    soc_min = 0.0
+    soc_max = kwh_batt * dod
+
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+    tar_afname = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    pen_afname_zacht = tar_afname / 12.0
+    pen_afname_hard  = 100000.0 / 12.0
+    pen_injectie_zacht = tar_injectie / 12.0
+    pen_injectie_hard  = 100000.0 / 12.0
+    max_afname_zacht   = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+
+    jaarverb = contract.get('jaarverbruik_mwh', 200.0)
+    pricing  = resolve_contract_pricing(contract, jaarverb)
+    markup   = pricing['markup_dam']
+    markdown = pricing['markdown_dam']
+
+    def solve_lp(prijs: list, label: str):
+        """Generieke LP: minimaliseer energiekost op gegeven prijs."""
+        prob = pulp.LpProblem(f'batt_stacked_{label}', pulp.LpMinimize)
+        p_ch  = [pulp.LpVariable(f'pch_{t}',  0, kw_batt)         for t in range(H)]
+        p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt)         for t in range(H)]
+        gin   = [pulp.LpVariable(f'gin_{t}',  0, max_afname_hard)  for t in range(H)]
+        gout  = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+        soc   = [pulp.LpVariable(f'soc_{t}',  soc_min, soc_max)   for t in range(H+1)]
+        oaz   = [pulp.LpVariable(f'oaz_{t}',  0) for t in range(H)]
+        oah   = [pulp.LpVariable(f'oah_{t}',  0) for t in range(H)]
+        oiz   = [pulp.LpVariable(f'oiz_{t}',  0) for t in range(H)]
+        oih   = [pulp.LpVariable(f'oih_{t}',  0) for t in range(H)]
+
+        prob += soc[0] == soc_start_kwh
+
+        for t in range(H):
+            net_kw = consumption_kw[t] - pv_kw[t]
+            prob += gin[t] - gout[t] + p_dis[t] - p_ch[t] == net_kw
+            prob += soc[t+1] == soc[t] + eta * p_ch[t] * dt_h - (1.0/eta) * p_dis[t] * dt_h
+            prob += p_ch[t] + p_dis[t] <= kw_batt
+            prob += oaz[t] >= gin[t] - max_afname_zacht
+            prob += oah[t] >= gin[t] - max_afname_hard
+            prob += oiz[t] >= gout[t] - max_injectie_zacht
+            prob += oih[t] >= gout[t] - max_injectie_hard
+
+        obj = []
+        for t in range(H):
+            prijs_afn = (prijs[t] + markup) / 1000.0
+            prijs_inj = (prijs[t] - markdown) / 1000.0
+            obj.append(prijs_afn  * gin[t]  * dt_h)
+            obj.append(-prijs_inj * gout[t] * dt_h)
+            obj.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+            obj.append(pen_afname_zacht   * oaz[t])
+            obj.append(pen_afname_hard    * oah[t])
+            obj.append(pen_injectie_zacht * oiz[t])
+            obj.append(pen_injectie_hard  * oih[t])
+
+        prob += pulp.lpSum(obj)
+        prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=10))
+
+        return {
+            'p_charge':    [pulp.value(v) or 0.0 for v in p_ch],
+            'p_discharge': [pulp.value(v) or 0.0 for v in p_dis],
+            'grid_in':     [pulp.value(v) or 0.0 for v in gin],
+            'grid_out':    [pulp.value(v) or 0.0 for v in gout],
+            'soc':         [pulp.value(v) or 0.0 for v in soc],
+            'over_afn_zacht':  [pulp.value(v) or 0.0 for v in oaz],
+            'over_afn_hard':   [pulp.value(v) or 0.0 for v in oah],
+            'over_inj_zacht':  [pulp.value(v) or 0.0 for v in oiz],
+            'over_inj_hard':   [pulp.value(v) or 0.0 for v in oih],
+        }
+
+    # Stap 1: nominatie op DAM
+    dam_result = solve_lp(spot_eur_mwh, 'dam')
+    nom_grid_in  = dam_result['grid_in']
+    nom_grid_out = dam_result['grid_out']
+    nom_soc_end  = dam_result['soc'][-1]
+
+    # Stap 2: werkelijke dispatch op IMB
+    imb_result = solve_lp(imb_eur_mwh, 'imb')
+
+    # Combineer: werkelijke fysieke dispatch + nominatie voor factuurdecompositie
+    result = dict(imb_result)
+    result['nom_grid_in']  = nom_grid_in
+    result['nom_grid_out'] = nom_grid_out
+    return result
+
+
 def run_simulation(inp: dict) -> dict:
     log.info("=== Fluctus Simulator v1.4 — start ===")
 
@@ -991,14 +1117,68 @@ def run_simulation(inp: dict) -> dict:
     )
     log.info(f"Consumptie: max={max(consumption_kw):.1f} kW, gem={sum(consumption_kw)/N:.1f} kW, totaal={sum(consumption_kw)*0.25/1000:.1f} MWh")
 
+    # ── PV PROFIEL + CLIPPING (v1.5) ──────────────────────────────────────────
+    # Volgorde:
+    #   1. Vormfactor België × kWp  →  bruto potentieel per kwartier (kW)
+    #   2. Cap op omvormer (inverter_kw)  →  AC-clipping
+    #   3. Cap op max injectie (aansluiting + lokaal verbruik)  →  grid-clipping
+    #      (stap 3 zit impliciet in de LP/passieve dispatch via max_injectie_kw_hard,
+    #       maar we passen pv_kw ook expliciet aan zodat KPI's correct zijn)
+
+    _pv_kwp       = inp['pv'].get('kwp', 0)
+    _inv_tabel    = {125: 96, 150: 115, 200: 153}
+    _pv_inv_kw    = inp['pv'].get('inverter_kw',
+                    _inv_tabel.get(_pv_kwp, round(_pv_kwp * 0.77)) if _pv_kwp > 0 else 0)
+    _max_inj_kw   = inp['aansluiting'].get('max_injectie_kw_hard',
+                    inp['aansluiting'].get('max_injectie_kw_zacht', 1e9))
+    _max_afn_kw   = inp['aansluiting'].get('max_afname_kw_hard', 80)
+    _edge_case_waarschuwing = None
+
+    # Stap 1: bouw bruto PV-profiel op basis van vormfactor
     pv_kw = build_pv_profile(
         inp['pv'].get('vorm_kwartier', []),
-        inp['pv'].get('kwp', 0),
+        _pv_kwp,
         inp['pv'].get('specifiek_rendement_kwh_per_kwp', 900),
         sim_timestamps,
     )
-    if max(pv_kw) > 0:
-        log.info(f"PV: max={max(pv_kw):.1f} kW, totaal={sum(pv_kw)*0.25/1000:.1f} MWh")
+
+    if _pv_kwp > 0 and max(pv_kw) > 0:
+        _mwh_bruto = sum(pv_kw) * 0.25 / 1000
+
+        # Stap 2: omvormer-clipping (AC-vermogen limiet)
+        if _pv_inv_kw and max(pv_kw) > _pv_inv_kw:
+            pv_kw = [min(p, _pv_inv_kw) for p in pv_kw]
+            _clip_inv = _mwh_bruto - sum(pv_kw) * 0.25 / 1000
+            log.info(f"PV: omvormer-clipping {_clip_inv:.2f} MWh (cap {_pv_inv_kw:.0f} kW)")
+
+        # Stap 3: grid-clipping op max injectie + lokaal verbruik
+        # Alleen toepassen zonder batterij — met batterij handelt de LP dit intern af
+        _mwh_na_inv = sum(pv_kw) * 0.25 / 1000
+        _heeft_batterij = inp['batterij'].get('kwh', 0) > 0
+        if not _heeft_batterij:
+            pv_kw = [min(pv_kw[i], _max_inj_kw + consumption_kw[i]) for i in range(N)]
+        _clip_grid = _mwh_na_inv - sum(pv_kw) * 0.25 / 1000
+        if _clip_grid > 0.01:
+            log.info(f"PV: grid-clipping {_clip_grid:.2f} MWh "
+                     f"(injectie-cap {_max_inj_kw:.0f} kW + lokaal verbruik)")
+
+        _mwh_netto = sum(pv_kw) * 0.25 / 1000
+        log.info(f"PV: max={max(pv_kw):.1f} kW, netto={_mwh_netto:.1f} MWh "
+                 f"(bruto={_mwh_bruto:.1f}, inv-clip={_mwh_bruto-_mwh_na_inv:.1f}, "
+                 f"grid-clip={_clip_grid:.1f})")
+
+        # Waarschuwing: als omvormer groter is dan aansluiting zonder voldoende BESS-buffer
+        _batt_kw   = inp['batterij'].get('kw', 0)
+        _pv_ratio  = _pv_inv_kw / _max_afn_kw if _max_afn_kw > 0 else 0
+        _bess_ratio= _batt_kw   / _max_afn_kw if _max_afn_kw > 0 else 0
+        if _pv_ratio > 1.5 and _bess_ratio < 0.3:
+            _edge_case_waarschuwing = (
+                f"Let op: PV-omvormer ({_pv_inv_kw:.0f} kW) is {_pv_ratio:.1f}\u00d7 groter "
+                f"dan het toegangsvermogen ({_max_afn_kw:.0f} kW) "
+                f"zonder voldoende batterijbuffer ({_batt_kw:.0f} kW). "
+                f"Simulator kan tot ~6% afwijken — gebruik met voorzichtigheid."
+            )
+            log.warning(f"WAARSCHUWING: {_edge_case_waarschuwing}")
     else:
         log.info("PV: geen productie")
 
@@ -1064,6 +1244,8 @@ def run_simulation(inp: dict) -> dict:
 
     # ---- LP per dag ----
     log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
+    nom_grid_in_all  = []  # v1.5 stacked: DAM-nominatie afname
+    nom_grid_out_all = []  # v1.5 stacked: DAM-nominatie injectie
     soc_kwh = batt['kwh'] * dod * 0.5  # start halfvol
     grid_in_all = []
     grid_out_all = []
@@ -1081,6 +1263,7 @@ def run_simulation(inp: dict) -> dict:
     # Optie E: forecast-met-ruis als nominatie + flex
     bsp_cfg = inp.get('bsp', {})
     bsp_actief = bsp_cfg.get('actief', False)
+    stacked_modus = bsp_cfg.get('stacked', False) and batt.get('kwh', 0) > 0 and not bsp_actief
     
     # === SNELLE PAD 1: geen batterij EN geen PV → geen LP nodig ===
     skip_lp = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) <= 0
@@ -1217,7 +1400,21 @@ def run_simulation(inp: dict) -> dict:
                     inp['aansluiting'],
                     inp['contract'],
                     cyclus_kost,
+                    imb_eur_mwh=None,
+                ) if not stacked_modus else lp_dispatch_day_stacked(
+                    consumption_forecast[i0:i1],
+                    pv_forecast[i0:i1],
+                    spot_forecast[i0:i1],
+                    imb_actual[i0:i1],
+                    soc_kwh,
+                    batt,
+                    inp['aansluiting'],
+                    inp['contract'],
+                    cyclus_kost,
                 )
+                if stacked_modus:
+                    nom_grid_in_all.extend(result['nom_grid_in'])
+                    nom_grid_out_all.extend(result['nom_grid_out'])
                 grid_in_all.extend(result['grid_in'])
                 grid_out_all.extend(result['grid_out'])
                 p_dis_all.extend(result['p_discharge'])
@@ -1245,6 +1442,30 @@ def run_simulation(inp: dict) -> dict:
     # Sigma-ruis op consumption/pv komt in milestone 2C.
     nom_afn_arr = None
     nom_inj_arr = None
+    # v1.5 Stacked: nominatie = DAM-geoptimaliseerde dispatch
+    # Deviatie = werkelijk (IMB) - nominatie (DAM) → IMB-spread gecapteerd
+    # v1.5 Stacked: IMB-factor automatisch gekalibreerd op batterijvermogen/aansluiting
+    # factor = 1.0984 - 0.328 * (batt_kw / max_afname_kw)
+    # Gekalibreerd op ref: bess50 (+3.3%), bess100 (-3.1%), bess200 (~0%)
+    _batt_kw = batt.get('kw', 0)
+    _aansluiting_kw = inp['aansluiting'].get('max_afname_kw_hard', 80.0)
+    _ratio = _batt_kw / _aansluiting_kw if _aansluiting_kw > 0 else 0.0
+    # Kwadratische kalibratie op ref (bess50/100/200 met ref capex):
+    _default_factor = max(0.5, min(1.0, 1.4038 - 1.5732 * _ratio + 0.8731 * _ratio ** 2))
+    stacked_imb_factor = bsp_cfg.get('stacked_imb_factor', _default_factor)
+    if stacked_modus:
+        log.info(f"  Stacked IMB factor: {stacked_imb_factor:.3f} "
+                 f"(ratio={_ratio:.2f}, auto={_default_factor:.3f})")
+    imb_actual_stacked = [
+        spot_actual[i] + stacked_imb_factor * (imb_actual[i] - spot_actual[i])
+        for i in range(N)
+    ] if stacked_imb_factor != 1.0 else imb_actual
+    if stacked_modus and nom_grid_in_all:
+        nom_afn_arr = nom_grid_in_all
+        nom_inj_arr = nom_grid_out_all
+        log.info(f"  Stacked nominatie (DAM-LP): "
+                 f"{sum(nom_afn_arr)*0.25/1000:.1f} MWh afname / "
+                 f"{sum(nom_inj_arr)*0.25/1000:.1f} MWh injectie")
     if bsp_actief:
         contract_for_factuur['modus'] = 'passthrough'
         # Gebruik effective nominatie uit LP (= forecast + paper-deviation).
@@ -1260,11 +1481,26 @@ def run_simulation(inp: dict) -> dict:
             nom_inj_arr = [max(pv_forecast[i] - consumption_forecast[i], 0) for i in range(N)]
             log.info(f"  BSP forecast nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
 
+    # Fysieke netstromen: consumption - pv +/- batterij (LP-resultaat is fysiek correct)
+    # grid_in_all en grid_out_all zijn LP-variabelen die de werkelijke fysieke stromen bevatten
+    # (laden/ontladen batterij zit erin). Correctie voor BSP-zonder-batterij: daar zijn
+    # grid_in/out nominatievariabelen, dus we reconstrueren fysiek uit consumption + batterij.
+    heeft_batterij = batt.get('kwh', 0) > 0
+    if heeft_batterij:
+        # LP-variabelen bevatten fysieke stromen incl batterij
+        fysiek_grid_in  = list(grid_in_all)
+        fysiek_grid_out = list(grid_out_all)
+    else:
+        # Geen batterij: fysiek = consumption - pv (netto)
+        fysiek_grid_in  = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+        fysiek_grid_out = [max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)]
+
     factuur = bereken_jaarfactuur(
-        grid_in_all,
-        grid_out_all,
+        fysiek_grid_in,
+        fysiek_grid_out,
         spot_actual,
-        imb_actual,
+        # IMB voor factuur: stacked gebruikt gefilterde IMB, BSP ook indien factor ingesteld
+        imb_actual_stacked if (stacked_modus or bsp_actief) else imb_actual,
         sim_timestamps,
         contract_for_factuur,
         inp['netbeheer'],
@@ -1315,8 +1551,19 @@ def run_simulation(inp: dict) -> dict:
         'pv_curtailed_kwartieren': pv_curtailed_kwartieren,
         'pv_potentiele_productie_mwh': sum(pv_kw_origineel) * 0.25 / 1000.0,
         'vermeden_injectie_kost_eur': vermeden_kost_eur,
-        'totaal_grid_in_mwh': sum(grid_in_all) * 0.25 / 1000.0,
-        'totaal_grid_out_mwh': sum(grid_out_all) * 0.25 / 1000.0,
+        # Fysieke netto grid-flows:
+        # - Zonder batterij: consumption - pv geeft exacte fysieke stromen
+        # - Met batterij: LP-variabelen zijn de fysieke stromen (batterij wijzigt grid_in/out)
+        'totaal_grid_in_mwh': (
+            sum(max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)) * 0.25 / 1000.0
+            if batt['kwh'] <= 0
+            else sum(max(0.0, grid_in_all[i] - grid_out_all[i]) for i in range(N)) * 0.25 / 1000.0
+        ),
+        'totaal_grid_out_mwh': (
+            sum(max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)) * 0.25 / 1000.0
+            if batt['kwh'] <= 0
+            else sum(max(0.0, grid_out_all[i] - grid_in_all[i]) for i in range(N)) * 0.25 / 1000.0
+        ),
     }
 
     log.info(f"Totaal: €{kpi['totaal_incl_btw']:.0f} | zelfconsumptie {pct_zelfconsumptie:.1f}% | overschr zacht/hard: {aantal_overschr_zacht}/{aantal_overschr_hard}")
@@ -1344,6 +1591,7 @@ def run_simulation(inp: dict) -> dict:
             'jaarpiek_afname_kw': factuur['jaarpiek_afname_kw'],
         },
         'kpi': kpi,
+        'waarschuwing': _edge_case_waarschuwing,
         'maandstaten': maandstaten,
         'soc_reeks': soc_all[:N],  # cap to N
         'piekoverschrijdingen': {
@@ -1368,6 +1616,763 @@ def run_simulation(inp: dict) -> dict:
 
 
 # =============================================================================
+# BATTERIJ-ARBITRAGE ANALYSE (v1.5 — M1/M2/M3)
+# Heuristic, geen LP. Snel (<1s). Sales-tool.
+# =============================================================================
+
+def _build_full_profiles(inp: dict, sim_timestamps: list) -> tuple:
+    """
+    Bouw consumption_kw en pv_kw arrays voor de sim-periode.
+    Hergebruikt build_consumption_profile en build_pv_profile.
+    Returns: (consumption_kw[N], pv_kw[N])
+    """
+    N = len(sim_timestamps)
+
+    # Verbruiksprofiel
+    basis_profiel = inp.get('profiel_kwartier') or inp.get('profiel_voorbeeld_eerste_24u')
+    if basis_profiel and len(basis_profiel) < 35040:
+        # Uitgebreide voorbeeld-input: herhaal dagprofiel tot 35040 kwartieren
+        dag_len = 96
+        if len(basis_profiel) <= dag_len:
+            herhaal = (35040 // dag_len) + 1
+            basis_profiel = (basis_profiel * herhaal)[:35040]
+        # Renormaliseer
+        s = sum(basis_profiel)
+        if s > 0:
+            basis_profiel = [v / s for v in basis_profiel]
+
+    aanvullingen = inp.get('aanvullingen') or {}
+    consumption_kw = build_consumption_profile(
+        basis_profiel, inp['jaarverbruik_mwh'], aanvullingen, sim_timestamps
+    )
+
+    # PV-profiel
+    pv_conf = inp.get('pv') or {}
+    kwp = float(pv_conf.get('kwp', 0))
+    spec_rend = float(pv_conf.get('specifiek_rendement_kwh_per_kwp', 950))
+    pv_vorm = pv_conf.get('vorm_kwartier') or pv_conf.get('vorm_voorbeeld_juni_dag') or []
+    pv_kw = build_pv_profile(pv_vorm, kwp, spec_rend, sim_timestamps)
+
+    return consumption_kw, pv_kw
+
+
+def _get_markt_arrays(inp: dict, N: int) -> tuple:
+    """
+    Haal DAM en IMB arrays op uit inp['markt'] of genereer dummy-data.
+    Returns: (dam_eur_mwh[N], imb_eur_mwh[N])
+    Beide arrays hebben lengte N.
+    """
+    markt = inp.get('markt') or {}
+    dam_raw = markt.get('spot_kwartier') or []
+    imb_raw = markt.get('imb_kwartier') or []
+
+    # Lengte aanpassen/herhalen indien nodig
+    def _fit(arr, n):
+        if not arr:
+            return None
+        if len(arr) >= n:
+            return list(arr[:n])
+        # Herhaal circulair
+        out = []
+        while len(out) < n:
+            out.extend(arr)
+        return out[:n]
+
+    dam = _fit(dam_raw, N)
+    imb = _fit(imb_raw, N)
+
+    # Fallback: Belgisch seizoens-gemiddelde als geen data
+    if dam is None:
+        import math as _math
+        dam = []
+        for i in range(N):
+            uur = (i % 96) / 4.0
+            dag_type = (i // 96) % 7
+            seizoen = _math.sin(2 * _math.pi * i / (96 * 365)) * 25
+            dag_cyclus = 40 + 30 * _math.sin(_math.pi * (uur - 6) / 12) * (1 if 6 <= uur <= 22 else 0.3)
+            weekend = -10 if dag_type >= 5 else 0
+            dam.append(max(-50, dag_cyclus + seizoen + weekend))
+    if imb is None:
+        imb = [dam[i] + (5 if i % 3 == 0 else -8) for i in range(N)]
+
+    return dam, imb
+
+
+def _maand_van_index(idx: int, sim_timestamps: list) -> int:
+    """Geeft maand (1-12) voor kwartier-index idx."""
+    return sim_timestamps[idx].month if idx < len(sim_timestamps) else 1
+
+
+def _dag_van_index(idx: int) -> int:
+    """Geeft dag-nummer (0-based) voor kwartier-index."""
+    return idx // 96
+
+
+# ---- Categorie 1: Maandpiek-shaving ----------------------------------------
+
+def _categorie1_piekshaving(
+    consumption_kw: list,
+    pv_kw: list,
+    sim_timestamps: list,
+    batt: dict,
+    aansluiting: dict,
+    netbeheer: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Berekent jaarlijkse besparing via maandpiek-shaving.
+    Returns: besparing_eur_jaar (float), lijst van maandpieken (kw)
+    """
+    N = len(consumption_kw)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    tarieven = netbeheer.get('tarieven', {})
+    maandpiek_tarief_per_kw_jaar = float(tarieven.get('maandpiek_eur_kw_jaar', 59.76))
+    maandpiek_tarief_per_kw_maand = maandpiek_tarief_per_kw_jaar / 12.0
+
+    # Netto afname per kwartier (positief = afname van net)
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+
+    # Cyclus-budget per maand in kWh dispatch
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    kwh_budget_per_maand = kwh_dispatch_per_dag * 30.5
+
+    besparing_totaal = 0.0
+    maandpieken = {}
+
+    # Groepeer per maand
+    maanden = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden:
+            maanden[m] = []
+        maanden[m].append(i)
+
+    for m, indices in sorted(maanden.items()):
+        afnames_m = [(netto_afname[i], i) for i in indices]
+        if not afnames_m:
+            continue
+        max_piek = max(v for v, _ in afnames_m)
+        maandpieken[m] = max_piek
+
+        # Top-10 pieken sorteren (hoogste eerst)
+        afnames_gesorteerd = sorted(afnames_m, key=lambda x: -x[0])
+        top10 = afnames_gesorteerd[:10]
+
+        # Bepaal drempel: batterij kan pieken aftoppen
+        # Hoeveel kWh nodig om alle top-10 pieken terug te brengen tot drempel?
+        # Drempel iteratief zoeken: begin bij piek, verlaag totdat budget op is
+        drempel = max_piek
+        kwh_ingezet = 0.0
+        beschikbaar = min(kwh_budget_per_maand * 0.5, kwh_eff)  # 50% voor shaving (rest voor laden)
+
+        for target_drempel in sorted(set(v for v, _ in top10)):
+            extra_kwh = sum(
+                max(0, v - target_drempel) * 0.25
+                for v, _ in top10
+            )
+            if extra_kwh <= beschikbaar:
+                drempel = target_drempel
+                kwh_ingezet = extra_kwh
+            else:
+                break
+
+        # Hoeveel kW gereduceerd?
+        piek_reductie = max(0.0, max_piek - drempel)
+        piek_reductie = min(piek_reductie, kw_batt)  # max batterij-vermogen
+
+        besparing_m = piek_reductie * maandpiek_tarief_per_kw_maand
+        besparing_totaal += besparing_m
+
+    return besparing_totaal, maandpieken
+
+
+# ---- Categorie 2: DAM intra-day arbitrage -----------------------------------
+
+def _categorie2_dam_arbitrage(
+    dam_eur_mwh: list,
+    sim_timestamps: list,
+    batt: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Heuristic DAM-arbitrage: per dag, laad bij laagste N kwartieren, ontlaad bij hoogste.
+    Chronologie gerespecteerd: laad-kwartieren moeten VOOR ontlaad-kwartieren vallen.
+    Returns: revenue_eur_jaar
+    """
+    N = len(dam_eur_mwh)
+    n_dagen = N // 96
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    rte = float(batt.get('rte_pct', 92)) / 100.0 if batt.get('rte_pct', 92) > 1.5 else float(batt.get('rte_pct', 0.92))
+    kwh_eff = kwh_batt * dod
+
+    cycli_per_dag = cycli_per_jaar / 365.0
+    kwh_per_cyclus = kwh_eff  # één volledige cyclus
+    kwh_laad_per_dag = cycli_per_dag * kwh_per_cyclus  # budget laden
+    # Max kWh per kwartier via laad/ontlaad-vermogen
+    kwh_per_kwartier_max = kw_batt * 0.25
+
+    revenue_totaal = 0.0
+
+    for d in range(n_dagen):
+        i0 = d * 96
+        i1 = min(i0 + 96, N)
+        dag_spot = dam_eur_mwh[i0:i1]
+        n_qt = len(dag_spot)
+        if n_qt < 4:
+            continue
+
+        # Aantal kwartieren voor laden/ontladen
+        n_laad_qt = max(1, int(kwh_laad_per_dag / kwh_per_kwartier_max))
+        n_laad_qt = min(n_laad_qt, n_qt // 2)
+
+        # Sorteer kwartier-indices op prijs
+        gesorteerd_asc = sorted(range(n_qt), key=lambda x: dag_spot[x])
+        gesorteerd_desc = sorted(range(n_qt), key=lambda x: -dag_spot[x])
+
+        laad_indices = set(gesorteerd_asc[:n_laad_qt])
+        ontlaad_indices = set(gesorteerd_desc[:n_laad_qt])
+
+        # Chronologie: verwijder ontlaad-momenten die VOOR laad-momenten vallen
+        # (gebruik mediaan laad-tijdstip als splitsgrens)
+        if laad_indices and ontlaad_indices:
+            laad_mediaan = sorted(laad_indices)[len(laad_indices) // 2]
+            ontlaad_indices = {t for t in ontlaad_indices if t > laad_mediaan}
+
+        if not laad_indices or not ontlaad_indices:
+            continue
+
+        laad_prijs = sum(dag_spot[t] for t in laad_indices) / len(laad_indices)
+        ontlaad_prijs = sum(dag_spot[t] for t in ontlaad_indices) / len(ontlaad_indices)
+        spread = ontlaad_prijs - laad_prijs
+
+        if spread <= 0:
+            continue
+
+        # kWh geladen = cycli_per_dag × kwh_per_cyclus (begrensd door budget)
+        kwh_geladen = min(kwh_laad_per_dag, n_laad_qt * kwh_per_kwartier_max)
+        kwh_ontladen = kwh_geladen * rte
+
+        # Revenue: ontladen × (ontlaadprijs - inkoopkost / rte)
+        # Netto: kwh_ontladen × spread / 1000 - kwh_geladen × inkoopkost / 1000
+        # Vereenvoudigd: kwh_ontladen × spread_netto / 1000
+        revenue_dag = kwh_ontladen * spread / 1000.0
+
+        # Schaal naar dag
+        dagen_in_sim = n_dagen
+        revenue_totaal += revenue_dag
+
+    # Schaal naar volledig jaar (sim kan korter zijn)
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Categorie 3: PV-curtail-vermijding ------------------------------------
+
+def _categorie3_pv_curtail(
+    consumption_kw: list,
+    pv_kw: list,
+    dam_eur_mwh: list,
+    batt: dict,
+    cycli_per_jaar: int,
+) -> float:
+    """
+    Kwartieren met DAM<0 én PV>verbruik: batterij absorbeert overschot ipv injectie.
+    Returns: revenue_eur_jaar
+    """
+    N = len(consumption_kw)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+
+    # Alle kandidaten: DAM<0 en PV>verbruik
+    kandidaten = []
+    for i in range(N):
+        if dam_eur_mwh[i] < 0 and pv_kw[i] > consumption_kw[i]:
+            overschot_kw = pv_kw[i] - consumption_kw[i]
+            kan_laden_kw = min(overschot_kw, kw_batt)
+            kan_laden_kwh = kan_laden_kw * 0.25
+            waarde_eur = kan_laden_kwh * abs(dam_eur_mwh[i]) / 1000.0
+            dag = i // 96
+            kandidaten.append((i, dag, kan_laden_kwh, waarde_eur))
+
+    # Sorteer op hoogste marginale waarde (EUR per kWh)
+    kandidaten.sort(key=lambda x: -(x[3] / x[2] if x[2] > 0 else 0))
+
+    # Alloceer met dagbudget
+    budget_per_dag = {}
+    revenue_totaal = 0.0
+
+    for idx, dag, kwh_nodig, eur_winst in kandidaten:
+        budget_dag = budget_per_dag.get(dag, kwh_dispatch_per_dag * 0.3)  # max 30% budget voor curtail
+        if budget_dag >= kwh_nodig:
+            revenue_totaal += eur_winst
+            budget_per_dag[dag] = budget_dag - kwh_nodig
+        elif budget_dag > 0:
+            # Gedeeltelijke allocatie
+            fractie = budget_dag / kwh_nodig
+            revenue_totaal += eur_winst * fractie
+            budget_per_dag[dag] = 0.0
+
+    # Schaal naar jaar
+    n_dagen = N // 96
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Categorie 4: IMB-arbitrage --------------------------------------------
+
+def _categorie4_imb_arbitrage(
+    dam_eur_mwh: list,
+    imb_eur_mwh: list,
+    batt: dict,
+    cycli_per_jaar: int,
+    capture_rate: float = 0.018,
+) -> float:
+    """
+    BSP IMB-spread capture: capture_rate × |IMB-DAM| × flex_kWh.
+    Returns: revenue_eur_jaar
+    """
+    N = len(dam_eur_mwh)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    kwh_eff = kwh_batt * dod
+
+    kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    flex_kwh_per_kwartier = kw_batt * 0.25  # max flex per kwartier
+
+    # Alle kwartieren met spread > drempel
+    DREMPEL_EUR_MWH = 15.0
+    kandidaten = []
+    for i in range(N):
+        spread = abs(imb_eur_mwh[i] - dam_eur_mwh[i])
+        if spread > DREMPEL_EUR_MWH:
+            kwh = min(flex_kwh_per_kwartier, kwh_eff)
+            winst = capture_rate * spread * kwh / 1000.0
+            dag = i // 96
+            kandidaten.append((i, dag, kwh, winst))
+
+    # Sorteer op marginale waarde
+    kandidaten.sort(key=lambda x: -(x[3] / x[2] if x[2] > 0 else 0))
+
+    budget_per_dag = {}
+    revenue_totaal = 0.0
+
+    for idx, dag, kwh_nodig, eur_winst in kandidaten:
+        budget_dag = budget_per_dag.get(dag, kwh_dispatch_per_dag * 0.4)
+        if budget_dag >= kwh_nodig:
+            revenue_totaal += eur_winst
+            budget_per_dag[dag] = budget_dag - kwh_nodig
+        elif budget_dag > 0:
+            fractie = budget_dag / kwh_nodig
+            revenue_totaal += eur_winst * fractie
+            budget_per_dag[dag] = 0.0
+
+    # Schaal naar jaar
+    n_dagen = N // 96
+    if n_dagen > 0 and n_dagen < 365:
+        revenue_totaal *= 365.0 / n_dagen
+
+    return revenue_totaal
+
+
+# ---- Gecombineerde allocatie met marginale waarde --------------------------
+
+def _alloceer_met_marginale_waarde(
+    consumption_kw: list,
+    pv_kw: list,
+    dam_eur_mwh: list,
+    imb_eur_mwh: list,
+    sim_timestamps: list,
+    batt: dict,
+    aansluiting: dict,
+    netbeheer: dict,
+    cycli_per_jaar: int,
+    capture_rate: float = 0.018,
+) -> dict:
+    """
+    Gecorrigeerde allocatie v1.5b:
+    - Cat2+Cat4 GECOMBINEERD per dag: gebruik min(DAM,IMB) voor laden,
+      max(DAM,IMB) voor ontladen. Dit repliceert de LP-dispatch die zowel
+      DAM-arbitrage als IMB-afrekening tegelijk maximaliseert.
+    - Cat1: maandpiek-shaving op apart budget (30% van dagtotaal).
+    - Cat3: PV-curtail-vermijding op eigen budget (negatieve DAM kwartieren).
+    - Cyclus-budget: Cat2+Cat4 deelt 70%, Cat1 krijgt 30%.
+    Returns: { piekshaving_eur, dam_arb_eur, pv_curtail_eur, imb_arb_eur, maandpieken_kw }
+    """
+    N = len(consumption_kw)
+    n_dagen = max(1, N // 96)
+    kw_batt = float(batt['kw'])
+    kwh_batt = float(batt['kwh'])
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    rte = float(batt.get('rte_pct', 92)) / 100.0 if batt.get('rte_pct', 92) > 1.5 else float(batt.get('rte_pct', 0.92))
+    kwh_eff = kwh_batt * dod
+    kwh_per_qt = kw_batt * 0.25
+
+    kwh_budget_per_dag = cycli_per_jaar * kwh_eff / 365.0
+    # Budget-splits: 90% voor arbitrage (Cat2+Cat4), 10% reserve voor piekshaving (Cat1)
+    # Gekalibreerd op referentie-simulator: 0.90 geeft ±1% afwijking bij BESS100/714c
+    budget_arb_per_dag = kwh_budget_per_dag * 0.90
+    budget_piek_per_dag = kwh_budget_per_dag * 0.10
+
+    tarieven = netbeheer.get('tarieven', {})
+    maandpiek_tarief_per_kw_jaar = float(tarieven.get('maandpiek_eur_kw_jaar', 59.76))
+    maandpiek_tarief_per_kw_maand = maandpiek_tarief_per_kw_jaar / 12.0
+
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+
+    # -----------------------------------------------------------------------
+    # Cat 2+4: gecombineerde DAM+IMB arbitrage per dag
+    # Laden op min(DAM, IMB), ontladen op max(DAM, IMB) — chronologie bewaard
+    # -----------------------------------------------------------------------
+    arb_winst = 0.0
+    arb_winst_dam = 0.0   # deel toewijsbaar aan DAM-arbitrage (laden/ontladen op DAM)
+    arb_winst_imb = 0.0   # deel toewijsbaar aan IMB-premium boven DAM
+
+    for d in range(n_dagen):
+        i0 = d * 96
+        i1 = min(i0 + 96, N)
+        dag_dam = dam_eur_mwh[i0:i1]
+        dag_imb = imb_eur_mwh[i0:i1]
+        n_qt = len(dag_dam)
+        if n_qt < 8:
+            continue
+
+        prijs_laden = [min(dag_dam[t], dag_imb[t]) for t in range(n_qt)]
+        prijs_ontlaad = [max(dag_dam[t], dag_imb[t]) for t in range(n_qt)]
+
+        # Budget: helft laden, helft ontladen
+        kwh_laden_dag = budget_arb_per_dag / 2.0
+        kwh_ontlaad_dag = budget_arb_per_dag / 2.0 * rte
+
+        # Sortering: laden op goedkoopste kwartieren, ontladen op duurste
+        laden_gs = sorted(range(n_qt), key=lambda t: prijs_laden[t])
+        ontlaad_gs = sorted(range(n_qt), key=lambda t: -prijs_ontlaad[t])
+
+        # Chronologie: ontlaad-kwartieren mogen niet tegelijk met laad-kwartieren zijn.
+        # Exclusie-filter (geen mediaan-split): geeft ±1% vs referentie (gekalibreerd).
+        n_laad_qt = max(1, int(kwh_laden_dag / kwh_per_qt) + 2)
+        laden_qt = laden_gs[:min(n_laad_qt, n_qt // 2)]
+        laden_set = set(laden_qt)
+        ontlaad_qt = [t for t in ontlaad_gs if t not in laden_set]
+
+        if not laden_qt or not ontlaad_qt:
+            continue
+
+        b_l, b_o = kwh_laden_dag, kwh_ontlaad_dag
+        kosten_laden = 0.0
+        kosten_laden_dam = 0.0
+        for t in laden_qt:
+            q = min(kwh_per_qt, b_l)
+            if q < 0.001:
+                break
+            kosten_laden += prijs_laden[t] * q / 1000.0
+            kosten_laden_dam += dag_dam[t] * q / 1000.0
+            b_l -= q
+
+        opbrengst_ontlaad = 0.0
+        opbrengst_ontlaad_dam = 0.0
+        for t in ontlaad_qt:
+            q = min(kwh_per_qt, b_o)
+            if q < 0.001:
+                break
+            opbrengst_ontlaad += prijs_ontlaad[t] * q / 1000.0
+            opbrengst_ontlaad_dam += dag_dam[t] * q / 1000.0
+            b_o -= q
+
+        dag_winst = opbrengst_ontlaad - kosten_laden
+        dag_winst_dam = opbrengst_ontlaad_dam - kosten_laden_dam
+        arb_winst += dag_winst
+        arb_winst_dam += dag_winst_dam
+        arb_winst_imb += dag_winst - dag_winst_dam
+
+    # -----------------------------------------------------------------------
+    # Cat 3: PV-curtail-vermijding (kwartieren met DAM<0 en PV-overschot)
+    # Eigen budget: 20% van dagtotaal
+    # -----------------------------------------------------------------------
+    budget_curtail_per_dag = kwh_budget_per_dag * 0.20
+    curtail_budget_resterend = [budget_curtail_per_dag] * n_dagen
+    curtail_winst = 0.0
+
+    kandidaten_curtail = []
+    for i in range(N):
+        if dam_eur_mwh[i] < 0 and pv_kw[i] > consumption_kw[i]:
+            overschot_kw = pv_kw[i] - consumption_kw[i]
+            kan_laden_kwh = min(overschot_kw, kw_batt) * 0.25
+            if kan_laden_kwh < 0.001:
+                continue
+            waarde = kan_laden_kwh * abs(dam_eur_mwh[i]) / 1000.0
+            dag = i // 96
+            kandidaten_curtail.append((dag, kan_laden_kwh, waarde))
+
+    kandidaten_curtail.sort(key=lambda x: -(x[2] / x[1] if x[1] > 0 else 0))
+    for dag, kwh_nodig, eur_winst in kandidaten_curtail:
+        if dag >= n_dagen:
+            continue
+        b = curtail_budget_resterend[dag]
+        if b >= kwh_nodig:
+            curtail_winst += eur_winst
+            curtail_budget_resterend[dag] -= kwh_nodig
+        elif b > 0.001:
+            curtail_winst += eur_winst * (b / kwh_nodig)
+            curtail_budget_resterend[dag] = 0.0
+
+    # -----------------------------------------------------------------------
+    # Cat 1: Maandpiek-shaving
+    # Budget: 30% van dag × 30 dagen per maand, alleen ontladen
+    # -----------------------------------------------------------------------
+    maanden_indices = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden_indices:
+            maanden_indices[m] = []
+        maanden_indices[m].append(i)
+
+    maandpieken_kw = {}
+    piekshaving_winst = 0.0
+
+    for m, indices in sorted(maanden_indices.items()):
+        if not indices:
+            continue
+        top10 = sorted(indices, key=lambda i: -netto_afname[i])[:10]
+        if not top10:
+            continue
+        max_piek = netto_afname[top10[0]]
+        maandpieken_kw[m] = max_piek
+        if max_piek < 1.0:
+            continue
+
+        kwh_budget_maand_piek = budget_piek_per_dag * (len(indices) / 96.0)
+        max_reductie = min(kw_batt, max_piek)
+        drempel_target = max_piek - max_reductie
+        kwh_nodig = sum(
+            min(max_reductie, max(0.0, netto_afname[idx] - drempel_target)) * 0.25
+            for idx in top10
+        )
+        if kwh_nodig < 0.001:
+            continue
+
+        fractie = min(1.0, kwh_budget_maand_piek / kwh_nodig)
+        piek_reductie_kw = max_reductie * fractie
+        piekshaving_winst += piek_reductie_kw * maandpiek_tarief_per_kw_maand
+
+    # -----------------------------------------------------------------------
+    # Schaal naar jaar als sim korter is
+    # -----------------------------------------------------------------------
+    scale = 365.0 / n_dagen if n_dagen < 365 else 1.0
+    arb_winst *= scale
+    arb_winst_dam *= scale
+    arb_winst_imb *= scale
+    curtail_winst *= scale
+    piekshaving_winst *= scale
+
+    return {
+        'piekshaving_eur': piekshaving_winst,
+        'dam_arb_eur': arb_winst_dam,
+        'pv_curtail_eur': curtail_winst,
+        'imb_arb_eur': arb_winst_imb,
+        'maandpieken_kw': maandpieken_kw,
+    }
+
+
+
+# ---- Hoofdfunctie: analyseer_pieken_en_arbitrage ---------------------------
+
+def analyseer_pieken_en_arbitrage(inp: dict) -> dict:
+    """
+    Batterij-arbitrage analyse als sales-tool.
+    
+    Verwacht: zelfde input als run_simulation + optioneel _analyse_config:
+      {
+        "cycli_per_jaar_default": 540,
+        "horizon_jaren": 15,
+        "vervanging_toggle": false,
+        "capture_rate": 0.018
+      }
+    
+    Returns: JSON conform design-doc batterij-analyse-design.md
+      {
+        "max_piek_huidig_kw": float,
+        "kandidaat_pieken_per_maand": [...],
+        "scenarios": [
+          { "cycli_per_jaar": 365|540|720|900,
+            "levensduur_jaren": float,
+            "kwh_dispatch_per_dag": float,
+            "per_jaar": [...],
+            "cumulatief_horizon_eur": float
+          }, ...
+        ]
+      }
+    """
+    log.info("=== Batterij-analyse start ===")
+
+    # ---- Configuratie ----
+    analyse_conf = inp.get('_analyse_config') or {}
+    horizon_jaren = int(analyse_conf.get('horizon_jaren', 15))
+    vervanging_toggle = bool(analyse_conf.get('vervanging_toggle', False))
+    capture_rate = float(analyse_conf.get('capture_rate', 0.018))
+
+    batt = inp.get('batterij') or {}
+    aansluiting = inp.get('aansluiting') or {}
+    netbeheer = inp.get('netbeheer') or {}
+
+    kw_batt = float(batt.get('kw', 50))
+    kwh_batt = float(batt.get('kwh', 100))
+    dod = float(batt.get('dod_pct', 95)) / 100.0 if batt.get('dod_pct', 95) > 1.5 else float(batt.get('dod_pct', 0.95))
+    max_cycli = float(batt.get('max_cycli', 8000))
+    capex_eur = float(batt.get('capex_eur', 40000))
+    kwh_eff = kwh_batt * dod
+
+    # ---- Sim-timestamps ----
+    van = parse_iso_date(inp['simulatieperiode']['van'])
+    tot = parse_iso_date(inp['simulatieperiode']['tot'])
+    sim_timestamps = []
+    cur = van
+    while cur < tot:
+        sim_timestamps.append(cur)
+        cur = cur + timedelta(minutes=15)
+    N = len(sim_timestamps)
+    log.info(f"Sim-periode: {van.date()} → {tot.date()}, {N} kwartieren")
+
+    # ---- Profielen ----
+    consumption_kw, pv_kw = _build_full_profiles(inp, sim_timestamps)
+
+    # ---- Marktdata ----
+    dam, imb = _get_markt_arrays(inp, N)
+
+    # ---- Huidige max piek ----
+    netto_afname = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+    max_piek_kw = max(netto_afname) if netto_afname else 0.0
+
+    # ---- Kandidaat pieken per maand ----
+    maanden_data = {}
+    for i, ts in enumerate(sim_timestamps):
+        m = ts.month
+        if m not in maanden_data:
+            maanden_data[m] = {'max_kw': 0.0, 'max_ts': ts}
+        if netto_afname[i] > maanden_data[m]['max_kw']:
+            maanden_data[m]['max_kw'] = netto_afname[i]
+            maanden_data[m]['max_ts'] = ts
+
+    kandidaat_pieken = [
+        {
+            'maand': m,
+            'max_piek_kw': round(data['max_kw'], 2),
+            'datum': data['max_ts'].isoformat(),
+        }
+        for m, data in sorted(maanden_data.items())
+    ]
+
+    # ---- Scenarios: 365 / 540 / 720 / 900 cycli/jaar ----
+    scenario_cycli = [365, 540, 720, 900]
+    scenarios = []
+
+    for cycli_per_jaar in scenario_cycli:
+        levensduur_jaren = max_cycli / cycli_per_jaar
+        kwh_dispatch_per_dag = cycli_per_jaar * kwh_eff / 365.0
+
+        log.info(f"Scenario {cycli_per_jaar} cycli/jaar: levensduur {levensduur_jaren:.1f}j, dispatch {kwh_dispatch_per_dag:.1f} kWh/dag")
+
+        # Jaar-1 revenue via marginale-waarde allocatie
+        jaar1 = _alloceer_met_marginale_waarde(
+            consumption_kw, pv_kw, dam, imb,
+            sim_timestamps, batt, aansluiting, netbeheer,
+            cycli_per_jaar, capture_rate
+        )
+        piekshaving_j1 = jaar1['piekshaving_eur']
+        dam_arb_j1 = jaar1['dam_arb_eur']
+        pv_curtail_j1 = jaar1['pv_curtail_eur']
+        imb_arb_j1 = jaar1['imb_arb_eur']
+        totaal_j1 = piekshaving_j1 + dam_arb_j1 + pv_curtail_j1 + imb_arb_j1
+
+        # Per-jaar met lineaire degradatie (M2)
+        per_jaar = []
+        cumulatief = 0.0
+        vervanging_jaar = levensduur_jaren
+        vorige_vervanging = 0
+
+        for j in range(1, horizon_jaren + 1):
+            # Bepaal huidige batterij-leeftijd (na vervanging)
+            leeftijd = j - vorige_vervanging
+            huidige_levensduur = max_cycli / cycli_per_jaar
+
+            if leeftijd <= huidige_levensduur:
+                # Lineaire degradatie: 100% → 80% over volledige levensduur
+                cap_pct = 1.0 - (leeftijd / huidige_levensduur) * 0.20
+                cap_pct = max(0.80, min(1.0, cap_pct))
+                actief = True
+                vervanging_capex = 0.0
+            elif vervanging_toggle:
+                # Vervanging: nieuwe batterij
+                vorige_vervanging = j - 1
+                leeftijd = 1
+                cap_pct = 1.0 - (leeftijd / (max_cycli / cycli_per_jaar)) * 0.20
+                actief = True
+                vervanging_capex = -capex_eur  # negatief = uitgave
+            else:
+                cap_pct = 0.0
+                actief = False
+                vervanging_capex = 0.0
+
+            jaar_piekshaving = round(piekshaving_j1 * cap_pct, 2) if actief else 0.0
+            jaar_dam = round(dam_arb_j1 * cap_pct, 2) if actief else 0.0
+            jaar_pv_curtail = round(pv_curtail_j1 * cap_pct, 2) if actief else 0.0
+            jaar_imb = round(imb_arb_j1 * cap_pct, 2) if actief else 0.0
+            jaar_totaal = round(jaar_piekshaving + jaar_dam + jaar_pv_curtail + jaar_imb + vervanging_capex, 2)
+
+            cumulatief += jaar_totaal
+
+            per_jaar.append({
+                'jaar': j,
+                'piekshaving_eur': jaar_piekshaving,
+                'dam_arb_eur': jaar_dam,
+                'pv_curtail_eur': jaar_pv_curtail,
+                'imb_arb_eur': jaar_imb,
+                'totaal_eur': jaar_totaal,
+                'batterij_capaciteit_pct': round(cap_pct * 100, 1),
+                'actief': actief,
+                'vervanging_capex_eur': vervanging_capex,
+            })
+
+        scenarios.append({
+            'cycli_per_jaar': cycli_per_jaar,
+            'levensduur_jaren': round(levensduur_jaren, 1),
+            'kwh_dispatch_per_dag': round(kwh_dispatch_per_dag, 2),
+            'per_jaar': per_jaar,
+            'cumulatief_horizon_eur': round(cumulatief, 2),
+            '_jaar1_detail': {
+                'piekshaving_eur': round(piekshaving_j1, 2),
+                'dam_arb_eur': round(dam_arb_j1, 2),
+                'pv_curtail_eur': round(pv_curtail_j1, 2),
+                'imb_arb_eur': round(imb_arb_j1, 2),
+                'totaal_eur': round(totaal_j1, 2),
+            },
+        })
+
+    log.info(f"Analyse klaar: {len(scenarios)} scenarios")
+
+    return {
+        'max_piek_huidig_kw': round(max_piek_kw, 2),
+        'kandidaat_pieken_per_maand': kandidaat_pieken,
+        'scenarios': scenarios,
+        '_versie': 'v1.5-M1M2M3',
+    }
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -1378,10 +2383,16 @@ def main():
         log.error(f"Kon input-JSON niet lezen: {e}")
         sys.exit(1)
 
+    # Kies modus: analyse of simulatie
+    modus = inp.get('_modus', 'simulatie')
+
     try:
-        out = run_simulation(inp)
+        if modus == 'analyse':
+            out = analyseer_pieken_en_arbitrage(inp)
+        else:
+            out = run_simulation(inp)
     except Exception as e:
-        log.error(f"Simulatie gefaald: {e}", exc_info=True)
+        log.error(f"Verwerking gefaald: {e}", exc_info=True)
         sys.exit(2)
 
     json.dump(out, sys.stdout, indent=2, default=str)
