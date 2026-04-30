@@ -108,6 +108,23 @@ const PROFIELEN = [
   { naam:'horeca',     beschrijving:'Horeca — middaglunch + avondspits' },
 ];
 
+// Gemeenten laden uit data/gemeenten.json
+let GEMEENTEN_LIJST = [];
+const gemeentenPath = path.join(__dirname, 'data', 'gemeenten.json');
+if (fs.existsSync(gemeentenPath)) {
+  GEMEENTEN_LIJST = JSON.parse(fs.readFileSync(gemeentenPath, 'utf8'));
+  console.log(`[gemeenten] ${GEMEENTEN_LIJST.length} gemeenten geladen`);
+} else {
+  console.warn('[gemeenten] data/gemeenten.json niet gevonden');
+}
+
+// Bouw postcode→gemeente index voor snelle lookup
+const PC_GEMEENTE_INDEX = {};
+for (const g of GEMEENTEN_LIJST) {
+  if (!PC_GEMEENTE_INDEX[g.postcode]) PC_GEMEENTE_INDEX[g.postcode] = [];
+  PC_GEMEENTE_INDEX[g.postcode].push(g.gemeente);
+}
+
 const SCENARIOS_DB = {};
 const PROJECTEN_DB = new Set();
 
@@ -120,14 +137,12 @@ app.get('/api/postcode-grd', (req, res) => {
   if (!/^\d{4}$/.test(pc)) return res.status(400).json({ error:'postcode moet 4 cijfers zijn' });
   const hit = POSTCODE_GRD[pc] || POSTCODE_GRD[String(Math.floor(parseInt(pc)/10)*10)];
   if (!hit) return res.status(404).json({ error:`Postcode ${pc} niet gevonden` });
-  res.json({ postcode:pc, grd:hit.grd, dnb_volledig:hit.dnb, gemeenten:[] });
+  const gemeenten = (PC_GEMEENTE_INDEX[pc] || []);
+  res.json({ postcode:pc, grd:hit.grd, dnb_volledig:hit.dnb, gemeenten });
 });
 
 app.get('/api/gemeenten-lijst', (req, res) => {
-  const gemeenten = Object.entries(POSTCODE_GRD).slice(0,500).map(([pc,d]) => ({
-    postcode:pc, gemeente:`${d.grd} ${pc}`, dnb:d.dnb
-  }));
-  res.json({ gemeenten });
+  res.json({ gemeenten: GEMEENTEN_LIJST });
 });
 
 app.get('/api/regio-tarieven', (req, res) => {
