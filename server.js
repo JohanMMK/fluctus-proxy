@@ -440,7 +440,14 @@ function buildSimInput(ui) {
       tarief_overschrijding_injectie_eur_per_kw_jaar: 1.0,
     },
     contract: {
-      modus: (ui.contract && ui.contract.modus) || 'passthrough',
+      // Modus bepaalt of de klant nomineert (passthrough) of niet (forfaitair)
+      // Bij geen sturing of curtailment: geen nominatie → forfaitair (IMB markdown op injectie)
+      // Bij BSP-modus: wel nominatie → passthrough
+      modus: ui.pvInjStrategie === 'bsp_actief'
+        ? 'passthrough'
+        : (ui.pvInjStrategie === 'geen' || ui.pvInjStrategie === 'curtail_neg')
+          ? 'forfaitair'
+          : (ui.contract && ui.contract.modus) || 'passthrough',
       staffel,
       gsc_eur_mwh:  (ui.contract && ui.contract.gsc_eur_mwh)  || 11.0,
       wkk_eur_mwh:  (ui.contract && ui.contract.wkk_eur_mwh)  || 4.20,
