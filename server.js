@@ -260,10 +260,10 @@ app.get('/api/profiel', (req, res) => {
 app.get('/api/batterijen', (req, res) => res.json({ batterijen:BATTERIJEN }));
 
 app.post('/api/batterij-toevoegen', (req, res) => {
-  const { naam, kwh, kw, eta, capex } = req.body || {};
+  const { naam, kwh, kw, eta, dod, capex } = req.body || {};
   if (!naam||!kwh||!kw) return res.status(400).json({ error:'naam, kwh en kw zijn verplicht' });
   const id = naam.toLowerCase().replace(/\s+/g,'-');
-  BATTERIJEN.push({ id, naam, kwh:Number(kwh), kw:Number(kw), eta:Number(eta)||0.85, capex:Number(capex)||0, max_cycli:8000 });
+  BATTERIJEN.push({ id, naam, kwh:Number(kwh), kw:Number(kw), eta:Number(eta)||0.85, dod:Number(dod)||0.90, capex:Number(capex)||0, max_cycli:8000 });
   res.json({ ok:true, id, totaal:BATTERIJEN.length });
 });
 
