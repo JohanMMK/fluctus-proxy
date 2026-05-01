@@ -663,8 +663,10 @@ app.get('/entsoe-dayahead', async (req, res) => {
 
     console.log(`[entsoe] ${segments.length} segmenten (${from} → ${to})`);
 
+    // Gebruik Map om eerste waarde per timestamp te bewaren
+    // ENTSO-E A44 voor BE→BE geeft 1 prijs per uur/kwartier
+    // Meerdere TimeSeries zijn verschillende periodes in hetzelfde XML-document
     const byTime = new Map();
-    const countByTime = new Map();
 
     for (const seg of segments) {
       const periodStart = seg.from.replace(/-/g,'') + '0000';
@@ -704,8 +706,8 @@ app.get('/entsoe-dayahead', async (req, res) => {
             const pos = parseInt(m[1]) - 1;
             const t   = start.getTime() + pos * res_min * 60000;
             const v   = parseFloat(m[2]);
-            byTime.set(t, (byTime.get(t) || 0) + v);
-            countByTime.set(t, (countByTime.get(t) || 0) + 1);
+            // Eerste waarde per timestamp bewaren (niet gemiddelde)
+            if (!byTime.has(t)) byTime.set(t, v);
           });
         });
 
@@ -714,7 +716,7 @@ app.get('/entsoe-dayahead', async (req, res) => {
     }
 
     const points = Array.from(byTime.entries())
-      .map(([t, sum]) => ({ t, v: Math.round(sum / countByTime.get(t) * 100) / 100 }))
+      .map(([t, v]) => ({ t, v: Math.round(v * 100) / 100 }))
       .sort((a, b) => a.t - b.t);
 
     console.log(`[entsoe] totaal ${points.length} punten`);
