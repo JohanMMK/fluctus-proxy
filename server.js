@@ -666,8 +666,7 @@ app.get('/elia-renewable', async (req, res) => {
   try {
     const dsId = dsIdMap[dataset];
     // Haal data op met paginering (Elia max limit=100)
-    // Filter op PT30M resolutie — halveert aantal records tov PT15M
-    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'%20AND%20resolutioncode%3D'PT30M'&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
     const url = baseUrl + '&limit=100&offset=0';
     // Pagineer over alle records (Elia max 100 per call)
     const byTime2 = new Map();
