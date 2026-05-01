@@ -668,15 +668,27 @@ app.get('/elia-renewable', async (req, res) => {
     const dsId = dsIdMap[dataset];
     // Haal data op met paginering (Elia max limit=100)
     // Gebruik Elia group_by API om per kwartier te aggregeren over alle regio's
-    // Dit geeft 1 record per kwartier = veel minder data
-    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&group_by=datetime&select=datetime,sum(measured)%20as%20measured&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+    // Beperk tot max 30 dagen per call om timeout te vermijden
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
+    const maxDays  = 30;
+    const maxTo    = new Date(Math.min(toDate.getTime(), fromDate.getTime() + maxDays * 86400000));
+    const toStr    = maxTo.toISOString().slice(0,10);
+    if (toStr !== to) console.log(`[elia-renewable/${dataset}] Periode beperkt tot ${from} → ${toStr} (max ${maxDays} dagen)`);
+    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${toStr}T23%3A45%3A00'&group_by=datetime&select=datetime,sum(measured)%20as%20measured&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
     const url = baseUrl + '&limit=100&offset=0';
     // Pagineer over alle records (Elia max 100 per call)
+    // Stop na 25 seconden en stuur wat we hebben (Railway timeout = 30s)
     const byTime2 = new Map();
     let offset = 0;
     let totalFetched = 0;
     let debugDone = false;
+    const startTime = Date.now();
     while (true) {
+      if (Date.now() - startTime > 25000) {
+        console.log(`[elia-renewable/${dataset}] Timeout na 25s — ${totalFetched} records opgehaald`);
+        break;
+      }
       const pageUrl = baseUrl + `&limit=100&offset=${offset}`;
       const r = await fetch(pageUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
       if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
