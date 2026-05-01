@@ -822,9 +822,11 @@ app.get('/explanation', async (req, res) => {
   if (!chartId) return res.status(400).json({ error: 'chartId verplicht' });
   try {
     const { data } = await githubRead(`fluctus-explanation-${chartId}.json`);
-    const today = new Date().toISOString().slice(0,10);
-    const cached = data.date === today;
-    res.json({ cached, date: data.date, text: data.text, reason: cached ? null : 'verouderd' });
+    // Cache geldig voor 6 uur
+    const now = Date.now();
+    const savedAt = data.savedAt ? new Date(data.savedAt).getTime() : 0;
+    const cached = (now - savedAt) < 6 * 3600 * 1000;
+    res.json({ cached, date: data.date, text: data.text, reason: cached ? null : 'ouder dan 6u' });
   } catch (e) {
     res.json({ cached: false, reason: 'niet gevonden', text: null });
   }
@@ -869,7 +871,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
     const json = await r.json();
     const text = json.content?.[0]?.text || '';
     const today = new Date().toISOString().slice(0, 10);
-    const data = { date: today, chartId, text };
+    const data = { date: today, chartId, text, savedAt: new Date().toISOString() };
 
     // Sla op in GitHub
     try {
