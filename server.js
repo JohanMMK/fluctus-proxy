@@ -644,6 +644,11 @@ app.get('/entsoe-dayahead', async (req, res) => {
     const points = Array.from(byTime.entries())
       .map(([t, sum]) => ({ t, v: Math.round(sum / countByTime.get(t) * 100) / 100 }))
       .sort((a, b) => a.t - b.t);
+    console.log(`[entsoe] ${points.length} punten, ${tsMatches.length} TimeSeries blokken`);
+    if (points.length === 0) {
+      // Log de XML structuur voor debug
+      console.log('[entsoe] XML sample:', xml.slice(0, 500));
+    }
     res.json({ spot: points });
   } catch (e) {
     console.error('[entsoe-dayahead]', e.message);
