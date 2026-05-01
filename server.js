@@ -842,8 +842,14 @@ app.all('/claude-explain-refresh', async (req, res) => {
 
   try {
     const prompt = context
-      ? `Je bent een energiemarkt-expert voor Fluctus.net. Geef een beknopte (3-5 zinnen) Nederlandstalige interpretatie van deze marktdata voor een grafiek met id "${chartId}": ${context}`
-      : `Geef een algemene uitleg van grafiek "${chartId}" in de Fluctus marktdata dashboard.`;
+      ? `Je bent een energiemarkt-expert voor Fluctus.net CVSO (België). ` +
+        `De volgende marktdata is HISTORISCHE data uit het verleden — geen toekomstdata. ` +
+        `Geef een beknopte (4-6 zinnen) Nederlandstalige analyse in twee delen: ` +
+        `1) Wat zie je in de data (prijsniveaus, pieken, dalen, spreads)? ` +
+        `2) Welke bekende marktfactoren verklaren dit (seizoen, hernieuwbare productie, Europese gasprijs, nucleaire beschikbaarheid, weekend/weekdag)? ` +
+        `Je mag algemene marktkennis gebruiken maar verzin geen specifieke nieuwsgebeurtenissen die je niet zeker weet. ` +
+        `Grafiek: ${chartId}. Data: ${context}`
+      : `Je bent een energiemarkt-expert voor Fluctus.net. Geef een algemene uitleg (3-5 zinnen, Nederlands) van wat grafiek "${chartId}" toont in het Fluctus marktdata dashboard.`;
 
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
