@@ -676,7 +676,10 @@ app.get('/entsoe-dayahead', async (req, res) => {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           const r = await fetch(url);
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          if (!r.ok) {
+            const errBody = await r.text();
+            throw new Error(`HTTP ${r.status}: ${errBody.slice(0,200)}`);
+          }
           xml = await r.text();
           break;
         } catch (e) {
