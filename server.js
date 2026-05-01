@@ -712,7 +712,7 @@ app.get('/entsoe-dayahead', async (req, res) => {
           if (!startM || !resM) return;
           const start   = new Date(startM[1]);
           const res_min = resM[1] === 'PT60M' ? 60 : 15;
-          const ptMs    = [...tsBlock.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>([\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)];
+          const ptMs    = [...tsBlock.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>(-?[\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)];
           ptMs.forEach(m => {
             const pos = parseInt(m[1]) - 1;
             const t   = start.getTime() + pos * res_min * 60000;
