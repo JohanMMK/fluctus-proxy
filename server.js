@@ -665,7 +665,9 @@ app.get('/elia-renewable', async (req, res) => {
   if (!dsIdMap[dataset]) return res.status(400).json({ error: `Onbekende dataset: ${dataset}` });
   try {
     const dsId = dsIdMap[dataset];
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=1000&offset=0&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+    // Filter op gridconnectiontype=Tso om dubbeltellingen met DSO te vermijden
+    // TSO-niveau aggregeert het nationaal net correct
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'%20AND%20gridconnectiontype%3D'Tso'&limit=1000&offset=0&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
     const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
     if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
     const json = await r.json();
