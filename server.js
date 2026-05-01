@@ -621,20 +621,29 @@ app.get('/entsoe-dayahead', async (req, res) => {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`ENTSO-E HTTP ${r.status}`);
     const xml = await r.text();
-    // Parse XML tijdreeks
-    const points = [];
-    const tsMatch = xml.match(/<start>(.*?)<\/start>/);
-    const resMatch = xml.match(/<resolution>(.*?)<\/resolution>/);
-    if (tsMatch && resMatch) {
-      const start = new Date(tsMatch[1]);
-      const res_min = resMatch[1] === 'PT60M' ? 60 : 15;
-      const ptMatches = [...xml.matchAll(/<Point>.*?<position>(\d+)<\/position>.*?<price\.amount>([\d.]+)<\/price\.amount>.*?<\/Point>/gs)];
-      ptMatches.forEach(m => {
+    // Parse XML tijdreeks — meerdere TimeSeries per periode, neem gemiddelde per timestamp
+    const byTime = new Map();
+    const countByTime = new Map();
+    const tsMatches = [...xml.matchAll(/<TimeSeries>[\s\S]*?<\/TimeSeries>/g)];
+    tsMatches.forEach(tsM => {
+      const tsBlock = tsM[0];
+      const startM = tsBlock.match(/<start>(.*?)<\/start>/);
+      const resM   = tsBlock.match(/<resolution>(.*?)<\/resolution>/);
+      if (!startM || !resM) return;
+      const start   = new Date(startM[1]);
+      const res_min = resM[1] === 'PT60M' ? 60 : 15;
+      const ptMs    = [...tsBlock.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>([\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)];
+      ptMs.forEach(m => {
         const pos = parseInt(m[1]) - 1;
-        const t = new Date(start.getTime() + pos * res_min * 60000);
-        points.push({ t: t.getTime(), v: parseFloat(m[2]) });
+        const t   = start.getTime() + pos * res_min * 60000;
+        const v   = parseFloat(m[2]);
+        byTime.set(t, (byTime.get(t) || 0) + v);
+        countByTime.set(t, (countByTime.get(t) || 0) + 1);
       });
-    }
+    });
+    const points = Array.from(byTime.entries())
+      .map(([t, sum]) => ({ t, v: Math.round(sum / countByTime.get(t) * 100) / 100 }))
+      .sort((a, b) => a.t - b.t);
     res.json({ spot: points });
   } catch (e) {
     console.error('[entsoe-dayahead]', e.message);
@@ -661,20 +670,19 @@ app.get('/elia-renewable', async (req, res) => {
       return res.json({ debug_fields: Object.keys(json.results[0]), sample: json.results[0] });
     }
     
-    // Zoek dynamisch het juiste productiemeting-veld
-    const sample = json.results?.[0] || {};
-    const valueField = ['windpowerestimate','measured','mostrecentforecast','upliftedproduction','totalvolume','generation']
-      .find(f => sample[f] !== undefined && sample[f] !== null && parseFloat(sample[f]) > 0);
-    console.log(`[elia-renewable/${dataset}] veld: ${valueField}, sample:`, JSON.stringify(sample).slice(0,150));
-    
-    // Dedupliceer op timestamp + regio (sommeer per kwartier)
-    const byTime = new Map();
+    // Gebruik 'measured' als primair veld (aanwezig in zowel wind als zon datasets)
+    // Sommeer over alle regio's/types per timestamp
+    const byTime2 = new Map();
     (json.results || []).forEach(row => {
       const t = new Date(row.datetime).getTime();
-      const v = parseFloat(valueField ? row[valueField] : 0) || 0;
-      byTime.set(t, (byTime.get(t) || 0) + v);
+      // measured = werkelijke productie, fallback naar mostrecentforecast
+      const v = parseFloat(row.measured ?? row.mostrecentforecast ?? row.windpowerestimate ?? 0) || 0;
+      byTime2.set(t, (byTime2.get(t) || 0) + v);
     });
-    const data = Array.from(byTime.entries()).map(([t,v]) => ({t,v})).sort((a,b) => a.t-b.t);
+    const data = Array.from(byTime2.entries())
+      .map(([t,v]) => ({t, v: Math.round(v * 10) / 10}))
+      .sort((a,b) => a.t-b.t);
+    console.log(`[elia-renewable/${dataset}] ${data.length} punten, gem=${data.length?Math.round(data.reduce((s,p)=>s+p.v,0)/data.length):0} MW`);
     res.json({ data });
   } catch (e) {
     console.error(`[elia-renewable/${dataset}]`, e.message);
