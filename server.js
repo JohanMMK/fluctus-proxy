@@ -495,14 +495,23 @@ const GITHUB_TOKEN      = process.env.GITHUB_TOKEN || '';
 
 // Helper: lees bestand van GitHub
 async function githubRead(filename) {
-  const url = `https://api.github.com/repos/${MARKET_DATA_OWNER}/${MARKET_DATA_REPO}/contents/${MARKET_DATA_PATH}/${filename}`;
-  const headers = { 'User-Agent': 'fluctus-proxy' };
+  // Stap 1: haal de sha op via de Contents API (werkt altijd, klein antwoord)
+  const apiUrl = `https://api.github.com/repos/${MARKET_DATA_OWNER}/${MARKET_DATA_REPO}/contents/${MARKET_DATA_PATH}/${filename}`;
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
   if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`GitHub read ${filename}: HTTP ${r.status}`);
-  const meta = await r.json();
-  const content = Buffer.from(meta.content, 'base64').toString('utf8');
-  return { data: JSON.parse(content), sha: meta.sha };
+  const metaResp = await fetch(apiUrl, { headers });
+  if (!metaResp.ok) throw new Error(`GitHub read ${filename}: HTTP ${metaResp.status}`);
+  const meta = await metaResp.json();
+  const sha = meta.sha;
+
+  // Stap 2: lees de inhoud via de raw URL (geen groottelimiet)
+  const rawUrl = `https://raw.githubusercontent.com/${MARKET_DATA_OWNER}/${MARKET_DATA_REPO}/main/${MARKET_DATA_PATH}/${filename}`;
+  const rawHeaders = { 'User-Agent': 'fluctus-proxy' };
+  if (GITHUB_TOKEN) rawHeaders['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const rawResp = await fetch(rawUrl, { headers: rawHeaders });
+  if (!rawResp.ok) throw new Error(`GitHub raw read ${filename}: HTTP ${rawResp.status}`);
+  const content = await rawResp.text();
+  return { data: JSON.parse(content), sha };
 }
 
 // Helper: schrijf bestand naar GitHub
