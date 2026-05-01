@@ -573,18 +573,34 @@ app.post('/cache-update', async (req, res) => {
 // ── GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD ─────────────────────────────
 // Haalt Elia imbalance SI-prijzen op (kwartierlijks)
 app.get('/elia-data', async (req, res) => {
-  const { from, to } = req.query;
+  const { from, to, debug } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
   try {
-    // Elia imbalance: ods032 = System Imbalance prijzen (SI1/SI2)
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
+    // Elia ods032 = System Imbalance — limit 100 per call, sorteer op datetime desc
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&order_by=datetime%20desc&timezone=UTC&include_links=false&include_app_metas=false`;
     const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
     if (!r.ok) { const t = await r.text(); throw new Error(`Elia imb HTTP ${r.status}: ${t.slice(0,100)}`); }
     const json = await r.json();
-    const imb = (json.results || []).map(row => ({
-      t: new Date(row.datetime).getTime(),
-      v: parseFloat(row.si1price ?? row.si1 ?? row.nrv ?? row.price ?? 0)
-    })).filter(p => !isNaN(p.v));
+    
+    // Debug: toon ruwe veldnamen
+    if (debug && json.results && json.results[0]) {
+      return res.json({ debug_fields: Object.keys(json.results[0]), sample: json.results[0] });
+    }
+    
+    // Zoek het correcte prijsveld dynamisch
+    const sample = json.results?.[0] || {};
+    const priceField = ['si1price','si1','nrv','price','systemimbalanceprice','imbalanceprice','miprice']
+      .find(f => sample[f] !== undefined && sample[f] !== null);
+    console.log(`[elia-data] veldnaam: ${priceField}, sample:`, JSON.stringify(sample).slice(0,200));
+    
+    // Dedupliceer op timestamp (neem eerste/hoogste waarde per kwartier)
+    const seen = new Map();
+    (json.results || []).forEach(row => {
+      const t = new Date(row.datetime).getTime();
+      const v = parseFloat(priceField ? row[priceField] : 0);
+      if (!isNaN(v) && !seen.has(t)) seen.set(t, v);
+    });
+    const imb = Array.from(seen.entries()).map(([t,v]) => ({t,v})).sort((a,b) => a.t-b.t);
     res.json({ imb });
   } catch (e) {
     console.error('[elia-data]', e.message);
