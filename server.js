@@ -650,7 +650,7 @@ app.get('/entsoe-dayahead', async (req, res) => {
       // Stuur XML terug als debug
       if (req.query.debug) return res.send(xml);
     }
-    res.json({ spot: points });
+    res.json({ spot: points, data: points }); // 'data' voor snippet compatibiliteit
   } catch (e) {
     console.error('[entsoe-dayahead]', e.message);
     res.status(500).json({ error: e.message });
