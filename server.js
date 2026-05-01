@@ -833,7 +833,9 @@ app.get('/explanation', async (req, res) => {
 // ── GET /claude-explain-refresh?chartId=<id>&context=<tekst> ────────────────
 // Genereert nieuwe AI-uitleg via Claude en slaat op in GitHub
 app.all('/claude-explain-refresh', async (req, res) => {
-  const { chartId, context } = req.query;
+  // Accepteer chartId uit query string OF request body (POST)
+  const chartId = req.query.chartId || req.body?.chartId;
+  const context = req.query.context || req.body?.context || req.body?.prompt;
   if (!chartId) return res.status(400).json({ error: 'chartId verplicht' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(503).json({ error: 'ANTHROPIC_API_KEY niet geconfigureerd' });
