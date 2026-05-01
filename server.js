@@ -188,7 +188,15 @@ const SCENARIOS_DB = {};
 const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
-app.get('/',       (req, res) => res.json({ status:'ok', version:'15.6', ts:new Date().toISOString(), markt_geladen: !!MARKT }));
+app.get('/',       (req, res) => res.json({
+  status:'ok', version:'15.6', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  market_config: {
+    owner: MARKET_DATA_OWNER,
+    repo: MARKET_DATA_REPO,
+    path: MARKET_DATA_PATH,
+    has_token: !!GITHUB_TOKEN
+  }
+}));
 app.get('/health', (req, res) => res.json({ status:'ok' }));
 
 app.get('/api/postcode-grd', (req, res) => {
@@ -612,12 +620,13 @@ app.get('/entsoe-dayahead', async (req, res) => {
 // Haalt Elia hernieuwbare productievolumes op
 app.get('/elia-renewable', async (req, res) => {
   const { dataset, from, to } = req.query;
-  // ods031 = wind, ods032 = solar (Elia dataset codes)
-  const dsMap = { wind: 'ods031', solar: 'ods032' };
-  const fieldMap = { wind: 'windpowerestimate', solar: 'upliftedproduction' };
-  if (!dsMap[dataset]) return res.status(400).json({ error: 'dataset moet wind of solar zijn' });
+  // Accepteer zowel 'wind'/'solar' als directe Elia dataset IDs 'ods031'/'ods032'
+  const dsIdMap  = { wind: 'ods031', solar: 'ods032', ods031: 'ods031', ods032: 'ods032' };
+  const fieldMap = { wind: 'windpowerestimate', solar: 'upliftedproduction',
+                     ods031: 'windpowerestimate', ods032: 'upliftedproduction' };
+  if (!dsIdMap[dataset]) return res.status(400).json({ error: `Onbekende dataset: ${dataset}` });
   try {
-    const dsId = dsMap[dataset];
+    const dsId = dsIdMap[dataset];
     const field = fieldMap[dataset];
     const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
     const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
