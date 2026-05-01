@@ -663,6 +663,17 @@ app.get('/entsoe-dayahead', async (req, res) => {
 
     console.log(`[entsoe] ${segments.length} segmenten (${from} → ${to})`);
 
+    // Debug: stuur ruwe XML terug voor eerste segment
+    if (req.query.debug) {
+      const seg0 = segments[0];
+      const p0 = seg0.from.replace(/-/g,'') + '0000';
+      const p1 = seg0.to.replace(/-/g,'') + '2300';
+      const debugUrl = `https://web-api.tp.entsoe.eu/api?securityToken=${process.env.ENTSOE_TOKEN||''}&documentType=A44&in_Domain=10YBE----------2&out_Domain=10YBE----------2&periodStart=${p0}&periodEnd=${p1}`;
+      const dr = await fetch(debugUrl);
+      const xml = await dr.text();
+      return res.send(xml.slice(0, 3000));
+    }
+
     // Gebruik Map om eerste waarde per timestamp te bewaren
     // ENTSO-E A44 voor BE→BE geeft 1 prijs per uur/kwartier
     // Meerdere TimeSeries zijn verschillende periodes in hetzelfde XML-document
