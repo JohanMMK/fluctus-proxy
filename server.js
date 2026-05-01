@@ -870,7 +870,12 @@ app.all('/claude-explain-refresh', async (req, res) => {
 
     if (!r.ok) throw new Error(`Anthropic HTTP ${r.status}`);
     const json = await r.json();
-    const text = json.content?.[0]?.text || '';
+    let text = json.content?.[0]?.text || '';
+    // Verwijder interne zoekprocessen - bewaar alleen de analyse vanaf "1)"
+    const match = text.match(/(?:\*\*1\)|^1\))/m);
+    if (match) text = text.slice(text.indexOf(match[0]));
+    // Verwijder ook <search> blokken
+    text = text.replace(/<search>[\s\S]*?<\/search>/g, '').trim();
     const today = new Date().toISOString().slice(0, 10);
     const data = { date: today, chartId, text, savedAt: new Date().toISOString() };
 
