@@ -479,7 +479,10 @@ function buildSimInput(ui) {
 // GitHub market-data repo configuratie
 const MARKET_DATA_OWNER = process.env.GITHUB_OWNER || 'JohanMMK';
 const MARKET_DATA_REPO  = process.env.GITHUB_REPO  || 'market-data';
-const MARKET_DATA_PATH  = process.env.GITHUB_PATH  || 'data';
+// GITHUB_PATH is het volledige pad van het primaire cachebestand (bv. 'data/fluctus-cache.json')
+// De map wordt daaruit afgeleid ('data')
+const _GITHUB_PATH_RAW  = process.env.GITHUB_PATH  || 'data/fluctus-cache.json';
+const MARKET_DATA_PATH  = _GITHUB_PATH_RAW.includes('/') ? _GITHUB_PATH_RAW.split('/').slice(0,-1).join('/') : _GITHUB_PATH_RAW;
 const GITHUB_TOKEN      = process.env.GITHUB_TOKEN || '';
 
 // Helper: lees bestand van GitHub
@@ -523,11 +526,13 @@ app.get('/cache-read', async (req, res) => {
   const ds = req.query.dataset;
   if (!DATASET_FILES[ds]) return res.status(400).json({ error: `Onbekende dataset: ${ds}` });
   try {
+    console.log(`[cache-read] ${ds} → ${DATASET_FILES[ds]} (owner=${MARKET_DATA_OWNER}, repo=${MARKET_DATA_REPO}, path=${MARKET_DATA_PATH})`);
     const { data } = await githubRead(DATASET_FILES[ds]);
+    console.log(`[cache-read] ${ds} OK — type=${Array.isArray(data)?'array['+data.length+']':typeof data}`);
     res.json(data);
   } catch (e) {
-    console.error(`[cache-read] ${ds}:`, e.message);
-    res.status(404).json({ error: e.message });
+    console.error(`[cache-read] ${ds} FOUT:`, e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
@@ -554,14 +559,14 @@ app.get('/elia-data', async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
   try {
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime>='${from}'%20AND%20datetime<='${to}T23:45:00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
-    if (!r.ok) throw new Error(`Elia HTTP ${r.status}`);
+    // Elia imbalance: ods032 = System Imbalance prijzen (SI1/SI2)
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+    if (!r.ok) { const t = await r.text(); throw new Error(`Elia imb HTTP ${r.status}: ${t.slice(0,100)}`); }
     const json = await r.json();
-    // Converteer naar {t, v} formaat
     const imb = (json.results || []).map(row => ({
       t: new Date(row.datetime).getTime(),
-      v: parseFloat(row.si1price ?? row.nrv ?? 0)
+      v: parseFloat(row.si1price ?? row.si1 ?? row.nrv ?? row.price ?? 0)
     })).filter(p => !isNaN(p.v));
     res.json({ imb });
   } catch (e) {
@@ -607,20 +612,23 @@ app.get('/entsoe-dayahead', async (req, res) => {
 // Haalt Elia hernieuwbare productievolumes op
 app.get('/elia-renewable', async (req, res) => {
   const { dataset, from, to } = req.query;
-  const dsMap = { wind: 'ods031', solar: 'ods030' };
-  const fieldMap = { wind: 'windpowerestimate', solar: 'solarpowerestimate' };
+  // ods031 = wind, ods032 = solar (Elia dataset codes)
+  const dsMap = { wind: 'ods031', solar: 'ods032' };
+  const fieldMap = { wind: 'windpowerestimate', solar: 'upliftedproduction' };
   if (!dsMap[dataset]) return res.status(400).json({ error: 'dataset moet wind of solar zijn' });
   try {
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsMap[dataset]}/records?where=datetime>='${from}'%20AND%20datetime<='${to}T23:45:00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
-    if (!r.ok) throw new Error(`Elia ${dataset} HTTP ${r.status}`);
-    const json = await r.json();
+    const dsId = dsMap[dataset];
     const field = fieldMap[dataset];
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+    if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
+    const json = await r.json();
+    // Response key is 'data' — snippet verwacht data.data
     const data = (json.results || []).map(row => ({
       t: new Date(row.datetime).getTime(),
-      v: parseFloat(row[field] ?? 0)
+      v: parseFloat(row[field] ?? row.upliftedgenerationMW ?? row.totalvolume ?? 0)
     })).filter(p => !isNaN(p.v));
-    res.json({ [dataset]: data });
+    res.json({ data });
   } catch (e) {
     console.error(`[elia-renewable/${dataset}]`, e.message);
     res.status(500).json({ error: e.message });
@@ -633,7 +641,7 @@ app.get('/explanation', async (req, res) => {
   const { chartId } = req.query;
   if (!chartId) return res.status(400).json({ error: 'chartId verplicht' });
   try {
-    const { data } = await githubRead(`explanations/${chartId}.json`);
+    const { data } = await githubRead(`fluctus-explanation-${chartId}.json`);
     const today = new Date().toISOString().slice(0,10);
     const cached = data.date === today;
     res.json({ cached, date: data.date, text: data.text, reason: cached ? null : 'verouderd' });
@@ -678,8 +686,8 @@ app.get('/claude-explain-refresh', async (req, res) => {
     // Sla op in GitHub
     try {
       let sha;
-      try { const ex = await githubRead(`explanations/${chartId}.json`); sha = ex.sha; } catch {}
-      await githubWrite(`explanations/${chartId}.json`, data, sha);
+      try { const ex = await githubRead(`fluctus-explanation-${chartId}.json`); sha = ex.sha; } catch {}
+      await githubWrite(`fluctus-explanation-${chartId}.json`, data, sha);
     } catch (e) {
       console.warn('[explanation] GitHub write mislukt:', e.message);
     }
