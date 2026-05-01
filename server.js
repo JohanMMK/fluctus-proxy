@@ -590,7 +590,7 @@ app.get('/elia-data', async (req, res) => {
     
     // Zoek het correcte prijsveld dynamisch
     const sample = json.results?.[0] || {};
-    const priceField = ['si1price','si1','nrv','price','systemimbalanceprice','imbalanceprice','miprice']
+    const priceField = ['imbalanceprice','marginalincrementalprice','si1price','si1','nrv','price']
       .find(f => sample[f] !== undefined && sample[f] !== null);
     console.log(`[elia-data] veldnaam: ${priceField}, sample:`, JSON.stringify(sample).slice(0,200));
     
