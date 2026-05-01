@@ -572,42 +572,74 @@ app.post('/cache-update', async (req, res) => {
 
 // ── GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD ─────────────────────────────
 // Haalt Elia imbalance SI-prijzen op (kwartierlijks)
+// Splitst automatisch in segmenten van 30 dagen
 app.get('/elia-data', async (req, res) => {
   const { from, to, debug } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
   try {
-    // Elia ods032 = System Imbalance — limit 100 per call, sorteer op datetime desc
-    // ods134 = Elia System Imbalance prijzen (SI1/SI2)
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods134/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=1000&offset=0&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
-    if (!r.ok) { const t = await r.text(); throw new Error(`Elia imb HTTP ${r.status}: ${t.slice(0,100)}`); }
-    const json = await r.json();
-    
-    // Debug: toon ruwe veldnamen
-    if (debug && json.results && json.results[0]) {
-      return res.json({ debug_fields: Object.keys(json.results[0]), sample: json.results[0] });
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
+
+    // Splits in segmenten van 30 dagen
+    const segDays  = 30;
+    const segments = [];
+    let segStart   = new Date(fromDate);
+    while (segStart < toDate) {
+      const segEnd = new Date(Math.min(toDate.getTime(), segStart.getTime() + segDays * 86400000));
+      segments.push({ from: segStart.toISOString().slice(0,10), to: segEnd.toISOString().slice(0,10) });
+      segStart = new Date(segEnd.getTime() + 86400000);
     }
-    
-    // Zoek het correcte prijsveld dynamisch
-    const sample = json.results?.[0] || {};
-    const priceField = ['imbalanceprice','marginalincrementalprice','si1price','si1','nrv','price']
-      .find(f => sample[f] !== undefined && sample[f] !== null);
-    console.log(`[elia-data] veldnaam: ${priceField}, sample:`, JSON.stringify(sample).slice(0,200));
-    
-    // Dedupliceer op timestamp (neem eerste/hoogste waarde per kwartier)
+
+    console.log(`[elia-data] ${segments.length} segmenten (${from} → ${to})`);
+
     const seen = new Map();
-    (json.results || []).forEach(row => {
-      const t = new Date(row.datetime).getTime();
-      const v = parseFloat(priceField ? row[priceField] : 0);
-      if (!isNaN(v) && !seen.has(t)) seen.set(t, v);
-    });
-    const imb = Array.from(seen.entries()).map(([t,v]) => ({t,v})).sort((a,b) => a.t-b.t);
+    let totalFetched = 0;
+    let debugDone = false;
+
+    for (const seg of segments) {
+      // ods134 = Elia System Imbalance prijzen
+      const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods134/records?where=datetime%3E%3D'${seg.from}'%20AND%20datetime%3C%3D'${seg.to}T23%3A45%3A00'&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+
+      let offset = 0;
+      while (true) {
+        const pageUrl = baseUrl + `&limit=100&offset=${offset}`;
+        const r = await fetch(pageUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+        if (!r.ok) { const t = await r.text(); throw new Error(`Elia imb HTTP ${r.status}: ${t.slice(0,100)}`); }
+        const json = await r.json();
+        const results = json.results || [];
+        if (results.length === 0) break;
+
+        // Debug: toon veldnamen
+        if (debug && !debugDone) {
+          return res.json({ debug_fields: Object.keys(results[0]), sample: results[0] });
+        }
+        debugDone = true;
+
+        results.forEach(row => {
+          const t = new Date(row.datetime).getTime();
+          const v = parseFloat(row.imbalanceprice ?? row.marginalincrementalprice ?? 0);
+          if (!isNaN(v) && !seen.has(t)) seen.set(t, v);
+        });
+
+        totalFetched += results.length;
+        if (results.length < 100) break;
+        offset += 100;
+      }
+    }
+
+    const imb = Array.from(seen.entries())
+      .map(([t,v]) => ({t,v}))
+      .sort((a,b) => a.t - b.t);
+
+    console.log(`[elia-data] ${imb.length} kwartieren uit ${totalFetched} records`);
     res.json({ imb });
+
   } catch (e) {
     console.error('[elia-data]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
+
 
 // ── GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD ───────────────────────
 // Haalt ENTSO-E BELPEX day-ahead spotprijzen op (uurlijks)
