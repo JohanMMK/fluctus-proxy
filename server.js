@@ -474,6 +474,223 @@ function buildSimInput(ui) {
   };
 }
 
+
+// ─── MARKTDATA DASHBOARD ROUTES ──────────────────────────────────────────────
+// GitHub market-data repo configuratie
+const MARKET_DATA_OWNER = process.env.GITHUB_OWNER || 'JohanMMK';
+const MARKET_DATA_REPO  = process.env.GITHUB_REPO  || 'market-data';
+const MARKET_DATA_PATH  = process.env.GITHUB_PATH  || 'data';
+const GITHUB_TOKEN      = process.env.GITHUB_TOKEN || '';
+
+// Helper: lees bestand van GitHub
+async function githubRead(filename) {
+  const url = `https://api.github.com/repos/${MARKET_DATA_OWNER}/${MARKET_DATA_REPO}/contents/${MARKET_DATA_PATH}/${filename}`;
+  const headers = { 'User-Agent': 'fluctus-proxy' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`GitHub read ${filename}: HTTP ${r.status}`);
+  const meta = await r.json();
+  const content = Buffer.from(meta.content, 'base64').toString('utf8');
+  return { data: JSON.parse(content), sha: meta.sha };
+}
+
+// Helper: schrijf bestand naar GitHub
+async function githubWrite(filename, data, sha) {
+  const url = `https://api.github.com/repos/${MARKET_DATA_OWNER}/${MARKET_DATA_REPO}/contents/${MARKET_DATA_PATH}/${filename}`;
+  const content = Buffer.from(JSON.stringify(data)).toString('base64');
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Content-Type': 'application/json' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const body = { message: `auto: ${filename.replace('.json','')} ${new Date().toISOString().slice(0,10)}`, content };
+  if (sha) body.sha = sha;
+  const r = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+  if (!r.ok) { const t = await r.text(); throw new Error(`GitHub write ${filename}: HTTP ${r.status} ${t.slice(0,200)}`); }
+  return r.json();
+}
+
+// Dataset → bestandsnaam mapping
+const DATASET_FILES = {
+  meta:  'fluctus-cache-meta.json',
+  spot:  'fluctus-cache-spot.json',
+  imb:   'fluctus-cache-imb.json',
+  wind:  'fluctus-cache-wind.json',
+  solar: 'fluctus-cache-solar.json',
+};
+
+
+// ── GET /cache-read?dataset=<meta|spot|imb|wind|solar> ───────────────────────
+// Leest een dataset uit de GitHub market-data repo en geeft die terug als JSON
+app.get('/cache-read', async (req, res) => {
+  const ds = req.query.dataset;
+  if (!DATASET_FILES[ds]) return res.status(400).json({ error: `Onbekende dataset: ${ds}` });
+  try {
+    const { data } = await githubRead(DATASET_FILES[ds]);
+    res.json(data);
+  } catch (e) {
+    console.error(`[cache-read] ${ds}:`, e.message);
+    res.status(404).json({ error: e.message });
+  }
+});
+
+// ── POST /cache-update?dataset=<...> ─────────────────────────────────────────
+// Schrijft data naar de GitHub market-data repo
+app.post('/cache-update', async (req, res) => {
+  const ds = req.query.dataset;
+  if (!DATASET_FILES[ds]) return res.status(400).json({ error: `Onbekende dataset: ${ds}` });
+  try {
+    let sha;
+    try { const existing = await githubRead(DATASET_FILES[ds]); sha = existing.sha; } catch {}
+    await githubWrite(DATASET_FILES[ds], req.body, sha);
+    const size_kb = Math.round(JSON.stringify(req.body).length / 1024);
+    res.json({ ok: true, dataset: ds, size_kb });
+  } catch (e) {
+    console.error(`[cache-update] ${ds}:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GET /elia-data?from=YYYY-MM-DD&to=YYYY-MM-DD ─────────────────────────────
+// Haalt Elia imbalance SI-prijzen op (kwartierlijks)
+app.get('/elia-data', async (req, res) => {
+  const { from, to } = req.query;
+  if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
+  try {
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime>='${from}'%20AND%20datetime<='${to}T23:45:00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) throw new Error(`Elia HTTP ${r.status}`);
+    const json = await r.json();
+    // Converteer naar {t, v} formaat
+    const imb = (json.results || []).map(row => ({
+      t: new Date(row.datetime).getTime(),
+      v: parseFloat(row.si1price ?? row.nrv ?? 0)
+    })).filter(p => !isNaN(p.v));
+    res.json({ imb });
+  } catch (e) {
+    console.error('[elia-data]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD ───────────────────────
+// Haalt ENTSO-E BELPEX day-ahead spotprijzen op (uurlijks)
+app.get('/entsoe-dayahead', async (req, res) => {
+  const { from, to } = req.query;
+  if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
+  try {
+    const periodStart = from.replace(/-/g,'') + '0000';
+    const periodEnd   = to.replace(/-/g,'')   + '2300';
+    const url = `https://web-api.tp.entsoe.eu/api?securityToken=${process.env.ENTSOE_TOKEN||''}&documentType=A44&in_Domain=10YBE----------2&out_Domain=10YBE----------2&periodStart=${periodStart}&periodEnd=${periodEnd}`;
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`ENTSO-E HTTP ${r.status}`);
+    const xml = await r.text();
+    // Parse XML tijdreeks
+    const points = [];
+    const tsMatch = xml.match(/<start>(.*?)<\/start>/);
+    const resMatch = xml.match(/<resolution>(.*?)<\/resolution>/);
+    if (tsMatch && resMatch) {
+      const start = new Date(tsMatch[1]);
+      const res_min = resMatch[1] === 'PT60M' ? 60 : 15;
+      const ptMatches = [...xml.matchAll(/<Point>.*?<position>(\d+)<\/position>.*?<price\.amount>([\d.]+)<\/price\.amount>.*?<\/Point>/gs)];
+      ptMatches.forEach(m => {
+        const pos = parseInt(m[1]) - 1;
+        const t = new Date(start.getTime() + pos * res_min * 60000);
+        points.push({ t: t.getTime(), v: parseFloat(m[2]) });
+      });
+    }
+    res.json({ spot: points });
+  } catch (e) {
+    console.error('[entsoe-dayahead]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /elia-renewable?dataset=wind|solar&from=YYYY-MM-DD&to=YYYY-MM-DD ─────
+// Haalt Elia hernieuwbare productievolumes op
+app.get('/elia-renewable', async (req, res) => {
+  const { dataset, from, to } = req.query;
+  const dsMap = { wind: 'ods031', solar: 'ods030' };
+  const fieldMap = { wind: 'windpowerestimate', solar: 'solarpowerestimate' };
+  if (!dsMap[dataset]) return res.status(400).json({ error: 'dataset moet wind of solar zijn' });
+  try {
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsMap[dataset]}/records?where=datetime>='${from}'%20AND%20datetime<='${to}T23:45:00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
+    const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+    if (!r.ok) throw new Error(`Elia ${dataset} HTTP ${r.status}`);
+    const json = await r.json();
+    const field = fieldMap[dataset];
+    const data = (json.results || []).map(row => ({
+      t: new Date(row.datetime).getTime(),
+      v: parseFloat(row[field] ?? 0)
+    })).filter(p => !isNaN(p.v));
+    res.json({ [dataset]: data });
+  } catch (e) {
+    console.error(`[elia-renewable/${dataset}]`, e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// ── GET /explanation?chartId=<id> ────────────────────────────────────────────
+// Levert dagelijks gecachede AI-uitleg per grafiek
+app.get('/explanation', async (req, res) => {
+  const { chartId } = req.query;
+  if (!chartId) return res.status(400).json({ error: 'chartId verplicht' });
+  try {
+    const { data } = await githubRead(`explanations/${chartId}.json`);
+    const today = new Date().toISOString().slice(0,10);
+    const cached = data.date === today;
+    res.json({ cached, date: data.date, text: data.text, reason: cached ? null : 'verouderd' });
+  } catch (e) {
+    res.json({ cached: false, reason: 'niet gevonden', text: null });
+  }
+});
+
+// ── GET /claude-explain-refresh?chartId=<id>&context=<tekst> ────────────────
+// Genereert nieuwe AI-uitleg via Claude en slaat op in GitHub
+app.get('/claude-explain-refresh', async (req, res) => {
+  const { chartId, context } = req.query;
+  if (!chartId) return res.status(400).json({ error: 'chartId verplicht' });
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(503).json({ error: 'ANTHROPIC_API_KEY niet geconfigureerd' });
+
+  try {
+    const prompt = context
+      ? `Je bent een energiemarkt-expert voor Fluctus.net. Geef een beknopte (3-5 zinnen) Nederlandstalige interpretatie van deze marktdata voor een grafiek met id "${chartId}": ${context}`
+      : `Geef een algemene uitleg van grafiek "${chartId}" in de Fluctus marktdata dashboard.`;
+
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 300,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    if (!r.ok) throw new Error(`Anthropic HTTP ${r.status}`);
+    const json = await r.json();
+    const text = json.content?.[0]?.text || '';
+    const today = new Date().toISOString().slice(0, 10);
+    const data = { date: today, chartId, text };
+
+    // Sla op in GitHub
+    try {
+      let sha;
+      try { const ex = await githubRead(`explanations/${chartId}.json`); sha = ex.sha; } catch {}
+      await githubWrite(`explanations/${chartId}.json`, data, sha);
+    } catch (e) {
+      console.warn('[explanation] GitHub write mislukt:', e.message);
+    }
+
+    res.json({ ok: true, date: today, text });
+  } catch (e) {
+    console.error('[claude-explain-refresh]', e.message);
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ─── START ────────────────────────────────────────────────────────────────────
 laadMarktdata();  // laad marktdata synchroon bij startup
 
