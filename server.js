@@ -644,10 +644,11 @@ app.get('/entsoe-dayahead', async (req, res) => {
     const points = Array.from(byTime.entries())
       .map(([t, sum]) => ({ t, v: Math.round(sum / countByTime.get(t) * 100) / 100 }))
       .sort((a, b) => a.t - b.t);
-    console.log(`[entsoe] ${points.length} punten, ${tsMatches.length} TimeSeries blokken`);
+    console.log(`[entsoe] ${points.length} punten, ${tsMatches.length} TimeSeries blokken, XML ${xml.length} chars`);
     if (points.length === 0) {
-      // Log de XML structuur voor debug
-      console.log('[entsoe] XML sample:', xml.slice(0, 500));
+      console.log('[entsoe] XML sample:', xml.slice(0, 800));
+      // Stuur XML terug als debug
+      if (req.query.debug) return res.send(xml);
     }
     res.json({ spot: points });
   } catch (e) {
@@ -666,7 +667,9 @@ app.get('/elia-renewable', async (req, res) => {
   try {
     const dsId = dsIdMap[dataset];
     // Haal data op met paginering (Elia max limit=100)
-    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+    // Gebruik Elia group_by API om per kwartier te aggregeren over alle regio's
+    // Dit geeft 1 record per kwartier = veel minder data
+    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&group_by=datetime&select=datetime,sum(measured)%20as%20measured&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
     const url = baseUrl + '&limit=100&offset=0';
     // Pagineer over alle records (Elia max 100 per call)
     const byTime2 = new Map();
@@ -696,7 +699,7 @@ app.get('/elia-renewable', async (req, res) => {
       totalFetched += results.length;
       if (results.length < 100) break; // laatste pagina
       offset += 100;
-      if (offset > 5000) break; // veiligheidsgrens
+      if (offset > 500000) break; // veiligheidsgrens
     }
     const data = Array.from(byTime2.entries())
       .map(([t,v]) => ({t, v: Math.round(v * 10) / 10}))
