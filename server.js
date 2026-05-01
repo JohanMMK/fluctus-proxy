@@ -577,7 +577,8 @@ app.get('/elia-data', async (req, res) => {
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
   try {
     // Elia ods032 = System Imbalance — limit 100 per call, sorteer op datetime desc
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods032/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&order_by=datetime%20desc&timezone=UTC&include_links=false&include_app_metas=false`;
+    // ods134 = Elia System Imbalance prijzen (SI1/SI2)
+    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/ods134/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&order_by=datetime%20desc&timezone=UTC&include_links=false&include_app_metas=false`;
     const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
     if (!r.ok) { const t = await r.text(); throw new Error(`Elia imb HTTP ${r.status}: ${t.slice(0,100)}`); }
     const json = await r.json();
@@ -647,21 +648,33 @@ app.get('/elia-renewable', async (req, res) => {
   const { dataset, from, to } = req.query;
   // Accepteer zowel 'wind'/'solar' als directe Elia dataset IDs 'ods031'/'ods032'
   const dsIdMap  = { wind: 'ods031', solar: 'ods032', ods031: 'ods031', ods032: 'ods032' };
-  const fieldMap = { wind: 'windpowerestimate', solar: 'upliftedproduction',
-                     ods031: 'windpowerestimate', ods032: 'upliftedproduction' };
   if (!dsIdMap[dataset]) return res.status(400).json({ error: `Onbekende dataset: ${dataset}` });
   try {
     const dsId = dsIdMap[dataset];
-    const field = fieldMap[dataset];
     const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'&limit=100&offset=0&timezone=UTC&include_links=false&include_app_metas=false`;
     const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
     if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
     const json = await r.json();
-    // Response key is 'data' — snippet verwacht data.data
-    const data = (json.results || []).map(row => ({
-      t: new Date(row.datetime).getTime(),
-      v: parseFloat(row[field] ?? row.upliftedgenerationMW ?? row.totalvolume ?? 0)
-    })).filter(p => !isNaN(p.v));
+    
+    // Debug: toon veldnamen
+    if (req.query.debug && json.results?.[0]) {
+      return res.json({ debug_fields: Object.keys(json.results[0]), sample: json.results[0] });
+    }
+    
+    // Zoek dynamisch het juiste productiemeting-veld
+    const sample = json.results?.[0] || {};
+    const valueField = ['windpowerestimate','measured','mostrecentforecast','upliftedproduction','totalvolume','generation']
+      .find(f => sample[f] !== undefined && sample[f] !== null && parseFloat(sample[f]) > 0);
+    console.log(`[elia-renewable/${dataset}] veld: ${valueField}, sample:`, JSON.stringify(sample).slice(0,150));
+    
+    // Dedupliceer op timestamp + regio (sommeer per kwartier)
+    const byTime = new Map();
+    (json.results || []).forEach(row => {
+      const t = new Date(row.datetime).getTime();
+      const v = parseFloat(valueField ? row[valueField] : 0) || 0;
+      byTime.set(t, (byTime.get(t) || 0) + v);
+    });
+    const data = Array.from(byTime.entries()).map(([t,v]) => ({t,v})).sort((a,b) => a.t-b.t);
     res.json({ data });
   } catch (e) {
     console.error(`[elia-renewable/${dataset}]`, e.message);
