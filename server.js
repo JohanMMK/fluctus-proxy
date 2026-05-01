@@ -845,13 +845,18 @@ app.all('/claude-explain-refresh', async (req, res) => {
   try {
     const prompt = context
       ? `Je bent een energiemarkt-expert voor Fluctus.net CVSO (België). ` +
-        `De volgende marktdata is HISTORISCHE data uit het VERLEDEN — dit zijn reeds voorbije data, NIET de toekomst. ` +
+        `De volgende marktdata is HISTORISCHE data uit het VERLEDEN — reeds voorbije periodes, NIET de toekomst. ` +
         `Datumnotatie in de data: DD/MM/JJJJ (dag/maand/jaar). ` +
-        `Geef een beknopte (4-6 zinnen) Nederlandstalige analyse in twee delen: ` +
-        `1) Wat zie je in de data (prijsniveaus, pieken, dalen, spreads)? ` +
-        `2) Welke bekende marktfactoren verklaren dit (seizoen, hernieuwbare productie, Europese gasprijs, nucleaire beschikbaarheid, weekend/weekdag)? ` +
-        `Gebruik de web_search tool om gericht te zoeken naar wat er in deze SPECIFIEKE periode (zie datums in de data) in de Belgische/Europese energiemarkt gebeurd is. ` +
-        `Grafiek: ${chartId}. Data: ${context}`
+        `\n\nSchrijf een UITGEBREIDE analyse (minimum 200 woorden) in het Nederlands met deze drie secties:\n` +
+        `\n**1) Algemeen beeld**\n` +
+        `Beschrijf de prijsniveaus, volatiliteit, spreads en het gedrag van spot vs onbalans in de getoonde periode. Wees concreet met cijfers uit de data.\n` +
+        `\n**2) Trends**\n` +
+        `Beschrijf duidelijke patronen: dag/nacht cycli, weekenddips, zonne-energie injectie (negatieve prijzen), windpieken, seizoenspatronen. Leg uit wat de spread en ratio betekenen voor batterij- en flexibiliteitsopbrengsten.\n` +
+        `\n**3) Belangrijkste gebeurtenissen**\n` +
+        `Gebruik de web_search tool om gericht te zoeken naar nieuws en events in de Belgische/Europese energiemarkt in de SPECIFIEKE periode uit de data. ` +
+        `Zoek naar: nucleaire beschikbaarheid Doel/Tihange, gasprijs TTF, windproductie België, Elia systeemstoringen, Europese interconnectie-events. ` +
+        `Koppel wat je vindt aan de zichtbare pieken en dalen in de grafiek. Als er geen relevante events gevonden worden, zeg dat dan eerlijk.\n` +
+        `\nGrafiek: ${chartId}. Data: ${context}`
       : `Je bent een energiemarkt-expert voor Fluctus.net. Geef een algemene uitleg (3-5 zinnen, Nederlands) van wat grafiek "${chartId}" toont in het Fluctus marktdata dashboard.`;
 
     const r = await fetch('https://api.anthropic.com/v1/messages', {
@@ -863,7 +868,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
       },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 300,
+        max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }]
       })
     });
