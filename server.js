@@ -643,51 +643,86 @@ app.get('/elia-data', async (req, res) => {
 
 // ── GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD ───────────────────────
 // Haalt ENTSO-E BELPEX day-ahead spotprijzen op (uurlijks)
+// Splitst in segmenten van 30 dagen om timeout te vermijden
 app.get('/entsoe-dayahead', async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
   try {
-    const periodStart = from.replace(/-/g,'') + '0000';
-    const periodEnd   = to.replace(/-/g,'')   + '2300';
-    const url = `https://web-api.tp.entsoe.eu/api?securityToken=${process.env.ENTSOE_TOKEN||''}&documentType=A44&in_Domain=10YBE----------2&out_Domain=10YBE----------2&periodStart=${periodStart}&periodEnd=${periodEnd}`;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error(`ENTSO-E HTTP ${r.status}`);
-    const xml = await r.text();
-    // Parse XML tijdreeks — meerdere TimeSeries per periode, neem gemiddelde per timestamp
+    const fromDate = new Date(from);
+    const toDate   = new Date(to);
+
+    // Splits in segmenten van 30 dagen
+    const segDays  = 30;
+    const segments = [];
+    let segStart   = new Date(fromDate);
+    while (segStart < toDate) {
+      const segEnd = new Date(Math.min(toDate.getTime(), segStart.getTime() + segDays * 86400000));
+      segments.push({ from: segStart.toISOString().slice(0,10), to: segEnd.toISOString().slice(0,10) });
+      segStart = new Date(segEnd.getTime() + 86400000);
+    }
+
+    console.log(`[entsoe] ${segments.length} segmenten (${from} → ${to})`);
+
     const byTime = new Map();
     const countByTime = new Map();
-    const tsMatches = [...xml.matchAll(/<TimeSeries>[\s\S]*?<\/TimeSeries>/g)];
-    tsMatches.forEach(tsM => {
-      const tsBlock = tsM[0];
-      const startM = tsBlock.match(/<start>(.*?)<\/start>/);
-      const resM   = tsBlock.match(/<resolution>(.*?)<\/resolution>/);
-      if (!startM || !resM) return;
-      const start   = new Date(startM[1]);
-      const res_min = resM[1] === 'PT60M' ? 60 : 15;
-      const ptMs    = [...tsBlock.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>([\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)];
-      ptMs.forEach(m => {
-        const pos = parseInt(m[1]) - 1;
-        const t   = start.getTime() + pos * res_min * 60000;
-        const v   = parseFloat(m[2]);
-        byTime.set(t, (byTime.get(t) || 0) + v);
-        countByTime.set(t, (countByTime.get(t) || 0) + 1);
-      });
-    });
+
+    for (const seg of segments) {
+      const periodStart = seg.from.replace(/-/g,'') + '0000';
+      const periodEnd   = seg.to.replace(/-/g,'')   + '2300';
+      const url = `https://web-api.tp.entsoe.eu/api?securityToken=${process.env.ENTSOE_TOKEN||''}&documentType=A44&in_Domain=10YBE----------2&out_Domain=10YBE----------2&periodStart=${periodStart}&periodEnd=${periodEnd}`;
+
+      // Haal XML op met retry
+      let xml = null;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const r = await fetch(url);
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          xml = await r.text();
+          break;
+        } catch (e) {
+          console.warn(`[entsoe] segment ${seg.from}→${seg.to} poging ${attempt}/3: ${e.message}`);
+          if (attempt === 3) throw new Error(`Segment ${seg.from}→${seg.to} gefaald na 3 pogingen: ${e.message}`);
+          await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
+        }
+      }
+      if (xml) {
+
+        // Parse XML TimeSeries
+        const tsMatches = [...xml.matchAll(/<TimeSeries>[\s\S]*?<\/TimeSeries>/g)];
+        tsMatches.forEach(tsM => {
+          const tsBlock = tsM[0];
+          const startM  = tsBlock.match(/<start>(.*?)<\/start>/);
+          const resM    = tsBlock.match(/<resolution>(.*?)<\/resolution>/);
+          if (!startM || !resM) return;
+          const start   = new Date(startM[1]);
+          const res_min = resM[1] === 'PT60M' ? 60 : 15;
+          const ptMs    = [...tsBlock.matchAll(/<Point>[\s\S]*?<position>(\d+)<\/position>[\s\S]*?<price\.amount>([\d.]+)<\/price\.amount>[\s\S]*?<\/Point>/g)];
+          ptMs.forEach(m => {
+            const pos = parseInt(m[1]) - 1;
+            const t   = start.getTime() + pos * res_min * 60000;
+            const v   = parseFloat(m[2]);
+            byTime.set(t, (byTime.get(t) || 0) + v);
+            countByTime.set(t, (countByTime.get(t) || 0) + 1);
+          });
+        });
+
+        console.log(`[entsoe] segment ${seg.from}→${seg.to}: ${tsMatches.length} TimeSeries`);
+      }
+    }
+
     const points = Array.from(byTime.entries())
       .map(([t, sum]) => ({ t, v: Math.round(sum / countByTime.get(t) * 100) / 100 }))
       .sort((a, b) => a.t - b.t);
-    console.log(`[entsoe] ${points.length} punten, ${tsMatches.length} TimeSeries blokken, XML ${xml.length} chars`);
-    if (points.length === 0) {
-      console.log('[entsoe] XML sample:', xml.slice(0, 800));
-      // Stuur XML terug als debug
-      if (req.query.debug) return res.send(xml);
-    }
-    res.json({ spot: points, data: points }); // 'data' voor snippet compatibiliteit
+
+    console.log(`[entsoe] totaal ${points.length} punten`);
+    res.json({ spot: points, data: points });
+
   } catch (e) {
-    console.error('[entsoe-dayahead]', e.message);
+    console.error('[entsoe]', e.message);
     res.status(500).json({ error: e.message });
   }
 });
+
 
 // ── GET /elia-renewable?dataset=wind|solar&from=YYYY-MM-DD&to=YYYY-MM-DD ─────
 // Haalt Elia hernieuwbare productievolumes op
