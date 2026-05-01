@@ -659,70 +659,78 @@ app.get('/entsoe-dayahead', async (req, res) => {
 
 // ── GET /elia-renewable?dataset=wind|solar&from=YYYY-MM-DD&to=YYYY-MM-DD ─────
 // Haalt Elia hernieuwbare productievolumes op
+// Splitst automatisch in segmenten van 30 dagen om timeout te vermijden
 app.get('/elia-renewable', async (req, res) => {
   const { dataset, from, to } = req.query;
-  // Accepteer zowel 'wind'/'solar' als directe Elia dataset IDs 'ods031'/'ods032'
-  const dsIdMap  = { wind: 'ods031', solar: 'ods032', ods031: 'ods031', ods032: 'ods032' };
+  const dsIdMap = { wind: 'ods031', solar: 'ods032', ods031: 'ods031', ods032: 'ods032' };
   if (!dsIdMap[dataset]) return res.status(400).json({ error: `Onbekende dataset: ${dataset}` });
+
   try {
-    const dsId = dsIdMap[dataset];
-    // Haal data op met paginering (Elia max limit=100)
-    // Gebruik Elia group_by API om per kwartier te aggregeren over alle regio's
-    // Beperk tot max 30 dagen per call om timeout te vermijden
+    const dsId     = dsIdMap[dataset];
     const fromDate = new Date(from);
     const toDate   = new Date(to);
-    const maxDays  = 30;
-    const maxTo    = new Date(Math.min(toDate.getTime(), fromDate.getTime() + maxDays * 86400000));
-    const toStr    = maxTo.toISOString().slice(0,10);
-    if (toStr !== to) console.log(`[elia-renewable/${dataset}] Periode beperkt tot ${from} → ${toStr} (max ${maxDays} dagen)`);
-    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${toStr}T23%3A45%3A00'&group_by=datetime&select=datetime,sum(measured)%20as%20measured&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
-    const url = baseUrl + '&limit=100&offset=0';
-    // Pagineer over alle records (Elia max 100 per call)
-    // Stop na 25 seconden en stuur wat we hebben (Railway timeout = 30s)
-    const byTime2 = new Map();
-    let offset = 0;
-    let totalFetched = 0;
-    let debugDone = false;
-    const startTime = Date.now();
-    while (true) {
-      if (Date.now() - startTime > 25000) {
-        console.log(`[elia-renewable/${dataset}] Timeout na 25s — ${totalFetched} records opgehaald`);
-        break;
-      }
-      const pageUrl = baseUrl + `&limit=100&offset=${offset}`;
-      const r = await fetch(pageUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
-      if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
-      const json = await r.json();
-      const results = json.results || [];
-      if (results.length === 0) break;
 
-      // Debug: toon veldnamen van eerste pagina
-      if (req.query.debug && !debugDone) {
-        return res.json({ debug_fields: Object.keys(results[0]), sample: results[0] });
-      }
-      debugDone = true;
-
-      results.forEach(row => {
-        const t = new Date(row.datetime).getTime();
-        const v = parseFloat(row.measured ?? row.mostrecentforecast ?? row.windpowerestimate ?? 0) || 0;
-        byTime2.set(t, (byTime2.get(t) || 0) + v);
-      });
-
-      totalFetched += results.length;
-      if (results.length < 100) break; // laatste pagina
-      offset += 100;
-      if (offset > 500000) break; // veiligheidsgrens
+    // Splits in segmenten van 30 dagen
+    const segDays  = 30;
+    const segments = [];
+    let segStart   = new Date(fromDate);
+    while (segStart < toDate) {
+      const segEnd = new Date(Math.min(toDate.getTime(), segStart.getTime() + segDays * 86400000));
+      segments.push({ from: segStart.toISOString().slice(0,10), to: segEnd.toISOString().slice(0,10) });
+      segStart = new Date(segEnd.getTime() + 86400000);
     }
-    const data = Array.from(byTime2.entries())
+
+    console.log(`[elia-renewable/${dataset}] ${segments.length} segmenten (${from} → ${to})`);
+
+    const byTime = new Map();
+    let totalFetched = 0;
+
+    for (const seg of segments) {
+      // group_by datetime geeft 1 record per kwartier = totaal België
+      const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${seg.from}'%20AND%20datetime%3C%3D'${seg.to}T23%3A45%3A00'&group_by=datetime&select=datetime,sum(measured)%20as%20measured&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false&limit=100&offset=0`;
+
+      // Debug
+      if (req.query.debug) {
+        const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+        const json = await r.json();
+        return res.json({ debug_fields: Object.keys((json.results||[{}])[0]), sample: (json.results||[])[0] });
+      }
+
+      // Pagineer over segment (max 100 per pagina, 30 dagen × 96 = 2880 records → 29 pagina's)
+      let offset = 0;
+      while (true) {
+        const pageUrl = url.replace('offset=0', `offset=${offset}`);
+        const r = await fetch(pageUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+        if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
+        const json = await r.json();
+        const results = json.results || [];
+        if (results.length === 0) break;
+
+        results.forEach(row => {
+          const t = new Date(row.datetime).getTime();
+          const v = parseFloat(row.measured ?? 0) || 0;
+          byTime.set(t, v); // group_by geeft al gesommeerde waarde
+        });
+
+        totalFetched += results.length;
+        if (results.length < 100) break;
+        offset += 100;
+      }
+    }
+
+    const data = Array.from(byTime.entries())
       .map(([t,v]) => ({t, v: Math.round(v * 10) / 10}))
-      .sort((a,b) => a.t-b.t);
-    console.log(`[elia-renewable/${dataset}] ${data.length} unieke kwartieren uit ${totalFetched} records`);
+      .sort((a,b) => a.t - b.t);
+
+    console.log(`[elia-renewable/${dataset}] ${data.length} kwartieren uit ${totalFetched} records`);
     res.json({ data });
+
   } catch (e) {
     console.error(`[elia-renewable/${dataset}]`, e.message);
     res.status(500).json({ error: e.message });
   }
 });
+
 
 // ── GET /explanation?chartId=<id> ────────────────────────────────────────────
 // Levert dagelijks gecachede AI-uitleg per grafiek
