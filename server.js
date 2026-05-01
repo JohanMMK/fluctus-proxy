@@ -665,31 +665,44 @@ app.get('/elia-renewable', async (req, res) => {
   if (!dsIdMap[dataset]) return res.status(400).json({ error: `Onbekende dataset: ${dataset}` });
   try {
     const dsId = dsIdMap[dataset];
-    // Filter op gridconnectiontype=Tso om dubbeltellingen met DSO te vermijden
-    // TSO-niveau aggregeert het nationaal net correct
-    const url = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'%20AND%20gridconnectiontype%3D'Tso'&limit=1000&offset=0&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
-    const r = await fetch(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
-    if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
-    const json = await r.json();
-    
-    // Debug: toon veldnamen
-    if (req.query.debug && json.results?.[0]) {
-      return res.json({ debug_fields: Object.keys(json.results[0]), sample: json.results[0] });
-    }
-    
-    // Gebruik 'measured' als primair veld (aanwezig in zowel wind als zon datasets)
-    // Sommeer over alle regio's/types per timestamp
+    // Haal data op met paginering (Elia max limit=100)
+    // Filter op PT30M resolutie — halveert aantal records tov PT15M
+    const baseUrl = `https://opendata.elia.be/api/explore/v2.1/catalog/datasets/${dsId}/records?where=datetime%3E%3D'${from}'%20AND%20datetime%3C%3D'${to}T23%3A45%3A00'%20AND%20resolutioncode%3D'PT30M'&order_by=datetime%20asc&timezone=UTC&include_links=false&include_app_metas=false`;
+    const url = baseUrl + '&limit=100&offset=0';
+    // Pagineer over alle records (Elia max 100 per call)
     const byTime2 = new Map();
-    (json.results || []).forEach(row => {
-      const t = new Date(row.datetime).getTime();
-      // measured = werkelijke productie, fallback naar mostrecentforecast
-      const v = parseFloat(row.measured ?? row.mostrecentforecast ?? row.windpowerestimate ?? 0) || 0;
-      byTime2.set(t, (byTime2.get(t) || 0) + v);
-    });
+    let offset = 0;
+    let totalFetched = 0;
+    let debugDone = false;
+    while (true) {
+      const pageUrl = baseUrl + `&limit=100&offset=${offset}`;
+      const r = await fetch(pageUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'fluctus-proxy/1.0' } });
+      if (!r.ok) { const t = await r.text(); throw new Error(`Elia ${dataset} HTTP ${r.status}: ${t.slice(0,100)}`); }
+      const json = await r.json();
+      const results = json.results || [];
+      if (results.length === 0) break;
+
+      // Debug: toon veldnamen van eerste pagina
+      if (req.query.debug && !debugDone) {
+        return res.json({ debug_fields: Object.keys(results[0]), sample: results[0] });
+      }
+      debugDone = true;
+
+      results.forEach(row => {
+        const t = new Date(row.datetime).getTime();
+        const v = parseFloat(row.measured ?? row.mostrecentforecast ?? row.windpowerestimate ?? 0) || 0;
+        byTime2.set(t, (byTime2.get(t) || 0) + v);
+      });
+
+      totalFetched += results.length;
+      if (results.length < 100) break; // laatste pagina
+      offset += 100;
+      if (offset > 5000) break; // veiligheidsgrens
+    }
     const data = Array.from(byTime2.entries())
       .map(([t,v]) => ({t, v: Math.round(v * 10) / 10}))
       .sort((a,b) => a.t-b.t);
-    console.log(`[elia-renewable/${dataset}] ${data.length} punten, gem=${data.length?Math.round(data.reduce((s,p)=>s+p.v,0)/data.length):0} MW`);
+    console.log(`[elia-renewable/${dataset}] ${data.length} unieke kwartieren uit ${totalFetched} records`);
     res.json({ data });
   } catch (e) {
     console.error(`[elia-renewable/${dataset}]`, e.message);
