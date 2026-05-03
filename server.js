@@ -6,6 +6,7 @@ const { spawn, execFileSync } = require('child_process');
 const path        = require('path');
 const fs          = require('fs');
 const factuurExtract = require('./factuur/extract');
+const { projectJaarverbruik } = require('./project_jaarverbruik.js');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -354,6 +355,90 @@ app.post('/api/factuur-extract', async (req, res) => {
     } else {
       res.status(500).json({ error: e.message });
     }
+  }
+});
+
+
+// ─── FACTUUR-STAFFEL ──────────────────────────────────────────────────────────
+// POST /api/factuur-staffel-bepalen
+// Body: { profielNaam, afnameKwh, periodeVan, periodeTot, [staffel] }
+// Response (zie project_jaarverbruik.js):
+//   ok=true:  { ok, geprojecteerdJaarverbruikMWh, tier, _diagnose }
+//   ok=false: { ok=false, status: "ONBETROUWBAAR" | "FOUT", reden, _diagnose }
+// HTTP status codes:
+//   200 — ok=true OF ok=false met status ONBETROUWBAAR (beide normale flow)
+//   400 — body-validatie faalde
+//   404 — profiel niet gevonden in data/profielen/
+//   500 — onverwachte server-fout
+
+// Helper: laad één profiel uit data/profielen/<naam>.json (case-insensitive),
+// dezelfde zoeklogica als de bestaande GET /api/profiel route.
+function _laadProfielKwartier(profielNaam) {
+  const profielDir = path.join(__dirname, 'data', 'profielen');
+  if (!fs.existsSync(profielDir)) return null;
+  for (const kandidaat of [profielNaam + '.json', profielNaam.toLowerCase() + '.json']) {
+    const fp = path.join(profielDir, kandidaat);
+    if (fs.existsSync(fp)) {
+      try {
+        const data = JSON.parse(fs.readFileSync(fp, 'utf8'));
+        return Array.isArray(data) ? data : (data.profiel_kwartier || null);
+      } catch (e) {
+        return null;
+      }
+    }
+  }
+  try {
+    const files = fs.readdirSync(profielDir);
+    const match = files.find(f => f.toLowerCase() === profielNaam.toLowerCase() + '.json');
+    if (match) {
+      const data = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
+      return Array.isArray(data) ? data : (data.profiel_kwartier || null);
+    }
+  } catch (e) {}
+  return null;
+}
+
+app.post('/api/factuur-staffel-bepalen', (req, res) => {
+  const body = req.body || {};
+  const { profielNaam, afnameKwh, periodeVan, periodeTot, staffel } = body;
+
+  if (typeof profielNaam !== 'string' || !profielNaam.trim()) {
+    return res.status(400).json({ error: 'profielNaam is verplicht' });
+  }
+  if (typeof afnameKwh !== 'number' || !isFinite(afnameKwh)) {
+    return res.status(400).json({ error: 'afnameKwh moet een getal zijn' });
+  }
+  if (typeof periodeVan !== 'string' || typeof periodeTot !== 'string') {
+    return res.status(400).json({ error: 'periodeVan en periodeTot zijn verplicht (ISO YYYY-MM-DD)' });
+  }
+
+  const profielKwartier = _laadProfielKwartier(profielNaam);
+  if (!profielKwartier) {
+    return res.status(404).json({ error: `Profiel '${profielNaam}' niet gevonden` });
+  }
+  if (!Array.isArray(profielKwartier) || profielKwartier.length !== 35040) {
+    return res.status(500).json({
+      error: `Profiel '${profielNaam}' heeft ongeldige lengte: ${profielKwartier.length} (verwacht 35040)`
+    });
+  }
+
+  const gebruikStaffel = (Array.isArray(staffel) && staffel.length > 0)
+    ? staffel
+    : CONTRACT_STAFFEL;
+
+  try {
+    const result = projectJaarverbruik({
+      profielNaam,
+      profielKwartier,
+      afnameKwh,
+      periodeVan,
+      periodeTot,
+      staffel: gebruikStaffel
+    });
+    return res.json(result);
+  } catch (e) {
+    console.error('[factuur-staffel-bepalen] onverwachte fout:', e);
+    return res.status(500).json({ error: 'Server-fout: ' + e.message });
   }
 });
 
