@@ -190,7 +190,7 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.6', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.7', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -400,7 +400,7 @@ app.post('/api/nominatie-sim', (req, res) => {
     let result;
     try { result = JSON.parse(stdout.slice(s, e+1)); }
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
-    result._meta = { elapsed_ms:elapsed, server_version:'15.6' };
+    result._meta = { elapsed_ms:elapsed, server_version:'15.7' };
     result._serverLog = stderr;
     res.json(result);
   });
