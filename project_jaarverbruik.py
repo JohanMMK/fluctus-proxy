@@ -53,48 +53,29 @@ KWARTIEREN_2025 = DAGEN_2025 * KWARTIEREN_PER_DAG  # 35040
 MIN_DAGEN_BETROUWBAAR = 14   # vraag 2: drempel voor "ONBETROUWBAAR"
 WEEKDAG_ZOEK_RADIUS = 3       # ±3 dagen rondom doy om weekdag-match te vinden
 
-# Fallback CONTRACT_STAFFEL — identiek aan server.js regels 82-96.
-# In productie wordt deze uit data/leveringscontract.json geladen.
+# Fallback CONTRACT_STAFFEL — gesynchroniseerd met data/leveringscontract.json
+# in productie (Enwyse, 6 schijven). Wordt alleen gebruikt als route geen
+# expliciete staffel meekrijgt EN data/leveringscontract.json ontbreekt.
+# In productie levert server.js zelf de echte CONTRACT_STAFFEL aan.
 DEFAULT_CONTRACT_STAFFEL = [
-    {"min_mwh": 0,    "max_mwh": 100,    "label": "0-100 MWh",    "code": "S1",
-     "consumption_dam_markup": 20.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 100,  "max_mwh": 200,    "label": "100-200 MWh",  "code": "S2",
-     "consumption_dam_markup": 19.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 200,  "max_mwh": 300,    "label": "200-300 MWh",  "code": "S3",
-     "consumption_dam_markup": 18.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 300,  "max_mwh": 400,    "label": "300-400 MWh",  "code": "S4",
-     "consumption_dam_markup": 17.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 400,  "max_mwh": 500,    "label": "400-500 MWh",  "code": "S5",
-     "consumption_dam_markup": 16.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 500,  "max_mwh": 600,    "label": "500-600 MWh",  "code": "S6",
-     "consumption_dam_markup": 15.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 600,  "max_mwh": 700,    "label": "600-700 MWh",  "code": "S7",
-     "consumption_dam_markup": 14.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 700,  "max_mwh": 800,    "label": "700-800 MWh",  "code": "S8",
-     "consumption_dam_markup": 13.5, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 800,  "max_mwh": 900,    "label": "800-900 MWh",  "code": "S9",
-     "consumption_dam_markup": 13.0, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 900,  "max_mwh": 1000,   "label": "900-1000 MWh", "code": "S10",
-     "consumption_dam_markup": 12.5, "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 1000, "max_mwh": 2000,   "label": "1-2 GWh",      "code": "S11",
-     "consumption_dam_markup": 8.0,  "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 2000, "max_mwh": 5000,   "label": "2-5 GWh",      "code": "S12",
-     "consumption_dam_markup": 5.0,  "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
-    {"min_mwh": 5000, "max_mwh": 999999, "label": ">5 GWh",       "code": "S13",
-     "consumption_dam_markup": 3.5,  "consumption_imbalance_markup": 5.0,
-     "injection_dam_markdown": 0.0,  "injection_imbalance_markdown": 11.0},
+    {"code": "S1", "label": "< 100 MWh",     "min_mwh": 0,    "max_mwh": 100,
+     "consumption_dam_markup": 15, "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 15, "injection_imbalance_markdown": 11},
+    {"code": "S2", "label": "100 \u2013 200 MWh",  "min_mwh": 100,  "max_mwh": 200,
+     "consumption_dam_markup": 12, "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 13, "injection_imbalance_markdown": 11},
+    {"code": "S3", "label": "200 \u2013 500 MWh",  "min_mwh": 200,  "max_mwh": 500,
+     "consumption_dam_markup": 8,  "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 11, "injection_imbalance_markdown": 11},
+    {"code": "S4", "label": "500 \u2013 800 MWh",  "min_mwh": 500,  "max_mwh": 800,
+     "consumption_dam_markup": 7,  "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 9,  "injection_imbalance_markdown": 11},
+    {"code": "S5", "label": "800 \u2013 1000 MWh", "min_mwh": 800,  "max_mwh": 1000,
+     "consumption_dam_markup": 6,  "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 7,  "injection_imbalance_markdown": 11},
+    {"code": "S6", "label": "> 1000 MWh",    "min_mwh": 1000, "max_mwh": 9999999,
+     "consumption_dam_markup": 5,  "consumption_imbalance_markup": 5,
+     "injection_dam_markdown": 6,  "injection_imbalance_markdown": 11},
 ]
 
 
