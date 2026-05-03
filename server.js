@@ -5,6 +5,7 @@ const compression = require('compression');
 const { spawn, execFileSync } = require('child_process');
 const path        = require('path');
 const fs          = require('fs');
+const factuurExtract = require('./factuur/extract');
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -290,6 +291,72 @@ app.post('/api/scenario-bewaren', (req, res) => {
   PROJECTEN_DB.add(project);
   res.json({ ok:true });
 });
+
+// ─── BASE CASE FACTUUR-EXTRACTIE (Fase 1) ────────────────────────────────────
+// Accepteert PDF (of image) als base64 in JSON body, stuurt naar Anthropic API
+// met vision support, returnt gestructureerde JSON volgens STATE.baseCase.
+app.post('/api/factuur-extract', async (req, res) => {
+  const startTime = Date.now();
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({ error: 'ANTHROPIC_API_KEY niet geconfigureerd op Railway' });
+    }
+
+    const { files, model } = req.body || {};
+    if (!Array.isArray(files) || files.length === 0) {
+      return res.status(400).json({ error: 'files[] is verplicht en mag niet leeg zijn' });
+    }
+    if (files.length > 10) {
+      return res.status(400).json({ error: 'Max 10 bestanden per request' });
+    }
+
+    const allowedTypes = new Set([
+      'application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp'
+    ]);
+    let totaalBytes = 0;
+    for (const f of files) {
+      if (!f || typeof f !== 'object') return res.status(400).json({ error: 'elk file element moet een object zijn' });
+      if (!f.base64 || typeof f.base64 !== 'string') return res.status(400).json({ error: 'base64 verplicht per bestand' });
+      if (!allowedTypes.has(f.mediaType)) {
+        return res.status(415).json({
+          error: `mediaType '${f.mediaType}' niet ondersteund. Toegestaan: ${[...allowedTypes].join(', ')}`,
+          hint: "HEIC foto's: gebruik de Fluctus snippet om foto's naar PDF te converteren in de browser"
+        });
+      }
+      totaalBytes += Math.floor(f.base64.length * 0.75);
+    }
+    if (totaalBytes > 10 * 1024 * 1024) {
+      return res.status(413).json({
+        error: `Totale upload ${(totaalBytes/1024/1024).toFixed(1)} MB overschrijdt limiet van 10 MB`,
+        hint: 'Verklein foto resolutie of splits in meerdere requests'
+      });
+    }
+
+    console.log(`[factuur-extract] start — ${files.length} bestand(en), ${(totaalBytes/1024).toFixed(0)} KB totaal`);
+
+    const result = await factuurExtract.run({
+      files,
+      postcodes: POSTCODES_DATA || {},
+      tarieven: TARIEVEN_MAP || {},
+      apiKey,
+      model
+    });
+
+    console.log(`[factuur-extract] OK in ${Date.now()-startTime}ms — model=${result._meta.model}, tokens=${result._meta.input_tokens||'?'}/${result._meta.output_tokens||'?'}`);
+    res.json(result);
+  } catch (e) {
+    console.error('[factuur-extract] FOUT:', e.message);
+    if (/HTTP 4|niet-ondersteund/i.test(e.message)) {
+      res.status(422).json({ error: e.message });
+    } else if (/timeout|abort/i.test(e.message)) {
+      res.status(504).json({ error: 'Anthropic API timeout (>30s) — probeer opnieuw' });
+    } else {
+      res.status(500).json({ error: e.message });
+    }
+  }
+});
+
 
 // ─── SIMULATIE ────────────────────────────────────────────────────────────────
 app.post('/api/nominatie-sim', (req, res) => {
@@ -906,7 +973,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.6 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.7 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt geladen: ${MARKT ? 'ja ('+MARKT.n_kwartieren+' kwartieren)' : 'nee'}`);
 });
