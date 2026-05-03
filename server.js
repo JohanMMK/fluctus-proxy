@@ -190,7 +190,7 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.7', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.9', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -400,7 +400,7 @@ app.post('/api/nominatie-sim', (req, res) => {
     let result;
     try { result = JSON.parse(stdout.slice(s, e+1)); }
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
-    result._meta = { elapsed_ms:elapsed, server_version:'15.7' };
+    result._meta = { elapsed_ms:elapsed, server_version:'15.9' };
     result._serverLog = stderr;
     res.json(result);
   });
@@ -973,7 +973,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.7 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.9 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt geladen: ${MARKT ? 'ja ('+MARKT.n_kwartieren+' kwartieren)' : 'nee'}`);
 });
