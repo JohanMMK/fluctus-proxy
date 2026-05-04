@@ -146,6 +146,31 @@ if (POSTCODES_DATA) {
   console.log(`[postcodes] ${entries.length} postcodes geladen`);
 }
 
+// ─── POSTCODE-FALLBACK INDEX (v15.10, BaseCase Uitbreiding Fase 2 sessie 3) ──
+// Pre-bouw sorted array voor O(log n) laagste-buurman lookup. Wordt gebruikt
+// door POST /api/postcode-fallback. Anti-regressie: alleen ADD, geen MODIFY.
+const POSTCODE_FALLBACK_MAX_DELTA = 50;
+const POSTCODE_KEYS_SORTED = Object.keys(POSTCODE_GRD)
+  .filter(k => /^\d{4}$/.test(k))
+  .map(k => parseInt(k, 10))
+  .sort((a, b) => a - b);
+console.log(`[postcode-fallback] index gebouwd: ${POSTCODE_KEYS_SORTED.length} postcodes`);
+
+// Binary search: returnt index van grootste element ≤ target, of -1 als geen.
+function _laagsteBuurmanIndex(target) {
+  let lo = 0, hi = POSTCODE_KEYS_SORTED.length - 1, res = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (POSTCODE_KEYS_SORTED[mid] <= target) {
+      res = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return res;
+}
+
 // Batterijen
 let BATTERIJEN = loadJson('data/batterijen.json', [
   { id:'bess-50',  naam:'BESS 50 kWh / 25 kW',  kwh:50,  kw:25, eta:0.85, dod:0.90, capex:20000, max_cycli:8000 },
@@ -191,7 +216,7 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.9', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.10', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -208,6 +233,71 @@ app.get('/api/postcode-grd', (req, res) => {
   if (!hit) return res.status(404).json({ error:`Postcode ${pc} niet gevonden` });
   const gemeenten = (PC_GEMEENTE_INDEX[pc] || []);
   res.json({ postcode:pc, grd:hit.grd, dnb_volledig:hit.dnb, gemeenten });
+});
+
+// ─── POSTCODE FALLBACK (v15.10, BaseCase Uitbreiding Fase 2 sessie 3) ────────
+// Body: { postcode: "8409" }
+// Strategie A (laagste-buurman): bij MISS zoekt route de numeriek dichtstbij-
+// zijnde LAGER genummerde postcode in POSTCODE_GRD, binnen radius 50.
+// Geverifieerd: 8401→8400 (Δ=1), 8409→8400 (Δ=9), 3541→3540, 1001→1000,
+// 9999→9992. Zie sessie-3 voortgangslog §11.2.
+app.post('/api/postcode-fallback', (req, res) => {
+  const body = req.body || {};
+  const pcRaw = (body.postcode == null ? '' : String(body.postcode)).trim();
+  if (!/^\d{4}$/.test(pcRaw)) {
+    return res.status(400).json({ ok:false, error:'postcode moet 4 cijfers zijn' });
+  }
+  const pcInt = parseInt(pcRaw, 10);
+
+  // Directe hit
+  if (POSTCODE_GRD[pcRaw]) {
+    const hit = POSTCODE_GRD[pcRaw];
+    const gemeenten = (PC_GEMEENTE_INDEX[pcRaw] || []);
+    return res.json({
+      ok: true,
+      postcode: pcRaw,
+      postcodeFallback: pcRaw,
+      afstand: 0,
+      grd: hit.grd,
+      dnb_volledig: hit.dnb,
+      gemeenten,
+      confidence: 'exact'
+    });
+  }
+
+  // Laagste-buurman binnen radius
+  const idx = _laagsteBuurmanIndex(pcInt);
+  if (idx === -1) {
+    return res.status(404).json({
+      ok: false,
+      postcode: pcRaw,
+      reden: `Geen lager genummerde postcode in DB (range start ${POSTCODE_KEYS_SORTED[0]||'?'})`,
+      confidence: 'none'
+    });
+  }
+  const buurmanInt = POSTCODE_KEYS_SORTED[idx];
+  const afstand = pcInt - buurmanInt;
+  if (afstand > POSTCODE_FALLBACK_MAX_DELTA) {
+    return res.status(404).json({
+      ok: false,
+      postcode: pcRaw,
+      reden: `Geen buurpostcode binnen ${POSTCODE_FALLBACK_MAX_DELTA} (dichtstbij: ${String(buurmanInt).padStart(4,'0')}, Δ=${afstand})`,
+      confidence: 'none'
+    });
+  }
+  const buurmanStr = String(buurmanInt).padStart(4, '0');
+  const hit = POSTCODE_GRD[buurmanStr];
+  const gemeenten = (PC_GEMEENTE_INDEX[buurmanStr] || []);
+  return res.json({
+    ok: true,
+    postcode: pcRaw,
+    postcodeFallback: buurmanStr,
+    afstand,
+    grd: hit.grd,
+    dnb_volledig: hit.dnb,
+    gemeenten,
+    confidence: 'fallback'
+  });
 });
 
 app.get('/api/gemeenten-lijst', (req, res) => {
