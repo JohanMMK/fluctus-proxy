@@ -859,7 +859,7 @@ app.get('/elia-data', async (req, res) => {
 
         results.forEach(row => {
           const t = new Date(row.datetime).getTime();
-          const v = parseFloat(row.imbalanceprice ?? row.marginalincrementalprice ?? 0);
+          const v = parseFloat(row.imbalanceprice ?? 0);
           if (!isNaN(v) && !seen.has(t)) seen.set(t, v);
         });
 
