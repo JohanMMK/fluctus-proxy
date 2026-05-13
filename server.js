@@ -1,14 +1,33 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.11.1 (BaseCase Uitbreiding Fase 2 — sessie 4 hotfix)
-// Geproduceerd:  2026-05-13 14:25 UTC
+// Versie:        v15.12.0 (Maak-Voorstel + BESS-Custom — sessie 5b)
+// Geproduceerd:  2026-05-13 20:00 UTC
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-// Wijzigingen vs v15.11:
+// Vereist:       Simulator.txt v1.17.0+ (UI verwacht /api/scenarios-batch-bewaren)
+//                simulator.py v1.5 (geen wijziging — accepteert al dict-shape batterij)
+//                apply_base_case.js v1.16+ (top-level klantBtw/leveringsadres velden)
+// Wijzigingen v15.12.0 vs v15.11.1:
+//   - BESS-CUSTOM detectie in buildSimInput: wanneer ui.batterijId === 'CUSTOM'
+//     en ui.batterijCustom aanwezig is, gebruik die dict in plaats van de
+//     catalogus-lookup. Stuurt {kw, kwh, dod_pct, rte_pct, capex_eur, max_cycli}
+//     door naar simulator.py — dezelfde shape die simulator.py v1.5 al accepteert.
+//     Anti-regressie: catalogus-lookup-pad (ui.batterijId !== 'CUSTOM') is exact
+//     onveranderd. Smartunit/Steylaert/Advario regressie-baselines blijven gelden.
+//   - NIEUWE endpoint POST /api/scenarios-batch-bewaren: wrapper rond bestaande
+//     _scenariosGithubWrite. Schrijft N scenario's sequentieel naar
+//     fluctus-scenarios repo. Returnt per scenario {scenario, ok, source,
+//     message}. Best-effort: als één commit faalt, gaat de batch door en
+//     wordt het resultaat per scenario gerapporteerd. Body-shape:
+//       { project: 'SMARTUNIT',
+//         scenarios: [{scenario: '2_DynamischContract_01-26', data: {...}},
+//                     {scenario: '3_DynamischContract_12M',  data: {...}},
+//                     {scenario: '4_Voorstel_PV_BESS',       data: {...}}] }
+// Wijzigingen v15.11.1 vs v15.11:
 //   - periodeTot inclusief→exclusief conversie (+1 dag) bij jaar='specifiek'
 //     (anders mist simulator de laatste factuurdag — bv. 31 jan)
-// Wijzigingen vs v15.10:
+// Wijzigingen v15.11 vs v15.10:
 //   - _sliceMarktVoorPeriode: marktdata exact gesliceerd op simPeriode
 //     (fixt ook latente kalenderjaar-bug van v15.10)
 //   - Scenario-routes: read-through cache + GitHub persistentie
@@ -368,7 +387,7 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.11.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.12.0', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -619,6 +638,100 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   }
 });
 
+// v15.12 sessie 5b: POST /api/scenarios-batch-bewaren — sequentieel meerdere
+// scenario's persistéren in fluctus-scenarios repo + cache. Wrapper rond
+// _scenariosGithubWrite, gebruikt door de "Maak voorstel"-flow in Simulator.txt
+// v1.17 om in één click Sc2 + Sc3 + Sc4 aan te maken na factuur-vergelijking.
+//
+// Body:
+//   { project: 'SMARTUNIT',
+//     scenarios: [{scenario: '2_DynamischContract_01-26', data: {...}},
+//                 {scenario: '3_DynamischContract_12M',  data: {...}},
+//                 {scenario: '4_Voorstel_PV_BESS',       data: {...}}] }
+//
+// Response:
+//   { ok: true|false,                          // false als > 0 fouten
+//     results: [
+//       {scenario, ok: true,  source: 'github',     message, path},
+//       {scenario, ok: false, source: 'cache-only', message, path, error},
+//       ...
+//     ],
+//     summary: { totaal: 3, github: 2, cacheOnly: 1 } }
+//
+// Best-effort: een github-fout op één scenario stopt de batch NIET. Cache
+// wordt voor ALLE scenario's bijgewerkt zodat de UI ze direct kan tonen.
+app.post('/api/scenarios-batch-bewaren', async (req, res) => {
+  const { project, scenarios } = req.body || {};
+  if (!project || !Array.isArray(scenarios) || scenarios.length === 0) {
+    return res.status(400).json({ error: 'project en scenarios[] zijn verplicht' });
+  }
+  if (scenarios.length > 10) {
+    return res.status(400).json({ error: 'Max 10 scenarios per batch' });
+  }
+  for (const s of scenarios) {
+    if (!s || !s.scenario || !s.data) {
+      return res.status(400).json({ error: 'elk scenarios[] item moet {scenario, data} hebben' });
+    }
+  }
+
+  // Cache-update eerst voor alle scenario's (idem aan single-bewaren patroon)
+  if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
+  for (const s of scenarios) {
+    SCENARIOS_DB[project][s.scenario] = s.data;
+  }
+  PROJECTEN_DB.add(project);
+
+  // GitHub-commit sequentieel. We doen niet Promise.all want fluctus-scenarios
+  // is een kleine repo en parallelle commits kunnen sha-conflicten geven.
+  const results = [];
+  let okCount = 0;
+  let cacheOnlyCount = 0;
+
+  for (const s of scenarios) {
+    const filepath = _scenarioPad(project, s.scenario);
+    let sha;
+    try {
+      const existing = await _scenariosGithubRead(filepath);
+      sha = existing.sha;
+    } catch (_) {
+      // Bestand bestaat nog niet — sha undefined = create i.p.v. update
+    }
+    try {
+      await _scenariosGithubWrite(filepath, s.data, sha);
+      results.push({
+        scenario: s.scenario,
+        ok: true,
+        source: 'github',
+        message: `Scenario bewaard in ${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}`,
+        path: filepath
+      });
+      okCount++;
+    } catch (e) {
+      console.error(`[scenarios-batch-bewaren] GitHub write fail ${s.scenario}: ${e.message}`);
+      results.push({
+        scenario: s.scenario,
+        ok: false,
+        source: 'cache-only',
+        message: `Bewaard in geheugen, GitHub-commit faalde: ${e.message}`,
+        path: filepath,
+        error: e.message
+      });
+      cacheOnlyCount++;
+    }
+  }
+
+  const allOk = cacheOnlyCount === 0;
+  res.status(allOk ? 200 : 207).json({
+    ok: allOk,
+    results,
+    summary: {
+      totaal: scenarios.length,
+      github: okCount,
+      cacheOnly: cacheOnlyCount
+    }
+  });
+});
+
 // ─── BASE CASE FACTUUR-EXTRACTIE (Fase 1) ────────────────────────────────────
 // Accepteert PDF (of image) als base64 in JSON body, stuurt naar Anthropic API
 // met vision support, returnt gestructureerde JSON volgens STATE.baseCase.
@@ -832,8 +945,26 @@ function buildSimInput(ui) {
     ? ui.contract.staffel : CONTRACT_STAFFEL;
 
   // Batterij
+  // v15.12 sessie 5b: BESS-CUSTOM detectie. Wanneer ui.batterijId === 'CUSTOM'
+  // gebruikt de verkoper de stap-5 Custom-mode (vrij ingegeven kw/kwh/RTE/...).
+  // In dat geval slaan we de catalogus-lookup over en bouwen we batt direct
+  // uit ui.batterijCustom. Bij ontbrekende velden vallen we terug op
+  // realistische defaults (350 €/kWh CAPEX, 90% DoD, 92% RTE, 8000 cycli).
+  // Anti-regressie: bij batterijId !== 'CUSTOM' is dit pad inert; oude flow
+  // blijft 1-op-1 hetzelfde.
   let batt = { kw:0, kwh:0, dod_pct:90, rte_pct:85, capex_eur:0, max_cycli:8000 };
-  if (ui.batterijId) {
+  if (ui.batterijId === 'CUSTOM' && ui.batterijCustom) {
+    const c = ui.batterijCustom;
+    batt = {
+      kw:        Number(c.kw) || 0,
+      kwh:       Number(c.kwh) || 0,
+      dod_pct:   Number(c.dod_pct) || 90,
+      rte_pct:   Number(c.rte_pct) || 92,
+      capex_eur: Number(c.capex_eur) || (350 * (Number(c.kwh) || 0)),
+      max_cycli: Number(c.max_cycli) || 8000
+    };
+    console.log(`[sim] BESS-CUSTOM: ${c.naam || 'unnamed'} — ${batt.kw} kW / ${batt.kwh} kWh / RTE ${batt.rte_pct}% / CAPEX ${batt.capex_eur} €`);
+  } else if (ui.batterijId) {
     const b = BATTERIJEN.find(x => x.id===ui.batterijId || x.naam===ui.batterijId);
     if (b) batt = { kw:b.kw, kwh:b.kwh, dod_pct:Math.round((b.dod||0.90)*100),
                     rte_pct:Math.round((b.eta||0.85)*100), capex_eur:b.capex||0, max_cycli:b.max_cycli||8000 };
