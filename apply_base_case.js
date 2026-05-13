@@ -1,59 +1,43 @@
 // ============================================================================
 // FLUCTUS — applyBaseCaseToWizard (canonical reference)
-// Versie:        v1.16 (BaseCase Uitbreiding Fase 3 — sessie 5a)
-// Geproduceerd:  2026-05-13 15:30 UTC
+// Versie:        v1.17 (Maak-Voorstel + BESS-Custom — sessie 5b, header-only bump)
+// Geproduceerd:  2026-05-13 21:00 UTC
 // Doelomgeving:  Referentie-bestand (canonical) in JohanMMK/fluctus-proxy.
-//                Geïnlined in Simulator.txt v1.16 voor productie in Odoo. De
-//                inline-versie in Simulator.txt v1.16 sessie 5a doet bovendien:
-//                  - project-naam clean (strip rechtsvormen, "T.a.v." prefix)
-//                  - scenario-naam "1_Maandfactuur_MM-YY" uit periodeVan
-//                  - async collision-check via /api/scenarios?project=
-//                  - auto-save scenario 1 via /api/scenario-bewaren
-//                Deze canonical-reference houdt de PURE state-mapping (zoals in
-//                validate_v2.py). De Simulator.txt-versie wraps deze mapping
-//                met auto-naamgeving + auto-save UI-flow.
+//                Geïnlined in Simulator.txt v1.17.0 voor productie in Odoo.
 // Repo:          JohanMMK/fluctus-proxy
+// Vereist:       server.js v15.12.0+ (BESS-CUSTOM detect + batch-bewaren endpoint)
+//                Simulator.txt v1.17.0+ (Maak-Voorstel-flow + BESS-Custom UI)
 // ----------------------------------------------------------------------------
-// applyBaseCaseToWizard — Fase 3 van BaseCase Uitbreiding (v1.16 sessie 5a)
-// ============================================================================
-// Pure functie. Neemt het baseCase object dat /api/factuur-extract teruggaf,
-// en produceert:
-//   - status: 'OK' | 'OK_MET_INFO' | 'OK_MET_WAARSCHUWING' | 'BLOKKEER'
-//   - reasons: array van {code, severity, message}
-//   - state: object met velden voor STATE-mutatie (null bij BLOKKEER)
-//   - gotoStep: 0-indexed stap (6=stap 7 kVA, 7=stap 8 periode, 8=stap 9 resultaat)
+// Wijzigingen v1.17 vs v1.16:
+//   - HEADER-ONLY BUMP. Geen logica-wijzigingen.
+//   - state.klantBtw, state.leveringsadres en state.scenarioActie='nieuw' (uit
+//     v1.16) zijn de fundering voor de "Maak voorstel"-flow in sessie 5b. Deze
+//     velden worden door Simulator.txt v1.17.0 gelezen om Sc2/Sc3/Sc4 op te
+//     bouwen, maar de mapping zelf in deze functie blijft 1-op-1 hetzelfde.
+//   - Anti-regressie: validate_v2.py hoeft niet aangepast want geen logica-
+//     wijziging. Alle bestaande tests (Smartunit, Steylaert, Advario, Vema)
+//     produceren identieke {status, reasons, state, gotoStep} output.
+// ----------------------------------------------------------------------------
+// Eerdere wijzigingen v1.16 vs v1.15:
+//   - state.klantBtw en state.leveringsadres expliciet als top-level velden
+//     gemarkeerd (zaten al impliciet in state.baseCase). Wordt door sessie 5b
+//     "Maak voorstel"-flow gebruikt om in scenario 4 (commerciële basis)
+//     meteen het BTW-nummer + leveringsadres beschikbaar te hebben.
+//   - state.scenarioActie='nieuw' geset zodat de Simulator.txt PDF-CTA-logica
+//     weet dat dit een nieuw project is (vs. 'staand' bij scenario-load).
+//   - state.project en state.scenario blijven RUW (klantnaam + "base case <nr>").
+//     De Simulator.txt v1.16+ _fmodApplyToState overschrijft deze met de
+//     clean+scenario1-naam variant. Voor backwards-compat met sessie-3 tests
+//     van applyBaseCaseToWizard zelf blijven de oude waardes hier staan.
 //
-// Spiegelt validate_v2.py 1-op-1. Wijzigingen aan logica gebeuren ALTIJD
-// eerst in de Python validator, dan hier.
-//
-// Architecturele context:
-// - Stap 6 (contract) wordt NIET ingevuld -> verkoper kiest Enwyse-staffel
-//   handmatig, of (later) via POST /api/factuur-staffel-bepalen.
-// - Periode is ALTIJD specifiek uit factuur (geen rolling, geen kalenderjaar).
-//   Simulator.py v1.5+ accepteert {type:"specifiek", van, tot} — sessie 4.
-// - Postcode-cascade: snippet roept /api/postcode-grd; bij 404 fallback naar
-//   /api/postcode-fallback. Hier alleen de pure logica.
-//
-// Wijzigingen v1.16 sessie 5a:
-// - state.klantBtw en state.leveringsadres expliciet als top-level velden
-//   gemarkeerd (zaten al impliciet in state.baseCase). Wordt door sessie 5b
-//   "Maak voorstel"-flow gebruikt om in scenario 4 (commerciële basis)
-//   meteen het BTW-nummer + leveringsadres beschikbaar te hebben.
-// - state.scenarioActie='nieuw' geset zodat de Simulator.txt PDF-CTA-logica
-//   weet dat dit een nieuw project is (vs. 'staand' bij scenario-load).
-// - state.project en state.scenario blijven RUW (klantnaam + "base case <nr>").
-//   De Simulator.txt v1.16 _fmodApplyToState overschrijft deze met de
-//   clean+scenario1-naam variant. Voor backwards-compat met sessie-3 tests
-//   van applyBaseCaseToWizard zelf blijven de oude waardes hier staan.
-//
-// Wijzigingen v1.15 sessie 4:
-// - gotoStep nu standaard 7 (= stap 8 PERIODE) zodat verkoper de groene
-//   "📎 Periode komt uit factuur" badge visueel kan verifiëren vóór hij
-//   doorklikt naar resultaat. Bij ontbrekend kVA blijft 6 (= stap 7 aansluiting).
-// - state object uitgebreid met Simulator.txt-compatibele veldnamen:
-//   jaar='specifiek', periodeVan, periodeTot, baseCaseLoskoppeld=false.
-//   Oude velden (periode, kVA, jaarverbruikMWh, profiel) blijven beschikbaar
-//   voor backwards-compat met sessie 3 tests.
+// Eerdere wijzigingen v1.15 vs v1.14:
+//   - gotoStep nu standaard 7 (= stap 8 PERIODE) zodat verkoper de groene
+//     "📎 Periode komt uit factuur" badge visueel kan verifiëren vóór hij
+//     doorklikt naar resultaat. Bij ontbrekend kVA blijft 6 (= stap 7 aansluiting).
+//   - state object uitgebreid met Simulator.txt-compatibele veldnamen:
+//     jaar='specifiek', periodeVan, periodeTot, baseCaseLoskoppeld=false.
+//     Oude velden (periode, kVA, jaarverbruikMWh, profiel) blijven beschikbaar
+//     voor backwards-compat met sessie 3 tests.
 // ============================================================================
 
 (function (root) {
