@@ -1,8 +1,30 @@
 #!/usr/bin/env python3
 """
-Fluctus Battery Dispatch Simulator v1.4
+Fluctus Battery Dispatch Simulator v1.5
 ========================================
 Lees JSON van stdin, schrijf JSON naar stdout.
+
+Wijzigingen v1.5 (BaseCase Uitbreiding sessie 4 — periode-handling):
+  - Nieuwe simulatieperiode-modus "specifiek": simulatieperiode.type='specifiek'
+    laat de simulator exact de meegegeven [van, tot) periode draaien zonder
+    extrapolatie naar volledig jaar. Bedoeld voor base-case-factuurvergelijking
+    (bv. Smartunit januari 2026 over die exacte maand simuleren).
+  - Bij type='specifiek' wordt 'jaarverbruik_mwh' geinterpreteerd als
+    PERIODE-volume (= factuur-afname over [van, tot)), NIET als jaarvolume.
+    Simulator berekent intern het effectief jaarverbruik via de profielfractie
+    in periode (zelfde weekdag-bewuste mapping als project_jaarverbruik.py).
+  - Effectief jaarverbruik wordt gebruikt voor Enwyse-staffel-tier en
+    accijnzen-staffel-keuze (zodat klant niet in te lage schijf valt als
+    periode-volume <<< jaarvolume).
+  - Vaste-kost componenten (vaste_kost_leverancier, databeheer afname/injectie,
+    vaste_vergoeding injectie, beschikbaar_vermogen, energiefonds) worden
+    geprorateerd op n_kalendermaanden_in_periode / 12. Voor volledige jaren
+    (12 maanden) verandert er niets — bewezen 0-regressie via diff.
+  - Anti-regressie: alle wijzigingen aan bereken_jaarfactuur zijn additief via
+    nieuwe default-parameters (effectief_jaarverbruik_voor_pricing=None,
+    n_maanden=12 default). Calls zonder die parameters geven IDENTIEKE output.
+  - Bestaande paden rolling12/kalenderjaar zijn ongewijzigd: type-veld optional,
+    default = oude gedrag.
 
 Wijzigingen v1.4:
   - BSP-modus (Niveau 3b): perfect IMB-foresight LP met:
@@ -65,7 +87,12 @@ Input-structuur (top-level keys):
   - netbeheer: { grd, spanning, tarieven: {...complete tariefset uit Overzicht 2026...} }
   - forecast: { sigma_da, sigma_imb, sigma_volume_verbruik_pct, sigma_volume_pv_pct }
   - markt: { spot_kwartier[N], imb_kwartier[N], timestamps[N] }
-  - simulatieperiode: { van: "YYYY-MM-DD", tot: "YYYY-MM-DD" }
+  - simulatieperiode: { van: "YYYY-MM-DD", tot: "YYYY-MM-DD",
+                        type: "kalenderjaar" | "specifiek" (optional, default: kalenderjaar) }
+                        # NIEUW v1.5: bij type="specifiek" wordt jaarverbruik_mwh
+                        # geinterpreteerd als periode-volume (factuur-afname),
+                        # niet als jaarvolume. Vaste-kost componenten worden
+                        # geprorateerd op kalendermaanden-fractie.
   - random_seed: int (default 42, voor deterministische ruis)
 
 Output-structuur: zie scenario-JSON spec in instructie.
@@ -154,6 +181,60 @@ def add_relative_noise(values: list, sigma_pct: float, rng: random.Random) -> li
         return list(values)
     sigma_frac = sigma_pct / 100.0
     return [v * (1 + rng.gauss(0, sigma_frac)) for v in values]
+
+
+# ─── Helpers voor periode-handling (v1.5 sessie 4) ──────────────────────────
+
+def _n_kalendermaanden_in_periode(sim_timestamps: list) -> int:
+    """
+    Tel het aantal unieke (jaar, maand) tuples in sim_timestamps.
+    Gebruikt voor prorata van vaste-kost componenten in bereken_jaarfactuur.
+    
+    Voorbeelden:
+      - jan 2026 (2026-01-01 → 2026-02-01, exclusief tot): {(2026,1)} = 1
+      - dec 2025 (2025-12-01 → 2026-01-01): {(2025,12)} = 1
+      - jaar 2025 (2025-01-01 → 2026-01-01): 12 unieke tuples = 12
+      - rolling12 apr→apr (2025-04-28 → 2026-04-27): typisch 13 (4 unieke maanden in 2025 + maanden in 2026)
+    
+    Voor het defaultpad (volledig jaar of rolling) blijft de caller op
+    n_maanden=12 hardcoded en raakt deze helper niet — alleen het
+    type="specifiek" pad gebruikt deze functie.
+    """
+    if not sim_timestamps:
+        return 0
+    seen = set()
+    for ts in sim_timestamps:
+        seen.add((ts.year, ts.month))
+    return len(seen)
+
+
+def _profielfractie_in_periode(basis_profiel: list, sim_timestamps: list) -> float:
+    """
+    Bereken de som van basis_profiel-waarden voor de kwartieren in
+    sim_timestamps, via WEEKDAG-BEWUSTE 2025-mapping (zelfde radius-3
+    logica als project_jaarverbruik.py).
+    
+    Gebruikt quarter_index_in_year_2025() — single source of truth voor
+    mapping. Returnt typisch < 1.0 (basis_profiel heeft som=1.0 over heel
+    jaar). Voor jan 2026 op een kantoorprofiel: ~0.085 (ongeveer 1/12,
+    licht aangepast voor seizoenseffecten en weekdag-mapping).
+    
+    Wordt gebruikt om effectief_jaarverbruik te berekenen:
+      effectief_jaarverbruik_mwh = periode_volume_mwh / profielfractie
+    """
+    if not basis_profiel or not sim_timestamps:
+        return 0.0
+    if len(basis_profiel) != 35040:
+        log.warning(
+            f"_profielfractie_in_periode: basis_profiel heeft {len(basis_profiel)} "
+            f"waarden, verwacht 35040. Resultaat onbetrouwbaar."
+        )
+    totaal = 0.0
+    for ts in sim_timestamps:
+        idx = quarter_index_in_year_2025(ts)
+        if 0 <= idx < len(basis_profiel):
+            totaal += basis_profiel[idx]
+    return totaal
 
 
 # =============================================================================
@@ -702,6 +783,7 @@ def bereken_jaarfactuur(
     n_maanden: int = 12,
     nom_afn_kw_all: list = None,   # v1.4 BSP: genomineerde afname (None=passive default)
     nom_inj_kw_all: list = None,   # v1.4 BSP: genomineerde injectie
+    effectief_jaarverbruik_voor_pricing: float = None,  # v1.5 sessie 4
 ) -> dict:
     """
     Bereken jaarfactuur volgens groepen A-E.
@@ -712,6 +794,20 @@ def bereken_jaarfactuur(
         IMB-tak rekent op deviation (grid_in - nom_afn) × IMB
         Belastingen (gsc/wkk/vergr) op fysiek volume (grid_in)
     - Als ze None zijn → passive gedrag (alle volume via DAM zoals voorheen)
+    
+    Specifieke-periode uitbreiding (v1.5 sessie 4):
+    - n_maanden: aantal kalendermaanden in de simulatieperiode (voor prorata
+      van vaste-kost componenten). Default 12 = volledig jaar = identiek
+      aan v1.4 gedrag.
+    - effectief_jaarverbruik_voor_pricing: bij type="specifiek" wordt dit
+      meegegeven als het GEPROJECTEERDE jaarverbruik (=periode_volume /
+      profielfractie). Het wordt gebruikt voor:
+        (a) Enwyse-staffel-tier-keuze in resolve_contract_pricing
+        (b) Accijnzen-staffel-keuze
+      Het BEDRAG van energie/MWh-componenten en accijnzen blijft op het
+      werkelijke periode-volume gebaseerd; alleen de TARIEF-KEUZE schakelt
+      naar het projecteerde jaarniveau.
+      Bij None (default): tier en accijnzen op periode-volume = v1.4 gedrag.
     
     Returns: dict met groepen en totaal.
     """
@@ -728,6 +824,12 @@ def bereken_jaarfactuur(
 
     tarieven = netbeheer['tarieven']
     spanning = netbeheer['spanning']  # 'MS' of 'LS'
+
+    # v1.5 sessie 4: prorata-factor voor vaste-kost componenten.
+    # Bij n_maanden=12 (default): factor=1.0, IDENTIEK aan v1.4 gedrag.
+    # Bij type="specifiek" wordt caller geacht n_maanden te zetten op het
+    # aantal kalendermaanden in [van, tot) — bv. 1 voor jan-only.
+    prorata_factor = n_maanden / 12.0
 
     # Fysiek (werkelijk) volume in kWh
     afname_kwh_per_kwartier = [grid_in_kw[i] * dt_h for i in range(N)]
@@ -774,7 +876,15 @@ def bereken_jaarfactuur(
     # ---- GROEP A: ENERGIEKOST (commodity) ----
     # v1.4 refactor: DAM-tak rekent op nominatie, IMB-tak op deviation, belastingen op fysiek volume.
     # In passive-modus (geen BSP) zijn nominatie = werkelijk → identiek aan oude logica.
-    pricing = resolve_contract_pricing(contract, totaal_afname_mwh)
+    # v1.5 sessie 4: tier-keuze gebruikt effectief jaarverbruik bij type="specifiek",
+    # zodat klant niet in te lage schijf valt als periode-volume <<< jaarvolume.
+    # Bij None (default): zelfde gedrag als v1.4 (tier op periode/totaal volume).
+    _vol_voor_pricing = (
+        effectief_jaarverbruik_voor_pricing
+        if effectief_jaarverbruik_voor_pricing is not None and effectief_jaarverbruik_voor_pricing > 0
+        else totaal_afname_mwh
+    )
+    pricing = resolve_contract_pricing(contract, _vol_voor_pricing)
     A = {}
     # A1. Afname energie spot — op NOMINATIE (in passive: = grid_in)
     A['afname_energie_spot'] = sum(
@@ -800,8 +910,9 @@ def bereken_jaarfactuur(
         A['imbalance_afname'] = sum(
             afname_dev_kw[i] * dt_h * imb_eur_mwh[i] / 1000.0 for i in range(N)
         )
-    # A7. Vaste kost leverancier (€/maand × 12)
-    A['vaste_kost_leverancier'] = pricing['vaste_kost_maand'] * 12
+    # A7. Vaste kost leverancier (€/maand × aantal maanden)
+    # v1.5: was × 12 hardcoded. Nu × n_maanden (default 12 → identiek aan v1.4).
+    A['vaste_kost_leverancier'] = pricing['vaste_kost_maand'] * n_maanden
     # A8. Injectie energie spot (negatief = inkomst) — op NOMINATIE
     A['injectie_energie_spot'] = -sum(
         nom_inj_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
@@ -857,8 +968,8 @@ def bereken_jaarfactuur(
     B['proportioneel'] = totaal_afname_mwh * tar_prop
     # Reactief: cosφ=1 in v1 → 0
     B['reactief'] = 0.0
-    # Databeheer
-    B['databeheer'] = tar_databeheer
+    # Databeheer (€/jaar) — v1.5: × prorata_factor (default 1.0 = identiek aan v1.4)
+    B['databeheer'] = tar_databeheer * prorata_factor
     B['_subtotaal'] = sum(v for k, v in B.items() if not k.startswith('_'))
 
     # ---- GROEP C: NETGEBRUIK INJECTIE ----
@@ -874,8 +985,10 @@ def bereken_jaarfactuur(
     else:
         gem_maandpiek_inj = 0
     C['capaciteit_injectie'] = gem_maandpiek_inj * tar_inj_cap * 12
-    C['databeheer_injectie'] = tar_inj_databeheer
-    C['vaste_vergoeding'] = tar_inj_vaste
+    # Databeheer_injectie en vaste_vergoeding zijn €/jaar — v1.5: × prorata_factor.
+    # (Bij default n_maanden=12: factor=1.0, identiek aan v1.4.)
+    C['databeheer_injectie'] = tar_inj_databeheer * prorata_factor
+    C['vaste_vergoeding'] = tar_inj_vaste * prorata_factor
     C['_subtotaal'] = sum(v for k, v in C.items() if not k.startswith('_'))
 
     # ---- GROEP D: TRANSPORT (Elia, indien apart) ----
@@ -894,7 +1007,7 @@ def bereken_jaarfactuur(
     D['systeembeheer'] = totaal_afname_mwh * tar_tr_systeem
     D['reserves'] = totaal_afname_mwh * tar_tr_reserves
     D['marktintegratie'] = totaal_afname_mwh * tar_tr_markt
-    D['beschikbaar_vermogen'] = toegangsvermogen * tar_tr_beschikb
+    D['beschikbaar_vermogen'] = toegangsvermogen * tar_tr_beschikb * prorata_factor
     D['reactief_transport'] = 0.0  # cosφ=1
     D['_subtotaal'] = sum(v for k, v in D.items() if not k.startswith('_'))
 
@@ -920,22 +1033,46 @@ def bereken_jaarfactuur(
             (9999999, 10.00),  # Schijf 5: >1000 MWh/jaar (te verifiëren)
         ]
     accijns_basis = tarieven.get('accijns_basis_eur_mwh', 0.0)  # voor LS: 1.9261
-    accijns_totaal = totaal_afname_mwh * accijns_basis  # gewone accijns (LS only)
-    rest_mwh = totaal_afname_mwh
-    vorig_grens = 0
-    for grens, tarief in accijnzen_staffel:
-        schijf_mwh = max(0, min(rest_mwh, grens - vorig_grens))
-        if schijf_mwh <= 0:
-            break
-        accijns_totaal += schijf_mwh * tarief
-        rest_mwh -= schijf_mwh
-        vorig_grens = grens
-        if rest_mwh <= 0:
-            break
+
+    if effectief_jaarverbruik_voor_pricing is not None and effectief_jaarverbruik_voor_pricing > 0:
+        # v1.5 sessie 4: bij type="specifiek" wordt de schijf bepaald op het
+        # GEPROJECTEERDE jaarverbruik (zodat klant niet in te lage schijf valt),
+        # daarna geprorateerd naar werkelijke periode-volume via volume-fractie.
+        # Berekening:
+        #   1. Volledig jaarbedrag bij effectief_jaarverbruik (cumulatief over schijven)
+        #   2. accijns_periode = jaarbedrag × (totaal_afname_mwh / effectief_jaarverbruik)
+        # Dit komt mathematisch overeen met "gemiddeld tarief over schijven" × periode-volume.
+        jaarbedrag_acc = effectief_jaarverbruik_voor_pricing * accijns_basis
+        rest_mwh = effectief_jaarverbruik_voor_pricing
+        vorig_grens = 0
+        for grens, tarief in accijnzen_staffel:
+            schijf_mwh = max(0, min(rest_mwh, grens - vorig_grens))
+            if schijf_mwh <= 0:
+                break
+            jaarbedrag_acc += schijf_mwh * tarief
+            rest_mwh -= schijf_mwh
+            vorig_grens = grens
+            if rest_mwh <= 0:
+                break
+        accijns_totaal = jaarbedrag_acc * (totaal_afname_mwh / effectief_jaarverbruik_voor_pricing)
+    else:
+        # v1.4 gedrag: cumulatief op periode-volume direct.
+        accijns_totaal = totaal_afname_mwh * accijns_basis  # gewone accijns (LS only)
+        rest_mwh = totaal_afname_mwh
+        vorig_grens = 0
+        for grens, tarief in accijnzen_staffel:
+            schijf_mwh = max(0, min(rest_mwh, grens - vorig_grens))
+            if schijf_mwh <= 0:
+                break
+            accijns_totaal += schijf_mwh * tarief
+            rest_mwh -= schijf_mwh
+            vorig_grens = grens
+            if rest_mwh <= 0:
+                break
     E['accijnzen'] = accijns_totaal
 
-    # Energiefonds Vlaanderen (vast €/jaar, BTW-vrij)
-    E['energiefonds_vlaanderen'] = tarieven.get('energiefonds_eur_jaar', 0.0)
+    # Energiefonds Vlaanderen (vast €/jaar, BTW-vrij) — v1.5: × prorata_factor.
+    E['energiefonds_vlaanderen'] = tarieven.get('energiefonds_eur_jaar', 0.0) * prorata_factor
     E['_subtotaal'] = sum(v for k, v in E.items() if not k.startswith('_'))
 
     # ---- TOTAAL ----
@@ -1092,7 +1229,7 @@ def lp_dispatch_day_stacked(
 
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.4 — start ===")
+    log.info("=== Fluctus Simulator v1.5 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -1107,11 +1244,50 @@ def run_simulation(inp: dict) -> dict:
     N = len(sim_timestamps)
     log.info(f"Sim-periode: {van.date()} → {tot.date()} = {N} kwartieren ({N/96:.0f} dagen)")
 
+    # ---- v1.5 sessie 4: detecteer simulatieperiode-type ----
+    # type="specifiek": jaarverbruik_mwh wordt geinterpreteerd als periode-volume.
+    #                   Bereken effectief jaarverbruik en n_kalendermaanden voor
+    #                   doorgave aan build_consumption_profile en bereken_jaarfactuur.
+    # type ontbreekt of != "specifiek": v1.4 gedrag (jaarverbruik_mwh = jaarvolume,
+    #                                    n_maanden hardcoded 12, geen tier-override).
+    periode_type = (inp['simulatieperiode'].get('type') or 'kalenderjaar').lower()
+    is_specifiek = (periode_type == 'specifiek')
+
+    # Default: identiek aan v1.4
+    effectief_jaarverbruik_mwh = None
+    n_maanden_voor_factuur = 12
+    jaarverbruik_mwh_voor_profiel = inp['jaarverbruik_mwh']
+
+    if is_specifiek:
+        # Periode-volume in MWh (= factuur-afname)
+        periode_volume_mwh = inp['jaarverbruik_mwh']
+        # Profielfractie in periode via weekdag-bewuste 2025-mapping
+        profielfractie = _profielfractie_in_periode(inp['profiel_kwartier'], sim_timestamps)
+        if profielfractie <= 0:
+            log.error(
+                f"type=specifiek maar profielfractie_in_periode={profielfractie:.6f} ≤ 0. "
+                f"Kan effectief jaarverbruik niet berekenen — val terug op v1.4 gedrag."
+            )
+            is_specifiek = False
+        else:
+            effectief_jaarverbruik_mwh = periode_volume_mwh / profielfractie
+            n_maanden_voor_factuur = _n_kalendermaanden_in_periode(sim_timestamps)
+            # Geef effectief jaarverbruik door aan build_consumption_profile zodat
+            # de SOM van consumption_kw over de periode = periode_volume_mwh.
+            # Wiskundig: effectief × profielfractie = periode_volume → klopt.
+            jaarverbruik_mwh_voor_profiel = effectief_jaarverbruik_mwh
+            log.info(
+                f"type=specifiek: periode_volume={periode_volume_mwh:.2f} MWh, "
+                f"profielfractie={profielfractie:.4f}, "
+                f"effectief_jaarverbruik={effectief_jaarverbruik_mwh:.2f} MWh, "
+                f"n_kalendermaanden={n_maanden_voor_factuur}"
+            )
+
     # ---- Profielen opbouwen ----
     log.info("Profielen opbouwen…")
     consumption_kw = build_consumption_profile(
         inp['profiel_kwartier'],
-        inp['jaarverbruik_mwh'],
+        jaarverbruik_mwh_voor_profiel,
         inp.get('aanvullingen', {}),
         sim_timestamps,
     )
@@ -1504,8 +1680,10 @@ def run_simulation(inp: dict) -> dict:
         sim_timestamps,
         contract_for_factuur,
         inp['netbeheer'],
+        n_maanden=n_maanden_voor_factuur,
         nom_afn_kw_all=nom_afn_arr,
         nom_inj_kw_all=nom_inj_arr,
+        effectief_jaarverbruik_voor_pricing=effectief_jaarverbruik_mwh,
     )
 
     # ---- KPI's ----
@@ -1608,6 +1786,12 @@ def run_simulation(inp: dict) -> dict:
             'van': sim_timestamps[0].isoformat(),
             'tot': sim_timestamps[-1].isoformat(),
             'aantal_kwartieren': N,
+            # v1.5 sessie 4: diagnose voor base-case-flow + KPI-tegel
+            'type': periode_type,
+            'is_specifiek': is_specifiek,
+            'n_kalendermaanden': n_maanden_voor_factuur,
+            'effectief_jaarverbruik_mwh': effectief_jaarverbruik_mwh,
+            'periode_volume_mwh': inp['jaarverbruik_mwh'] if is_specifiek else None,
         },
     }
 
