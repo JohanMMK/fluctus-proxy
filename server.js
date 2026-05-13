@@ -171,6 +171,67 @@ function _laagsteBuurmanIndex(target) {
   return res;
 }
 
+// ─── MARKTDATA-SLICE (v15.11, BaseCase Uitbreiding Fase 2 sessie 4) ──────────
+// Slice MARKT.spot_q / imb_q op de exacte simPeriode.
+//
+// Probleem dat dit oplost:
+// - MARKT (uit prebuild_data.py) bevat rolling 12 maanden gestart op MARKT.van.
+// - Vroeger (v15.10) werd MARKT.spot_q letterlijk doorgegeven aan simulator.py,
+//   die met [:N] simpele truncate deed. Voor rolling12 toevallig OK (MARKT.van ==
+//   simPeriode.van). Voor kalenderjaar 2025 LATENT-BUG: pakte de eerste N van
+//   MARKT.van (≈apr 2025), NIET 2025-01-01 → 2025-12-31. Voor specifieke periode
+//   (jan 2026): zou ook fout zijn.
+// - Deze helper bepaalt de juiste OFFSET in MARKT.spot_q op basis van MARKT.van
+//   en simPeriode.van (in dagen × 96 kwartieren), slicet N kwartieren uit,
+//   en clampt bij overschrijding (met pad-fallback op laatste waarde).
+//
+// Anti-regressie: voor rolling12 met simPeriode.van == MARKT.van geeft dit
+// IDENTIEKE arrays als de v15.10 truncate. Bewezen via diff op een rolling12
+// run (zie test_marktdata_slice.js, sessie 4 artefacten).
+function _sliceMarktVoorPeriode(MARKT, simPeriode) {
+  if (!MARKT || !Array.isArray(MARKT.spot_q)) {
+    return { spot_q: [], imb_q: [], n: 0, offset: 0, mode: 'no-markt' };
+  }
+  const spotFull = MARKT.spot_q;
+  const imbFull  = MARKT.imb_q || spotFull;
+  const marktVan = new Date(MARKT.van + 'T00:00:00Z');
+  const simVan   = new Date(simPeriode.van + 'T00:00:00Z');
+  const simTot   = new Date(simPeriode.tot + 'T00:00:00Z');
+  const KWARTIER_MS = 15 * 60 * 1000;
+  const N = Math.round((simTot - simVan) / KWARTIER_MS);
+  const offset = Math.round((simVan - marktVan) / KWARTIER_MS);
+
+  // Edge cases
+  if (N <= 0) {
+    return { spot_q: [], imb_q: [], n: 0, offset, mode: 'empty-periode' };
+  }
+  // Volledige periode binnen MARKT
+  if (offset >= 0 && offset + N <= spotFull.length) {
+    return {
+      spot_q: spotFull.slice(offset, offset + N),
+      imb_q:  imbFull.slice(offset, offset + N),
+      n: N, offset, mode: 'binnen-markt',
+    };
+  }
+  // Buiten bereik (gedeeltelijk of geheel) — pad met dichtsbij beschikbare waarde.
+  // Dit gebeurt typisch wanneer simPeriode in de toekomst ligt of vóór MARKT-start.
+  // We construeren een N-array waarbij elementen buiten [0, spotFull.length) terugvallen
+  // op de dichtstbij beschikbare waarde (links of rechts).
+  console.warn(`[markt-slice] simPeriode (${simPeriode.van}→${simPeriode.tot}) ` +
+               `valt buiten MARKT (${MARKT.van}→${MARKT.tot}): offset=${offset}, N=${N}, ` +
+               `spotLen=${spotFull.length}. Pad-fallback toegepast.`);
+  const spot_q = new Array(N);
+  const imb_q  = new Array(N);
+  for (let i = 0; i < N; i++) {
+    let idx = offset + i;
+    if (idx < 0) idx = 0;
+    else if (idx >= spotFull.length) idx = spotFull.length - 1;
+    spot_q[i] = spotFull[idx];
+    imb_q[i]  = imbFull[idx];
+  }
+  return { spot_q, imb_q, n: N, offset, mode: 'gepad' };
+}
+
 // Batterijen
 let BATTERIJEN = loadJson('data/batterijen.json', [
   { id:'bess-50',  naam:'BESS 50 kWh / 25 kW',  kwh:50,  kw:25, eta:0.85, dod:0.90, capex:20000, max_cycli:8000 },
@@ -211,12 +272,87 @@ if (fs.existsSync(profielenLijstPath)) {
   console.warn('[profielen] data/profielen-lijst.json niet gevonden');
 }
 
+// ─── SCENARIO-PERSISTENTIE GITHUB (v15.11 sessie 4 sub-track 4) ──────────────
+// Bug ontdekt 12 mei 2026: POST /api/scenario-bewaren sloeg scenarios alleen
+// op in in-memory SCENARIOS_DB. Bij Railway-restart waren ze weg. UI claimde
+// onterecht "Scenario bewaard in fluctus-scenarios repo".
+//
+// Fix: scenarios worden nu écht naar github.com/<owner>/fluctus-scenarios
+// gecommit, met pad-conventie projecten/{project}/{scenario}.json.
+// SCENARIOS_DB blijft een lokale cache (read-through). Bij read-miss wordt
+// GitHub geprobeerd.
+//
+// Anti-regressie regel 3: NIEUWE helpers met andere naam dan market-data
+// githubRead/githubWrite (die blijven exact zoals ze waren). Geen wijziging
+// aan bestaande markt-data routes.
+const SCENARIOS_REPO_OWNER = process.env.SCENARIOS_OWNER || process.env.GITHUB_OWNER || 'JohanMMK';
+const SCENARIOS_REPO_NAME  = process.env.SCENARIOS_REPO  || 'fluctus-scenarios';
+const SCENARIOS_PATH_PREFIX = 'projecten';  // pad in repo: projecten/{project}/{scenario}.json
+
+function _scenarioPad(project, scenario) {
+  // GitHub paden mogen geen path-separators of vreemde chars hebben.
+  const cleanProject  = String(project).replace(/[\/\\?#]/g, '_');
+  const cleanScenario = String(scenario).replace(/[\/\\?#]/g, '_');
+  return `${SCENARIOS_PATH_PREFIX}/${cleanProject}/${cleanScenario}.json`;
+}
+
+async function _scenariosGithubRead(filepath) {
+  const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${filepath}`;
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const metaResp = await fetch(apiUrl, { headers });
+  if (!metaResp.ok) throw new Error(`scenarios read ${filepath}: HTTP ${metaResp.status}`);
+  const meta = await metaResp.json();
+  const sha = meta.sha;
+  const rawUrl = `https://raw.githubusercontent.com/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/main/${filepath}`;
+  const rawHeaders = { 'User-Agent': 'fluctus-proxy' };
+  if (GITHUB_TOKEN) rawHeaders['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const rawResp = await fetch(rawUrl, { headers: rawHeaders });
+  if (!rawResp.ok) throw new Error(`scenarios raw read ${filepath}: HTTP ${rawResp.status}`);
+  const content = await rawResp.text();
+  return { data: JSON.parse(content), sha };
+}
+
+async function _scenariosGithubWrite(filepath, data, sha) {
+  const url = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${filepath}`;
+  const content = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Content-Type': 'application/json' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const body = {
+    message: `auto: scenario ${filepath.replace(SCENARIOS_PATH_PREFIX + '/', '').replace('.json', '')} (${new Date().toISOString().slice(0,10)})`,
+    content,
+  };
+  if (sha) body.sha = sha;
+  const r = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`scenarios write ${filepath}: HTTP ${r.status} ${t.slice(0,200)}`);
+  }
+  return r.json();
+}
+
+async function _scenariosGithubListProject(project) {
+  // Returnt array van scenario-namen (zonder .json) in projecten/{project}/.
+  // Lege array bij 404 (project bestaat nog niet).
+  const cleanProject = String(project).replace(/[\/\\?#]/g, '_');
+  const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${SCENARIOS_PATH_PREFIX}/${cleanProject}`;
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const r = await fetch(apiUrl, { headers });
+  if (r.status === 404) return [];
+  if (!r.ok) throw new Error(`scenarios list ${cleanProject}: HTTP ${r.status}`);
+  const arr = await r.json();
+  return arr
+    .filter(e => e.type === 'file' && e.name.endsWith('.json'))
+    .map(e => e.name.replace(/\.json$/, ''));
+}
+
 const SCENARIOS_DB = {};
 const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.10', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.11', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -368,19 +504,103 @@ app.post('/api/batterij-toevoegen', (req, res) => {
 });
 
 app.get('/api/projecten', (req, res) => res.json({ projecten:[...PROJECTEN_DB] }));
-app.get('/api/scenarios', (req, res) => res.json({ scenarios:Object.keys((SCENARIOS_DB[req.query.project])||{}) }));
-app.get('/api/scenario', (req, res) => {
-  const d = (SCENARIOS_DB[req.query.project]||{})[req.query.scenario];
-  if (!d) return res.status(404).json({ error:'Scenario niet gevonden' });
-  res.json({ data:d });
+
+// v15.11 sessie 4 sub-track 4: GET /api/scenarios — read-through cache.
+// Bij cache-miss (eerste call voor project, of na Railway-restart):
+// listen we projecten/{project}/ in de fluctus-scenarios repo.
+app.get('/api/scenarios', async (req, res) => {
+  const project = req.query.project;
+  if (!project) return res.status(400).json({ error: 'project query-param verplicht' });
+  // Cache hit: returnt direct
+  if (SCENARIOS_DB[project]) {
+    return res.json({ scenarios: Object.keys(SCENARIOS_DB[project]), source: 'cache' });
+  }
+  // Cache miss: probeer GitHub
+  try {
+    const names = await _scenariosGithubListProject(project);
+    if (names.length > 0) {
+      SCENARIOS_DB[project] = SCENARIOS_DB[project] || {};
+      // Markeer aanwezigheid (lazy load van inhoud bij /api/scenario)
+      for (const n of names) {
+        if (!SCENARIOS_DB[project][n]) SCENARIOS_DB[project][n] = null;
+      }
+      PROJECTEN_DB.add(project);
+    }
+    return res.json({ scenarios: names, source: 'github' });
+  } catch (e) {
+    console.warn(`[scenarios] list ${project} fail: ${e.message}`);
+    // Bij fout: returnt lege array (niet 500, want UI moet kunnen verder)
+    return res.json({ scenarios: [], source: 'github-error', error: e.message });
+  }
 });
-app.post('/api/scenario-bewaren', (req, res) => {
-  const { project, scenario, data } = req.body||{};
-  if (!project||!scenario) return res.status(400).json({ error:'project en scenario zijn verplicht' });
+
+// v15.11 sessie 4: GET /api/scenario — read-through cache, lazy load van GitHub.
+app.get('/api/scenario', async (req, res) => {
+  const project = req.query.project;
+  const scenario = req.query.scenario;
+  if (!project || !scenario) {
+    return res.status(400).json({ error: 'project en scenario query-params verplicht' });
+  }
+  // Cache hit (en data niet null = niet alleen lazy-marker)
+  const cached = (SCENARIOS_DB[project] || {})[scenario];
+  if (cached) {
+    return res.json({ data: cached, source: 'cache' });
+  }
+  // Cache miss of lazy-marker: lees van GitHub
+  try {
+    const { data } = await _scenariosGithubRead(_scenarioPad(project, scenario));
+    if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
+    SCENARIOS_DB[project][scenario] = data;
+    PROJECTEN_DB.add(project);
+    return res.json({ data, source: 'github' });
+  } catch (e) {
+    console.warn(`[scenario] read ${project}/${scenario} fail: ${e.message}`);
+    return res.status(404).json({ error: 'Scenario niet gevonden', detail: e.message });
+  }
+});
+
+// v15.11 sessie 4: POST /api/scenario-bewaren — schrijf naar GitHub + cache.
+// Bug-fix: vroeger alleen in-memory cache; UI loog "Bewaard in fluctus-scenarios
+// repo" zonder dat het waar was. Nu écht naar github.com/<owner>/fluctus-scenarios
+// gecommit, met read-through cache update.
+app.post('/api/scenario-bewaren', async (req, res) => {
+  const { project, scenario, data } = req.body || {};
+  if (!project || !scenario) {
+    return res.status(400).json({ error: 'project en scenario zijn verplicht' });
+  }
+  // Cache update eerst (zodat UI direct kan lezen, ook als GitHub traag is)
   if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
   SCENARIOS_DB[project][scenario] = data;
   PROJECTEN_DB.add(project);
-  res.json({ ok:true });
+
+  // GitHub-commit. Bij fout: meld eerlijk dat alleen in-memory bewaard is.
+  const filepath = _scenarioPad(project, scenario);
+  let sha;
+  try {
+    const existing = await _scenariosGithubRead(filepath);
+    sha = existing.sha;
+  } catch (_) {
+    // Bestand bestaat nog niet — sha blijft undefined, dat is OK voor create
+  }
+  try {
+    await _scenariosGithubWrite(filepath, data, sha);
+    return res.json({
+      ok: true,
+      source: 'github',
+      message: `Scenario bewaard in ${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}`,
+      path: filepath,
+    });
+  } catch (e) {
+    console.error(`[scenario-bewaren] GitHub write fail: ${e.message}`);
+    // Geef partial-success terug: in-memory wel, GitHub niet.
+    return res.status(207).json({
+      ok: false,
+      source: 'cache-only',
+      message: `Scenario bewaard in geheugen, maar GitHub-commit faalde: ${e.message}`,
+      cached: true,
+      path: filepath,
+    });
+  }
 });
 
 // ─── BASE CASE FACTUUR-EXTRACTIE (Fase 1) ────────────────────────────────────
@@ -575,7 +795,7 @@ app.post('/api/nominatie-sim', (req, res) => {
     let result;
     try { result = JSON.parse(stdout.slice(s, e+1)); }
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
-    result._meta = { elapsed_ms:elapsed, server_version:'15.9' };
+    result._meta = { elapsed_ms:elapsed, server_version:'15.11' };
     result._serverLog = stderr;
     res.json(result);
   });
@@ -610,8 +830,17 @@ function buildSimInput(ui) {
   const curtailActief = !!(ui.pv_curtailment && ui.pv_curtailment.actief);
 
   // Gebruik de dynamisch bepaalde marktperiode als rolling12 gevraagd wordt
+  // v15.11 sessie 4: nieuwe modus 'specifiek' — STATE.jaar='specifiek' met
+  // expliciete periodeVan/periodeTot uit base-case-factuur.
   let simPeriode = ui.simulatieperiode || {};
-  if (!simPeriode.van || ui.jaar === 'rolling12') {
+  if (ui.jaar === 'specifiek' && ui.periodeVan && ui.periodeTot) {
+    // Base-case-pad: gebruik exacte factuurperiode + type-vlag voor simulator.py
+    simPeriode = {
+      van: ui.periodeVan,
+      tot: ui.periodeTot,
+      type: 'specifiek',
+    };
+  } else if (!simPeriode.van || ui.jaar === 'rolling12') {
     // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
     // MARKT.van/tot zijn inclusieve datums uit prebuild
     // Simulator verwacht exclusieve tot (dag erna)
@@ -623,6 +852,15 @@ function buildSimInput(ui) {
       van: (MARKT && MARKT.van) ? MARKT.van : simPeriode.van || '2025-04-28',
       tot: marktTotStr,
     };
+  }
+
+  // v15.11 sessie 4: slice marktdata op simPeriode VOOR doorgave aan simulator.
+  // Fixt ook latente bug bij kalenderjaar-pad (was [:N] simple truncate vanaf
+  // MARKT.van, niet vanaf simPeriode.van).
+  // Voor rolling12 met simPeriode.van == MARKT.van: identiek aan v15.10.
+  const _marktSlice = _sliceMarktVoorPeriode(MARKT, simPeriode);
+  if (_marktSlice.mode !== 'binnen-markt') {
+    console.log(`[sim] markt-slice: mode=${_marktSlice.mode}, offset=${_marktSlice.offset}, n=${_marktSlice.n}`);
   }
 
   // PV solar vorm — gebruik pre-built solar_norm als UI geen vorm stuurt
@@ -709,8 +947,12 @@ function buildSimInput(ui) {
     netbeheer: { grd, spanning, tarieven: TARIEVEN_LS },
     forecast:  { sigma_da:0, sigma_imb:0, sigma_volume_verbruik_pct:0, sigma_volume_pv_pct:0 },
     markt: {
-      spot_kwartier: (MARKT && MARKT.spot_q) || [],
-      imb_kwartier:  (MARKT && MARKT.imb_q)  || [],
+      // v15.11 sessie 4: gesliceerde arrays die exact mappen op simPeriode.
+      // Voor rolling12 met simPeriode.van == MARKT.van: identiek aan v15.10
+      // (full MARKT.spot_q / imb_q). Voor specifiek + kalenderjaar: correcte
+      // tijdsuitlijning.
+      spot_kwartier: _marktSlice.spot_q,
+      imb_kwartier:  _marktSlice.imb_q,
     },
     simulatieperiode: simPeriode,
     random_seed: 42,
