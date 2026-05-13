@@ -1,4 +1,20 @@
 'use strict';
+// ============================================================================
+// FLUCTUS PROXY SERVER
+// Versie:        v15.11.1 (BaseCase Uitbreiding Fase 2 — sessie 4 hotfix)
+// Geproduceerd:  2026-05-13 14:25 UTC
+// Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
+// Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
+// Wijzigingen vs v15.11:
+//   - periodeTot inclusief→exclusief conversie (+1 dag) bij jaar='specifiek'
+//     (anders mist simulator de laatste factuurdag — bv. 31 jan)
+// Wijzigingen vs v15.10:
+//   - _sliceMarktVoorPeriode: marktdata exact gesliceerd op simPeriode
+//     (fixt ook latente kalenderjaar-bug van v15.10)
+//   - Scenario-routes: read-through cache + GitHub persistentie
+//     naar JohanMMK/fluctus-scenarios (was alleen in-memory in v15.10)
+//   - Simulatieperiode-modus 'specifiek' doorgestuurd naar simulator.py v1.5
+// ============================================================================
 
 const express     = require('express');
 const compression = require('compression');
@@ -352,7 +368,7 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.11', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.11.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -795,7 +811,7 @@ app.post('/api/nominatie-sim', (req, res) => {
     let result;
     try { result = JSON.parse(stdout.slice(s, e+1)); }
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
-    result._meta = { elapsed_ms:elapsed, server_version:'15.11' };
+    result._meta = { elapsed_ms:elapsed, server_version:'15.11.1' };
     result._serverLog = stderr;
     res.json(result);
   });
@@ -834,12 +850,22 @@ function buildSimInput(ui) {
   // expliciete periodeVan/periodeTot uit base-case-factuur.
   let simPeriode = ui.simulatieperiode || {};
   if (ui.jaar === 'specifiek' && ui.periodeVan && ui.periodeTot) {
-    // Base-case-pad: gebruik exacte factuurperiode + type-vlag voor simulator.py
+    // Base-case-pad: gebruik exacte factuurperiode + type-vlag voor simulator.py.
+    // Factuurperiode komt typisch met INCLUSIEVE einddatum (bv. 2026-01-31 = "t/m
+    // 31 januari"). Simulator.py loopt `while cur < tot` (= EXCLUSIEF tot),
+    // dus we moeten +1 dag toevoegen aan periodeTot.
+    // Heuristiek: als periodeTot dezelfde maand is als periodeVan (= maand-factuur),
+    // dan is het 99% zeker inclusief. We converteren altijd via +1 dag —
+    // dat is veilig want simulator.py simuleert in kwartieren, niet hele dagen.
+    const periodeTotExcl = new Date(ui.periodeTot + 'T00:00:00Z');
+    periodeTotExcl.setUTCDate(periodeTotExcl.getUTCDate() + 1);
+    const periodeTotStr = periodeTotExcl.toISOString().slice(0, 10);
     simPeriode = {
       van: ui.periodeVan,
-      tot: ui.periodeTot,
+      tot: periodeTotStr,
       type: 'specifiek',
     };
+    console.log(`[sim] specifiek-periode: ${ui.periodeVan} → ${ui.periodeTot} (incl) → tot=${periodeTotStr} (excl)`);
   } else if (!simPeriode.van || ui.jaar === 'rolling12') {
     // Gebruik de periode uit MARKT (bepaald door prebuild op basis van laatste cache-dag)
     // MARKT.van/tot zijn inclusieve datums uit prebuild
