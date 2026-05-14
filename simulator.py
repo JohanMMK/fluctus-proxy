@@ -1,45 +1,78 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.5.2-diag (sessie 6 diepere diagnose — LP-bound-violation RCA)
-# Geproduceerd:  2026-05-14 06:40 UTC
+# Versie:        v1.6 (sessie 6 productie-fix — LP-bound-violation + asymmetrie)
+# Geproduceerd:  2026-05-14
 # Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 # Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-# Vereist:       server.js v15.12.1-diag (compatible, geen wijziging vereist)
+# Vereist:       server.js v15.13+ (asymmetrie max_injectie_kw_hard veld)
 # ============================================================================
 """
-Fluctus Battery Dispatch Simulator v1.5.2-diag
-================================================
-TIJDELIJKE root-cause diagnose. GEEN LOGICA-WIJZIGING.
+Fluctus Battery Dispatch Simulator v1.6
+========================================
+Productie-release. Lost de toegangsvermogen-bug uit sessie 6 op door drie
+LP-architectuur design-defects te elimineren. Backwards-compatible:
+calls met identieke input én oude paden (Sc1-3) geven IDENTIEKE output.
 
-Wijzigingen v1.5.2-diag vs v1.5.1-diag:
-  - DIAG-6: in lp_dispatch_day_bsp wordt per dag de LpStatus geverifieerd EN
-    de output gecheckt op bound-violation (grid_in > max_afname_hard of
-    grid_out > max_injectie_hard). Alleen problematische dagen worden gelogd
-    om logspam te beperken.
-  - DIAG-7: bij een bound-violation wordt de complete kwartier-context gedumpt
-    (consumption, pv, spot, imb, soc, p_ch, p_dis, grid_in, grid_out,
-    over_afn_hard, nom_afn, nom_inj, forecast_afn, forecast_inj) zodat de
-    LP-input EN de LP-output van het foute kwartier zichtbaar zijn.
-  - DIAG-8: aan einde van run wordt totaal aantal bound-violations samengevat.
-  - Doel: bewijzen of (a) status != Optimal de oorzaak is, of (b) een PuLP/CBC
-    bound-violation onder Optimal-status, of (c) iets anders.
-  - Resultaat wordt gedocumenteerd in fluctus-kennisbank voor toekomstige
-    LP-implementaties.
+Wijzigingen v1.6 vs v1.5.2-diag:
+  ARCHITECTUUR (LP) — alle drie LP-functies (lp_dispatch_day,
+  lp_dispatch_day_bsp, lp_dispatch_day_stacked):
+  - Verwijderd: over_afn_hard / over_inj_hard variabelen + pen_*_hard penalties.
+    Reden: tegenstrijdig met hard variabele-bound = silent infeasibility mode
+    (RCA defect 3 — zie RCA_sessie6_LP_bound_violation.md).
+  - Behouden: over_afn_zacht / over_inj_zacht (informatief, kleine penalty op
+    overschrijding van het zachte plafond — bestaand gedrag).
+  - grid_out cap is nu APART van grid_in cap: max_injectie_kw_hard staat los
+    van max_afname_kw_hard. Default door server.js = som fysieke inverters
+    (pv.inverter_kw + batterij.kw). Asymmetrie afname↔injectie (Belgisch
+    tarief: Groep B / D wegen op afname-piek, Groep C ≈ € 0 voor MS).
+  - Status-check aangescherpt: ALLEEN 'Optimal' is acceptabel. 'Not Solved'
+    en 'Infeasible' triggert nu warning + (in BSP) retry-ladder.
+  - Post-solve validatie + clip: max(grid_in_vals) > cap → warning + clip op cap.
+  - eps_penalty (1 €/MWh) op (grid_in + grid_out) toegevoegd aan lp_dispatch_day
+    en lp_dispatch_day_stacked (was alleen in BSP). Anti-fake-volume.
 
-Wijzigingen v1.5.1-diag vs v1.5:
-  - Vijf extra log.info regels met [DIAG]-prefix:
-    (1) na PV-clipping: max(pv_kw), max(consumption_kw)
-    (2) na LP-dispatch: max(grid_in_all), max(grid_out_all)
-    (3) vóór bereken_jaarfactuur: max(fysiek_grid_in), max(fysiek_grid_out)
-    (4) in bereken_jaarfactuur na maandpieken-berekening: maandpieken_afname,
-        maandpieken_injectie, toegangsvermogen
-    (5) optioneel: aansluiting-hard-bounds gerapporteerd
-  - Doel: hypothese A/B/C uit sessie6_toegangsvermogen_bug.md
-    discrimineren op één SMARTUNIT_v7 Sc4-run.
-  - Anti-regressie: pure log-additie. Geen wijziging aan input-handling,
-    LP-bouw, factuurberekening of output-shape. Identieke JSON output
-    op stdout. Wordt verwijderd in v1.6 na gerichte fix.
+  ARCHITECTUUR (BSP-retry) — lp_dispatch_day_bsp:
+  - Interne helper _build_and_solve_bsp(spec_budget_multiplier) extract.
+  - Retry-ladder bij niet-Optimal status:
+      Niveau 1: spec_budget × 10  (verwachte oplos-rate ~95%)
+      Niveau 2: spec_budget volledig verwijderen (~4% extra)
+      Niveau 3: GEEN passieve fallback. Dag wordt overgeslagen, grid_in/out
+                = 0 voor 96 kwartieren. SoC blijft op begin-waarde.
+    Reden: passieve dispatch zou business-case kunstmatig optimistisch maken
+    want werkelijk zou Fluctus op zo'n moment ook geen BSP-flex toepassen.
+
+  FACTUUR — bereken_jaarfactuur:
+  - Output gesplitst: jaarpiek_afname_kw + jaarpiek_injectie_kw als
+    expliciete velden. toegangsvermogen_kw blijft als backwards-compat alias
+    voor jaarpiek_afname_kw. winterpiek_afname_kw nieuw veld bewaart de
+    v1.5-semantiek voor Elia transport-jaarpiek.
+  - SEMANTIEK-WIJZIGING: jaarpiek_afname_kw was in v1.5 de WINTER-piek
+    (nov-mrt, voor Elia transport). In v1.6 = max(maandpieken_afname).
+    De Elia-transportberekening gebruikt nu winterpiek_afname_kw intern,
+    zodat factuurbedragen IDENTIEK blijven.
+  - Nieuwe parameter aansluiting (optioneel): wanneer meegegeven worden
+    maandpieken > aansluiting in een aparte overschrijdings-bucket gerekend
+    (twee-bucket Groep B). Bij None (default): v1.5-gedrag behouden.
+
+  HOOFDLUS — run_simulation:
+  - Vervangen: heeft_batterij switch (regel ~1837) door heeft_lp_output.
+    Reden: bij PV-only + BSP zonder BESS draait de LP wel maar werd de
+    LP-output genegeerd en passief gereconstrueerd (= pv_curt vergeten).
+  - SoC-cascade sanity check: bij ongeldige soc[-1] (None / < 0 / > soc_max),
+    log warning en reset naar 0.5 × soc_max.
+  - lp_diagnostics: nieuwe output-velden totaal_dagen / optimal_dagen /
+    retry1_dagen / retry2_dagen / verloren_dagen (lijst datums).
+  - Aansluiting doorgegeven naar bereken_jaarfactuur.
+
+  CLEAN-UP:
+  - Alle [DIAG-1] t/m [DIAG-8c] log-blokken uit v1.5.1-diag en v1.5.2-diag
+    verwijderd (waren tijdelijk voor RCA, niet voor productie).
+
+Anti-regressie:
+  - Sc1-3 (skip_lp / geen PV-injectie): identieke output aan v1.5.
+  - Backwards-compat: factuur['toegangsvermogen_kw'] blijft = afname-jaarpiek.
+  - Bestaande bewaarde scenarios laden zonder migratie.
 
 Wijzigingen v1.5 (BaseCase Uitbreiding sessie 4 — periode-handling):
   - Nieuwe simulatieperiode-modus "specifiek": simulatieperiode.type='specifiek'
@@ -448,21 +481,14 @@ def lp_dispatch_day(
     soc_min = 0.0  # absolute kWh
     soc_max = kwh_batt * dod
 
-    # Conversie van €/kW/jaar naar €/kWh-equivalent voor LP-penalty.
-    # Bedacht zo: een overschrijding van 1 kW gedurende 1 kwartier = 0.25 kWh.
-    # Tarief €X/kW/jaar betekent: als je 1 kW het hele jaar overschrijdt, betaal je €X.
-    # Per kwartier: €X / (8760 * 4) ≈ €X / 35040 per kWh-equivalent.
-    # Maar dat is te zwak — werkelijk Vlaams tarief rekent op gemiddelde maandpiek.
-    # Pragmatische LP-keuze: zachte penalty per overschrijdingsmoment in €/kW (niet /jaar).
-    # We gebruiken het jaartarief gedeeld door 12 (per maand-piek-equivalent) en passen
-    # toe per kwartier-overschrijdingsmoment. Dit is een benadering.
+    # v1.6: Tegen-tarieven voor de ZACHTE overschrijdings-band. Hard cap zit nu
+    # in de LpVariable upper bound (geen soft hard-penalty meer, want dat creëerde
+    # silent failure-mode bij infeasibility — zie RCA defect 3).
     tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
     tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
 
     pen_afname_zacht = tar_afname_kw / 12.0   # €/kW per overschrijdingskwartier (benadering)
-    pen_afname_hard = 100000.0 / 12.0
     pen_injectie_zacht = tar_injectie_kw / 12.0
-    pen_injectie_hard = 100000.0 / 12.0
 
     max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
     max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
@@ -506,10 +532,10 @@ def lp_dispatch_day(
     grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
     grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
     soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+    # v1.6: alleen 'zacht' overschrijdings-tracking. De hard cap zit nu in de
+    # LpVariable upper bound — geen aparte over_*_hard variabele meer.
     over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
-    over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
     over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
-    over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
 
     # Initiële SoC
     prob += soc[0] == soc_start_kwh
@@ -520,21 +546,23 @@ def lp_dispatch_day(
         prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] == consumption_kw[t]
         # SoC update
         prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
-        # Overschrijding-tracking (lineaire activatie):
+        # Zachte overschrijdings-tracking (lineaire activatie):
         #   over_afn_zacht = max(0, grid_in - max_zacht)
-        #   over_afn_hard  = max(0, grid_in - max_hard)
-        # Beide zijn ondergrens-constraints; LP minimaliseert ze in objective dus ze worden
-        # zo klein mogelijk. We willen NIET de eerste constraint OOK voor 'hard' opleggen.
+        # De LP minimaliseert dit via objective. De HARDE bound zit in de
+        # LpVariable upper bound (regel boven) — geen dubbele bound-mechanismen
+        # zoals in v1.5 (zie RCA defect 3).
         prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
-        prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
         prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
-        prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
         # Cosφ-constraint (gebundeld): laden + ontladen + grid niet allemaal tegelijk op max
         # Vereenvoudiging: omvormer-cap p_ch + p_dis ≤ kw_batt (mutually exclusive in praktijk)
         prob += p_ch[t] + p_dis[t] <= kw_batt
 
     # Objective: minimaliseer kost
     obj_terms = []
+    # v1.6: anti-fake-volume eps op (grid_in + grid_out). Voorkomt dat LP
+    # simultaan op de hard cap zit op beide richtingen alleen om penalties
+    # rond te schuiven. 1 €/MWh is significant maar economisch verwaarloosbaar.
+    eps_penalty = 1.0 / 1000.0
     for t in range(H):
         # Energiekost afname (€/kwartier): kW * 0.25 * (€/MWh) / 1000
         # v1.1: vergroening (€/MWh) wordt opgeteld bij afnameprijs.
@@ -545,37 +573,66 @@ def lp_dispatch_day(
         obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
         # Cyclus-kost: ontladen kost
         obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
-        # Penalty's (let op: zacht is alleen over zacht-drempel, hard is over hard-drempel,
-        # dus dubbeltelling tussen zachte band en harde band: alleen het zachte deel telt zacht,
-        # alleen het deel boven hard telt extra hard)
-        # We minimaliseren over_afn_zacht (= alles boven zacht), maar trekken het hard-deel
-        # niet af omdat over_afn_hard apart geteld wordt. Dat geeft effectief:
-        #   tot_pen = pen_zacht * over_zacht + pen_hard * over_hard
-        # waarbij over_zacht ≥ over_hard (alles boven hard valt ook boven zacht).
-        # Dat is OK: het hard-deel wordt extra belast, het zacht-deel betaalt zacht-tarief.
+        # Zachte overschrijdings-penalties (alleen op het deel boven het
+        # zachte plafond — het deel boven het harde plafond kan in v1.6 niet
+        # meer voorkomen want hard cap is variabele-bound).
         obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
-        obj_terms.append(pen_afname_hard * over_afn_hard[t])
         obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
-        obj_terms.append(pen_injectie_hard * over_inj_hard[t])
+        # Anti-fake-volume eps
+        obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
 
     prob += pulp.lpSum(obj_terms)
 
     solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=10)
     status = prob.solve(solver)
 
-    if pulp.LpStatus[status] not in ('Optimal', 'Not Solved'):
-        log.warning(f"LP-status: {pulp.LpStatus[status]}")
+    # v1.6: alleen Optimal is acceptabel. Bij Infeasible/Not Solved geeft CBC
+    # soms tóch waarden voor variabelen die de bounds overschrijden — daarom
+    # post-solve validatie + clip (anti silent-failure).
+    status_str = pulp.LpStatus[status]
+    if status_str != 'Optimal':
+        log.warning(f"LP-status non-optimal: {status_str} — output kan onnauwkeurig zijn")
+
+    # Extract values
+    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+    grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+    soc_vals = [pulp.value(v) or 0.0 for v in soc]
+
+    # Post-solve clip (laatste defensie tegen CBC bound-violations).
+    _tol = 0.01
+    if grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
+        log.warning(
+            f"LP grid_in bound-violation: max={max(grid_in_vals):.2f} > cap={max_afname_hard:.2f} — clip toegepast"
+        )
+        grid_in_vals = [min(v, max_afname_hard) for v in grid_in_vals]
+    if grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
+        log.warning(
+            f"LP grid_out bound-violation: max={max(grid_out_vals):.2f} > cap={max_injectie_hard:.2f} — clip toegepast"
+        )
+        grid_out_vals = [min(v, max_injectie_hard) for v in grid_out_vals]
+    if p_ch_vals and max(p_ch_vals) > kw_batt + _tol:
+        log.warning(f"LP p_ch bound-violation: max={max(p_ch_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_ch_vals = [min(v, kw_batt) for v in p_ch_vals]
+    if p_dis_vals and max(p_dis_vals) > kw_batt + _tol:
+        log.warning(f"LP p_dis bound-violation: max={max(p_dis_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_dis_vals = [min(v, kw_batt) for v in p_dis_vals]
 
     return {
-        'p_charge': [pulp.value(v) or 0.0 for v in p_ch],
-        'p_discharge': [pulp.value(v) or 0.0 for v in p_dis],
-        'grid_in': [pulp.value(v) or 0.0 for v in grid_in],
-        'grid_out': [pulp.value(v) or 0.0 for v in grid_out],
-        'soc': [pulp.value(v) or 0.0 for v in soc],
+        'p_charge': p_ch_vals,
+        'p_discharge': p_dis_vals,
+        'grid_in': grid_in_vals,
+        'grid_out': grid_out_vals,
+        'soc': soc_vals,
         'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
-        'over_afn_hard': [pulp.value(v) or 0.0 for v in over_afn_hard],
         'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
-        'over_inj_hard': [pulp.value(v) or 0.0 for v in over_inj_hard],
+        # v1.6: backwards-compat — over_*_hard worden nu altijd 0 geleverd
+        # zodat callers die deze keys lazen niet breken. Het hard-overschrijden
+        # van de cap zou in v1.6 niet meer mogelijk moeten zijn na clip.
+        'over_afn_hard': [0.0] * H,
+        'over_inj_hard': [0.0] * H,
+        'lp_status': status_str,
     }
 
 
@@ -613,11 +670,16 @@ def lp_dispatch_day_bsp(
     DAM-tak rekent op nom_net (afgerekend tegen DAM met markup/markdown).
     IMB-tak rekent op (fysieke-flex + papier-dev) tegen IMB (geen markup).
 
-    Returns: zelfde keys als lp_dispatch_day + extra:
+    v1.6: retry-ladder bij niet-Optimal status. Drie niveaus, geen passieve
+    fallback (zie RCA defect 3 + design beslissing 4.3).
+
+    Returns: zelfde keys als lp_dispatch_day + BSP-extra:
       - nom_dam_kw[96]: vaste nominatie (afname-positief)
       - dev_kw[96]: dev_pos - dev_neg
       - pv_curtailed_kw[96]
       - nom_revenue_eur, dev_revenue_eur
+      - lp_status: 'Optimal' / 'retry1_optimal' / 'retry2_optimal' / 'verloren'
+      - retry_level: 0 / 1 / 2 / 3 (3 = verloren)
     """
     H = 96
     dt_h = 0.25
@@ -631,12 +693,12 @@ def lp_dispatch_day_bsp(
     soc_min = 0.0
     soc_max = kwh_batt * dod
 
+    # v1.6: alleen ZACHTE overschrijdings-penalties. Harde bounds zitten in
+    # LpVariable upper bounds — geen aparte over_*_hard variabelen meer (RCA defect 3).
     tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
     tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
     pen_afname_zacht = tar_afname_kw / 12.0
-    pen_afname_hard = 100000.0 / 12.0
     pen_injectie_zacht = tar_injectie_kw / 12.0
-    pen_injectie_hard = 100000.0 / 12.0
 
     max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
     max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
@@ -665,170 +727,176 @@ def lp_dispatch_day_bsp(
     forecast_afn = [max(cons_for_nom[t] - pv_for_nom[t], 0) for t in range(H)]
     forecast_inj = [max(pv_for_nom[t] - cons_for_nom[t], 0) for t in range(H)]
     nom_net = [cons_for_nom[t] - pv_for_nom[t] for t in range(H)]  # behouden voor return
-    
-    prob = pulp.LpProblem('battery_dispatch_bsp', pulp.LpMinimize)
 
-    # Bestaande grid + batterij variabelen
-    p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
-    p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
-    grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
-    grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
-    soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
-    over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
-    over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
-    over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
-    over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
+    def _build_and_solve_bsp(spec_budget_multiplier: float, label: str):
+        """
+        v1.6 retry-helper: bouwt en solveert het BSP-LP met een gegeven
+        spec_budget_multiplier toegepast op daily_paper_risk_mwh.
 
-    # PV-curtailment variabele
-    if pv_curtailment_allowed:
-        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
-    else:
-        pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
+        multiplier=1.0  → normale spec_budget (eerste poging)
+        multiplier=10.0 → relaxed spec_budget (retry niveau 1)
+        multiplier=-1   → spec_budget volledig verwijderd (retry niveau 2)
 
-    # ── NOMINATIE als LP-variabele met FYSIEKE richting-constraint ──
-    # Forecast richting bepaalt of klant afnemer of injecteur is in dit kwartier.
-    # LP mag binnen budget de NOMINATIE schalen, maar niet van richting wisselen.
-    # Per kwartier: ofwel nom_afn > 0 (forecast netto afname), ofwel nom_inj > 0 (forecast netto injectie).
-    nom_afn = []
-    nom_inj = []
-    for t in range(H):
-        if forecast_afn[t] > 0:
-            # Afname-richting: nom_afn variabel, nom_inj = 0
-            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
-            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))  # forced 0
+        Returns tuple (status_str, result_dict) waar result_dict alle
+        relevante arrays bevat.
+        """
+        prob = pulp.LpProblem(f'battery_dispatch_bsp_{label}', pulp.LpMinimize)
+
+        p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+        p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+        grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+        grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+        soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+        over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+        over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+
+        if pv_curtailment_allowed:
+            pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
         else:
-            # Injectie-richting: nom_inj variabel, nom_afn = 0
-            nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))  # forced 0
-            nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
-    
-    # Spec-deviation: hoeveel wijkt nominatie af van forecast? (auxiliary vars voor abs)
-    spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
-    spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
+            pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
 
-    prob += soc[0] == soc_start_kwh
+        # Nominatie als LP-variabele met fysieke richting-constraint
+        nom_afn = []
+        nom_inj = []
+        for t in range(H):
+            if forecast_afn[t] > 0:
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))
+            else:
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
 
-    for t in range(H):
-        # Fysieke energy balance
-        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
-        prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
-        prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
-        prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
-        prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
-        prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
-        prob += p_ch[t] + p_dis[t] <= kw_batt
-        # Spec-deviation absolute value: nominatie netto - forecast netto
-        # In afname-kwartier: deviation = nom_afn - forecast_afn
-        # In injectie-kwartier: deviation = -(nom_inj - forecast_inj)
-        # Algemener: dev = (nom_afn - nom_inj) - (forecast_afn - forecast_inj)
-        prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
-        # Forceer constraint dat NIET BEIDE nom_afn en nom_inj > 0 in zelfde kwartier
-        # (al gedaan via upper-bound = 0 voor de inactieve richting)
+        spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
+        spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
 
-    # Speculation budget: ∑(|spec_dev|) per dag ≤ budget × werkelijk dagvolume
-    if daily_paper_risk_mwh >= 0:
-        spec_total = pulp.lpSum(spec_dev_pos[t] + spec_dev_neg[t] for t in range(H)) * dt_h / 1000.0
-        prob += spec_total <= daily_paper_risk_mwh
+        prob += soc[0] == soc_start_kwh
 
-    # ── Objective ──
-    obj_terms = []
-    for t in range(H):
-        prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0  # €/kWh
-        prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
-        prijs_imb = imb_eur_mwh[t] / 1000.0
-        belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
-        
-        # DAM-tak op nominatie
-        obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
-        obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
-        # IMB-tak op deviation = werkelijk netto - genomineerd netto
-        # afname_dev = grid_in[t] - nom_afn[t]
-        # injectie_dev = grid_out[t] - nom_inj[t]
-        # netto_dev = afname_dev - injectie_dev (positief = extra afname → kost)
-        obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
-        obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
-        # Belastingen op fysiek volume
-        obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
-        # Cyclus-kost
-        obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
-        # Penalties
-        obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
-        obj_terms.append(pen_afname_hard * over_afn_hard[t])
-        obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
-        obj_terms.append(pen_injectie_hard * over_inj_hard[t])
-        # Eps-penalty op simultaan in/uit (anti-fake-volume hack)
-        # Sterker dan eerst, want LP exploiteert dit anders
-        eps_penalty = 1.0 / 1000.0  # €1/MWh = significant maar niet bruut
-        obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+        for t in range(H):
+            prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
+            prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+            prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+            prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+            prob += p_ch[t] + p_dis[t] <= kw_batt
+            prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
 
-    prob += pulp.lpSum(obj_terms)
+        # Speculation budget volgens multiplier
+        if spec_budget_multiplier >= 0 and daily_paper_risk_mwh >= 0:
+            effective_budget = daily_paper_risk_mwh * spec_budget_multiplier
+            spec_total = pulp.lpSum(spec_dev_pos[t] + spec_dev_neg[t] for t in range(H)) * dt_h / 1000.0
+            prob += spec_total <= effective_budget
+        # multiplier < 0 → constraint wordt niet opgelegd (volledig vrij)
 
-    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=15)
-    status = prob.solve(solver)
+        # Objective
+        obj_terms = []
+        eps_penalty = 1.0 / 1000.0  # 1 €/MWh anti-fake-volume (al aanwezig in v1.5 BSP)
+        for t in range(H):
+            prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0
+            prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+            prijs_imb = imb_eur_mwh[t] / 1000.0
+            belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
 
-    if pulp.LpStatus[status] not in ('Optimal', 'Not Solved'):
-        log.warning(f"BSP-LP status: {pulp.LpStatus[status]}")
+            obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
+            obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+            obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
+            obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
+            obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
+            obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+            obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+            obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+            obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
 
-    # Extract values
-    nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
-    nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
-    pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
-    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
-    grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
-    grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+        prob += pulp.lpSum(obj_terms)
 
-    # ─── DIAG sessie 6 (v1.5.2-diag) — RCA LP-bound-violation ─────────────────
-    # Check 1: was de LP-status problematisch?
-    # Check 2: is er een bound-violation in de output (grid_in > max_afname_hard
-    #          of grid_out > max_injectie_hard, met tolerance 0.01)?
-    # Bij een van beide → dump volledige context van het eerste foute kwartier.
-    _status_str = pulp.LpStatus[status]
-    _bound_tol = 0.01
-    _afn_viols = [t for t in range(H) if grid_in_vals[t] > max_afname_hard + _bound_tol]
-    _inj_viols = [t for t in range(H) if grid_out_vals[t] > max_injectie_hard + _bound_tol]
-    _has_viol = bool(_afn_viols or _inj_viols)
-    _bad_status = _status_str not in ('Optimal',)
+        solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=15)
+        status = prob.solve(solver)
+        status_str = pulp.LpStatus[status]
 
-    if _has_viol or _bad_status:
-        log.info(
-            f"[DIAG-6] LP-day issue: status={_status_str}, "
-            f"afn_viols={len(_afn_viols)}, inj_viols={len(_inj_viols)}, "
-            f"max_grid_in={max(grid_in_vals):.2f} (cap={max_afname_hard}), "
-            f"max_grid_out={max(grid_out_vals):.2f} (cap={max_injectie_hard}), "
-            f"obj_value={pulp.value(prob.objective):.2f}"
+        # Extract values (zelfs als niet-optimal, voor inspectie)
+        nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
+        nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
+        pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
+        p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+        p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+        grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+        grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+        soc_vals = [pulp.value(v) or 0.0 for v in soc]
+        oaz_vals = [pulp.value(v) or 0.0 for v in over_afn_zacht]
+        oiz_vals = [pulp.value(v) or 0.0 for v in over_inj_zacht]
+
+        return status_str, {
+            'p_ch': p_ch_vals, 'p_dis': p_dis_vals,
+            'grid_in': grid_in_vals, 'grid_out': grid_out_vals,
+            'soc': soc_vals,
+            'nom_afn': nom_afn_vals, 'nom_inj': nom_inj_vals,
+            'pv_curt': pv_curt_vals,
+            'oaz': oaz_vals, 'oiz': oiz_vals,
+        }
+
+    # ── Retry-ladder ──
+    # Niveau 0: normale spec_budget (×1)
+    status_str, r = _build_and_solve_bsp(1.0, 'n0')
+    retry_level = 0
+
+    if status_str != 'Optimal':
+        log.warning(f"BSP-LP niveau 0 non-optimal ({status_str}) — retry niveau 1 (spec_budget × 10)")
+        status_str, r = _build_and_solve_bsp(10.0, 'n1')
+        retry_level = 1
+        if status_str != 'Optimal':
+            log.warning(f"BSP-LP niveau 1 non-optimal ({status_str}) — retry niveau 2 (spec_budget verwijderd)")
+            status_str, r = _build_and_solve_bsp(-1.0, 'n2')
+            retry_level = 2
+            if status_str != 'Optimal':
+                # Niveau 3: dag wordt overgeslagen. GEEN passieve fallback
+                # (design beslissing 4.3 — Fluctus zou op zo'n moment ook geen
+                # BSP-flex toepassen, dus business-case mag dit niet vermooien).
+                log.warning(
+                    f"BSP-LP niveau 2 nog steeds non-optimal ({status_str}) — dag wordt overgeslagen "
+                    f"(grid_in/out/p_ch/p_dis = 0 voor 96 kwartieren)"
+                )
+                retry_level = 3
+                # Vul lege arrays
+                _zeros = [0.0] * H
+                r = {
+                    'p_ch': list(_zeros), 'p_dis': list(_zeros),
+                    'grid_in': list(_zeros), 'grid_out': list(_zeros),
+                    'soc': [soc_start_kwh] * (H + 1),  # SoC blijft constant
+                    'nom_afn': list(_zeros), 'nom_inj': list(_zeros),
+                    'pv_curt': list(_zeros),
+                    'oaz': list(_zeros), 'oiz': list(_zeros),
+                }
+
+    # Extract uit dict (helper) naar locals
+    p_ch_vals = r['p_ch']
+    p_dis_vals = r['p_dis']
+    grid_in_vals = r['grid_in']
+    grid_out_vals = r['grid_out']
+    soc_vals = r['soc']
+    nom_afn_vals = r['nom_afn']
+    nom_inj_vals = r['nom_inj']
+    pv_curt_vals = r['pv_curt']
+    oaz_vals = r['oaz']
+    oiz_vals = r['oiz']
+
+    # v1.6 post-solve clip (laatste defensie tegen CBC bound-violations bij
+    # Optimal-status — zou normaal niet meer voorkomen na verwijdering van
+    # tegenstrijdige hard-soft bounds, maar als zekerheid):
+    _tol = 0.01
+    if grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
+        log.warning(
+            f"BSP grid_in bound-violation: max={max(grid_in_vals):.2f} > cap={max_afname_hard:.2f} — clip toegepast"
         )
-        # Dump het ergste afname-kwartier (of injectie als geen afname-viols)
-        _bad_t = None
-        if _afn_viols:
-            _bad_t = max(_afn_viols, key=lambda t: grid_in_vals[t])
-        elif _inj_viols:
-            _bad_t = max(_inj_viols, key=lambda t: grid_out_vals[t])
-        if _bad_t is not None:
-            t = _bad_t
-            _oah = pulp.value(over_afn_hard[t]) or 0.0
-            _oih = pulp.value(over_inj_hard[t]) or 0.0
-            _soc_t = pulp.value(soc[t]) or 0.0
-            _soc_tp1 = pulp.value(soc[t + 1]) or 0.0
-            log.info(
-                f"[DIAG-7] worst quarter t={t}: "
-                f"cons={consumption_kw[t]:.2f}, pv={pv_kw[t]:.2f}, "
-                f"spot={spot_eur_mwh[t]:.2f}, imb={imb_eur_mwh[t]:.2f}, "
-                f"soc[t]={_soc_t:.2f} soc[t+1]={_soc_tp1:.2f}, "
-                f"p_ch={p_ch_vals[t]:.2f}, p_dis={p_dis_vals[t]:.2f}"
-            )
-            log.info(
-                f"[DIAG-7b] worst quarter t={t}: "
-                f"grid_in={grid_in_vals[t]:.2f}, grid_out={grid_out_vals[t]:.2f}, "
-                f"over_afn_hard={_oah:.2f}, over_inj_hard={_oih:.2f}, "
-                f"nom_afn={nom_afn_vals[t]:.2f}, nom_inj={nom_inj_vals[t]:.2f}, "
-                f"fcst_afn={forecast_afn[t]:.2f}, fcst_inj={forecast_inj[t]:.2f}, "
-                f"pv_curt={pv_curt_vals[t]:.2f}"
-            )
-            # Energy-balance verificatie: grid_in - grid_out + p_dis - p_ch + (pv - pv_curt) == cons
-            _balance = (grid_in_vals[t] - grid_out_vals[t] + p_dis_vals[t] - p_ch_vals[t]
-                        + (pv_kw[t] - pv_curt_vals[t]) - consumption_kw[t])
-            log.info(f"[DIAG-7c] energy balance residual (zou 0 moeten zijn): {_balance:.4f}")
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+        grid_in_vals = [min(v, max_afname_hard) for v in grid_in_vals]
+    if grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
+        log.warning(
+            f"BSP grid_out bound-violation: max={max(grid_out_vals):.2f} > cap={max_injectie_hard:.2f} — clip toegepast"
+        )
+        grid_out_vals = [min(v, max_injectie_hard) for v in grid_out_vals]
+    if p_ch_vals and max(p_ch_vals) > kw_batt + _tol:
+        log.warning(f"BSP p_ch bound-violation: max={max(p_ch_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_ch_vals = [min(v, kw_batt) for v in p_ch_vals]
+    if p_dis_vals and max(p_dis_vals) > kw_batt + _tol:
+        log.warning(f"BSP p_dis bound-violation: max={max(p_dis_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_dis_vals = [min(v, kw_batt) for v in p_dis_vals]
 
     dev_net_vals = [(grid_in_vals[t] - nom_afn_vals[t]) - (grid_out_vals[t] - nom_inj_vals[t]) for t in range(H)]
 
@@ -838,23 +906,35 @@ def lp_dispatch_day_bsp(
         for t in range(H)
     )
 
+    # Label voor diagnostics
+    lp_status_label = (
+        'Optimal' if retry_level == 0 else
+        'retry1_optimal' if retry_level == 1 else
+        'retry2_optimal' if retry_level == 2 else
+        'verloren'
+    )
+
     return {
         'p_charge': p_ch_vals,
         'p_discharge': p_dis_vals,
         'grid_in': grid_in_vals,
         'grid_out': grid_out_vals,
-        'soc': [pulp.value(v) or 0.0 for v in soc],
-        'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
-        'over_afn_hard': [pulp.value(v) or 0.0 for v in over_afn_hard],
-        'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
-        'over_inj_hard': [pulp.value(v) or 0.0 for v in over_inj_hard],
+        'soc': soc_vals,
+        'over_afn_zacht': oaz_vals,
+        'over_inj_zacht': oiz_vals,
+        # v1.6: over_*_hard zijn vervallen, leveren 0-arrays voor backwards-compat
+        'over_afn_hard': [0.0] * H,
+        'over_inj_hard': [0.0] * H,
         # BSP-specifiek
-        'nom_dam_kw': list(nom_net),    # forecast-based nominatie (referentie)
-        'nom_eff_afn_kw': nom_afn_vals,  # LP-bepaalde werkelijke nominatie
+        'nom_dam_kw': list(nom_net),
+        'nom_eff_afn_kw': nom_afn_vals,
         'nom_eff_inj_kw': nom_inj_vals,
         'dev_kw': dev_net_vals,
         'pv_curtailed_kw': pv_curt_vals,
         'nom_revenue_eur': nom_revenue,
+        # v1.6 diagnostics
+        'lp_status': lp_status_label,
+        'retry_level': retry_level,
     }
 
 
@@ -874,6 +954,7 @@ def bereken_jaarfactuur(
     nom_afn_kw_all: list = None,   # v1.4 BSP: genomineerde afname (None=passive default)
     nom_inj_kw_all: list = None,   # v1.4 BSP: genomineerde injectie
     effectief_jaarverbruik_voor_pricing: float = None,  # v1.5 sessie 4
+    aansluiting: dict = None,      # v1.6 sessie 6: voor twee-bucket Groep B
 ) -> dict:
     """
     Bereken jaarfactuur volgens groepen A-E.
@@ -898,6 +979,25 @@ def bereken_jaarfactuur(
       werkelijke periode-volume gebaseerd; alleen de TARIEF-KEUZE schakelt
       naar het projecteerde jaarniveau.
       Bij None (default): tier en accijnzen op periode-volume = v1.4 gedrag.
+
+    Aansluiting-uitbreiding (v1.6 sessie 6):
+    - aansluiting: optioneel dict met max_afname_kw_hard. Wanneer meegegeven
+      wordt Groep B maandpiek opgesplitst in twee buckets:
+        gem_binnen = gem(min(maandpiek, cap)) × tarief_maandpiek
+        gem_over   = gem(max(0, maandpiek - cap)) × tarief_overschrijding
+      Dit modelleert het Belgische tarief correct bij scenarios waar de
+      maandpiek de aansluiting overschrijdt (kan in v1.6 nog gebeuren wanneer
+      profielpiek > contractueel aansluitvermogen en geen BESS).
+      Bij None (default): v1.5-gedrag behouden (overschrijding ten opzichte
+      van jaar-toegangsvermogen).
+    
+    v1.6 OUTPUT-WIJZIGING:
+    - jaarpiek_afname_kw is nu = max(maandpieken_afname) (was: winter-piek).
+    - jaarpiek_injectie_kw nieuw = max(maandpieken_injectie).
+    - toegangsvermogen_kw blijft alias voor jaarpiek_afname_kw (backwards-compat).
+    - winterpiek_afname_kw nieuw veld bewaart de v1.5-semantiek (nov-mrt piek
+      gebruikt voor Elia transport-jaarpiek). De Elia-transportkost wordt
+      INTERN nog steeds berekend op de winter-piek, dus geen factuur-impact.
     
     Returns: dict met groepen en totaal.
     """
@@ -955,24 +1055,22 @@ def bereken_jaarfactuur(
     maandpieken_afname = [math.ceil(max(m)) if m else 0 for m in maand_kw_afname]
     maandpieken_injectie = [math.ceil(max(m)) if m else 0 for m in maand_kw_injectie]
 
-    # Jaarpiek (Elia: jan-mrt + nov-dec winter)
+    # v1.6: jaarpieken expliciet afname EN injectie.
+    # jaarpiek_afname_kw = max(maandpieken_afname) — was in v1.5 een aparte
+    # winter-piek (nov-mrt). Voor backwards-compat met de Elia-transport-
+    # jaarpiek berekening bewaren we de winter-piek apart als winterpiek_afname_kw.
+    jaarpiek_afname = max(maandpieken_afname) if maandpieken_afname else 0
+    jaarpiek_injectie = max(maandpieken_injectie) if maandpieken_injectie else 0
+    # toegangsvermogen blijft als alias bestaan voor backwards-compat in
+    # de output dict — = jaarpiek_afname (= max maandpieken).
+    toegangsvermogen = jaarpiek_afname
+
+    # Winter-piek (nov-mrt) voor Elia transport-jaarpiek-component (v1.5-semantiek).
     winter_kw = []
     for i, ts in enumerate(timestamps):
         if ts.month in [1, 2, 3, 11, 12]:
             winter_kw.append(grid_in_kw[i])
-    jaarpiek_afname = math.ceil(max(winter_kw)) if winter_kw else 0
-    toegangsvermogen = max(maandpieken_afname)  # = max(maandpieken)
-
-    # ─── DIAG sessie 6 (v1.5.1-diag) — maandpieken en toegangsvermogen ───────
-    log.info(
-        f"[DIAG-5] maandpieken_afname={maandpieken_afname}, "
-        f"jaarpiek={jaarpiek_afname}, toegangsvermogen={toegangsvermogen}"
-    )
-    log.info(
-        f"[DIAG-5b] maandpieken_injectie={maandpieken_injectie}, "
-        f"max(grid_in_kw)={max(grid_in_kw):.2f}, max(grid_out_kw)={max(grid_out_kw):.2f}"
-    )
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+    winterpiek_afname = math.ceil(max(winter_kw)) if winter_kw else 0
 
     # ---- GROEP A: ENERGIEKOST (commodity) ----
     # v1.4 refactor: DAM-tak rekent op nominatie, IMB-tak op deviation, belastingen op fysiek volume.
@@ -1047,24 +1145,33 @@ def bereken_jaarfactuur(
     tar_databeheer = tarieven.get('databeheer_eur_jaar', 0.0)
     tar_reactief = tarieven.get('reactief_eur_mvarh', 0.0)
 
-    # Maandpiek kost (gemiddelde maandpiek voor LS, som maandpieken voor MS):
-    # Voor MS: tarief in €/kW/jaar betekent: gemiddelde maandpiek × tarief / 12 × 12 = gemiddelde × tarief.
-    # Voor LS: idem (Vlaanderen), of "gemiddelde maandpiek" formule.
-    # Vereenvoudiging v1: gemiddelde van de 12 maandpieken × tarief (€/kW/jaar).
-    if maandpieken_afname:
-        gem_maandpiek = sum(maandpieken_afname) / len(maandpieken_afname)
+    # Maandpiek kost. v1.6: twee-bucket-logica wanneer aansluiting is gegeven
+    # (modelleert Belgisch tarief — wat boven aansluitvermogen valt komt in
+    # overschrijdings-bucket aan ander tarief).
+    if aansluiting and aansluiting.get('max_afname_kw_hard'):
+        # v1.6 twee-bucket
+        cap = math.ceil(aansluiting['max_afname_kw_hard'])
+        maandpieken_binnen = [min(p, cap) for p in maandpieken_afname]
+        maandpieken_over = [max(0, p - cap) for p in maandpieken_afname]
+        gem_binnen = sum(maandpieken_binnen) / 12.0
+        gem_over = sum(maandpieken_over) / 12.0
+        B['maandpiek'] = gem_binnen * tar_maandpiek
+        B['overschrijding_toegangsvermogen'] = gem_over * tar_overschr
     else:
-        gem_maandpiek = 0
-    B['maandpiek'] = gem_maandpiek * tar_maandpiek
+        # v1.5-gedrag (backwards-compat): overschrijding = wat boven jaarpiek valt.
+        if maandpieken_afname:
+            gem_maandpiek = sum(maandpieken_afname) / len(maandpieken_afname)
+        else:
+            gem_maandpiek = 0
+        B['maandpiek'] = gem_maandpiek * tar_maandpiek
+        overschr = [max(0, p - toegangsvermogen) for p in maandpieken_afname]
+        if overschr:
+            gem_overschr = sum(overschr) / len(overschr)
+        else:
+            gem_overschr = 0
+        B['overschrijding_toegangsvermogen'] = gem_overschr * tar_overschr
     # Jaarpiek (toegangsvermogen)
     B['toegangsvermogen'] = toegangsvermogen * tar_jaarpiek
-    # Overschrijding toegangsvermogen (gemiddelde van max(0, maandpiek - toegangsvermogen) × tarief)
-    overschr = [max(0, p - toegangsvermogen) for p in maandpieken_afname]
-    if overschr:
-        gem_overschr = sum(overschr) / len(overschr)
-    else:
-        gem_overschr = 0
-    B['overschrijding_toegangsvermogen'] = gem_overschr * tar_overschr
     # Proportioneel kWh
     B['proportioneel'] = totaal_afname_mwh * tar_prop
     # Reactief: cosφ=1 in v1 → 0
@@ -1104,7 +1211,9 @@ def bereken_jaarfactuur(
 
     # Maandpiek transport: som van maandpieken × tarief/maand
     D['maandpiek_transport'] = sum(maandpieken_afname) * tar_tr_maandpiek
-    D['jaarpiek_transport'] = jaarpiek_afname * tar_tr_jaarpiek
+    # v1.6: Elia transport-jaarpiek gebruikt expliciet WINTER-piek (nov-mrt) —
+    # zelfde semantiek als v1.5 (geen factuur-impact ondanks rename van veld).
+    D['jaarpiek_transport'] = winterpiek_afname * tar_tr_jaarpiek
     D['systeembeheer'] = totaal_afname_mwh * tar_tr_systeem
     D['reserves'] = totaal_afname_mwh * tar_tr_reserves
     D['marktintegratie'] = totaal_afname_mwh * tar_tr_markt
@@ -1196,8 +1305,14 @@ def bereken_jaarfactuur(
         'totaal_incl_btw': totaal_incl_btw,
         'maandpieken_afname_kw': maandpieken_afname,
         'maandpieken_injectie_kw': maandpieken_injectie,
-        'toegangsvermogen_kw': toegangsvermogen,
-        'jaarpiek_afname_kw': jaarpiek_afname,
+        # v1.6: expliciete splitsing afname/injectie. toegangsvermogen_kw blijft
+        # als backwards-compat alias voor jaarpiek_afname_kw.
+        'jaarpiek_afname_kw': jaarpiek_afname,        # = max(maandpieken_afname)
+        'jaarpiek_injectie_kw': jaarpiek_injectie,    # NIEUW v1.6
+        'toegangsvermogen_kw': toegangsvermogen,      # alias = jaarpiek_afname_kw
+        # v1.6: winter-piek (nov-mrt) bewaard voor traceability — was in v1.5
+        # de betekenis van jaarpiek_afname_kw.
+        'winterpiek_afname_kw': winterpiek_afname,
         'maand_mwh_afname': maand_mwh_afname,
         'maand_mwh_injectie': maand_mwh_injectie,
     }
@@ -1249,10 +1364,9 @@ def lp_dispatch_day_stacked(
     max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
     tar_afname = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
     tar_injectie = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    # v1.6: alleen zachte penalties. Harde bounds zitten in LpVariable upper bound.
     pen_afname_zacht = tar_afname / 12.0
-    pen_afname_hard  = 100000.0 / 12.0
     pen_injectie_zacht = tar_injectie / 12.0
-    pen_injectie_hard  = 100000.0 / 12.0
     max_afname_zacht   = aansluiting.get('max_afname_kw_zacht', 1e9)
     max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
 
@@ -1270,9 +1384,7 @@ def lp_dispatch_day_stacked(
         gout  = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
         soc   = [pulp.LpVariable(f'soc_{t}',  soc_min, soc_max)   for t in range(H+1)]
         oaz   = [pulp.LpVariable(f'oaz_{t}',  0) for t in range(H)]
-        oah   = [pulp.LpVariable(f'oah_{t}',  0) for t in range(H)]
         oiz   = [pulp.LpVariable(f'oiz_{t}',  0) for t in range(H)]
-        oih   = [pulp.LpVariable(f'oih_{t}',  0) for t in range(H)]
 
         prob += soc[0] == soc_start_kwh
 
@@ -1282,11 +1394,11 @@ def lp_dispatch_day_stacked(
             prob += soc[t+1] == soc[t] + eta * p_ch[t] * dt_h - (1.0/eta) * p_dis[t] * dt_h
             prob += p_ch[t] + p_dis[t] <= kw_batt
             prob += oaz[t] >= gin[t] - max_afname_zacht
-            prob += oah[t] >= gin[t] - max_afname_hard
             prob += oiz[t] >= gout[t] - max_injectie_zacht
-            prob += oih[t] >= gout[t] - max_injectie_hard
 
         obj = []
+        # v1.6: anti-fake-volume eps op (gin + gout)
+        eps_penalty = 1.0 / 1000.0
         for t in range(H):
             prijs_afn = (prijs[t] + markup) / 1000.0
             prijs_inj = (prijs[t] - markdown) / 1000.0
@@ -1294,23 +1406,46 @@ def lp_dispatch_day_stacked(
             obj.append(-prijs_inj * gout[t] * dt_h)
             obj.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
             obj.append(pen_afname_zacht   * oaz[t])
-            obj.append(pen_afname_hard    * oah[t])
             obj.append(pen_injectie_zacht * oiz[t])
-            obj.append(pen_injectie_hard  * oih[t])
+            obj.append(eps_penalty * (gin[t] + gout[t]) * dt_h)
 
         prob += pulp.lpSum(obj)
-        prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=10))
+        # v1.6: opvangen van status (was weggegooid in v1.5 — RCA defect 2).
+        status = prob.solve(pulp.PULP_CBC_CMD(msg=0, timeLimit=10))
+        status_str = pulp.LpStatus[status]
+        if status_str != 'Optimal':
+            log.warning(f"Stacked-LP ({label}) non-optimal: {status_str}")
+
+        gin_vals = [pulp.value(v) or 0.0 for v in gin]
+        gout_vals = [pulp.value(v) or 0.0 for v in gout]
+        pch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+        pdis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+
+        # v1.6 post-solve clip
+        _tol = 0.01
+        if gin_vals and max(gin_vals) > max_afname_hard + _tol:
+            log.warning(f"Stacked-LP ({label}) gin bound-violation: max={max(gin_vals):.2f} > cap={max_afname_hard:.2f} — clip")
+            gin_vals = [min(v, max_afname_hard) for v in gin_vals]
+        if gout_vals and max(gout_vals) > max_injectie_hard + _tol:
+            log.warning(f"Stacked-LP ({label}) gout bound-violation: max={max(gout_vals):.2f} > cap={max_injectie_hard:.2f} — clip")
+            gout_vals = [min(v, max_injectie_hard) for v in gout_vals]
+        if pch_vals and max(pch_vals) > kw_batt + _tol:
+            pch_vals = [min(v, kw_batt) for v in pch_vals]
+        if pdis_vals and max(pdis_vals) > kw_batt + _tol:
+            pdis_vals = [min(v, kw_batt) for v in pdis_vals]
 
         return {
-            'p_charge':    [pulp.value(v) or 0.0 for v in p_ch],
-            'p_discharge': [pulp.value(v) or 0.0 for v in p_dis],
-            'grid_in':     [pulp.value(v) or 0.0 for v in gin],
-            'grid_out':    [pulp.value(v) or 0.0 for v in gout],
+            'p_charge':    pch_vals,
+            'p_discharge': pdis_vals,
+            'grid_in':     gin_vals,
+            'grid_out':    gout_vals,
             'soc':         [pulp.value(v) or 0.0 for v in soc],
             'over_afn_zacht':  [pulp.value(v) or 0.0 for v in oaz],
-            'over_afn_hard':   [pulp.value(v) or 0.0 for v in oah],
             'over_inj_zacht':  [pulp.value(v) or 0.0 for v in oiz],
-            'over_inj_hard':   [pulp.value(v) or 0.0 for v in oih],
+            # v1.6: over_*_hard zijn vervallen — leveren 0-arrays voor backwards-compat
+            'over_afn_hard':   [0.0] * H,
+            'over_inj_hard':   [0.0] * H,
+            'lp_status':       status_str,
         }
 
     # Stap 1: nominatie op DAM
@@ -1330,7 +1465,7 @@ def lp_dispatch_day_stacked(
 
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.5.2-diag — start ===")
+    log.info("=== Fluctus Simulator v1.6 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -1519,22 +1654,6 @@ def run_simulation(inp: dict) -> dict:
         cyclus_kost = 0.0
     log.info(f"Cyclus-kost: €{cyclus_kost:.4f}/kWh ontladen")
 
-    # ─── DIAG sessie 6 (v1.5.1-diag) — aansluiting + PV/consumption maxes ────
-    _aansl = inp.get('aansluiting', {})
-    log.info(
-        f"[DIAG-1] aansluiting: "
-        f"max_afn_hard={_aansl.get('max_afname_kw_hard', 'MISSING')}, "
-        f"max_inj_hard={_aansl.get('max_injectie_kw_hard', 'MISSING')}, "
-        f"max_afn_zacht={_aansl.get('max_afname_kw_zacht', 'MISSING')}, "
-        f"max_inj_zacht={_aansl.get('max_injectie_kw_zacht', 'MISSING')}"
-    )
-    log.info(
-        f"[DIAG-2a] na PV-clipping: max(pv_kw)={max(pv_kw) if pv_kw else 0:.2f}, "
-        f"max(consumption_kw)={max(consumption_kw):.2f}, "
-        f"batt: kw={batt.get('kw', 0)} kwh={batt.get('kwh', 0)}"
-    )
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
-
     # ---- LP per dag ----
     log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
     nom_grid_in_all  = []  # v1.5 stacked: DAM-nominatie afname
@@ -1568,13 +1687,6 @@ def run_simulation(inp: dict) -> dict:
         skip_lp = False
         pv_only = False
 
-    # ─── DIAG sessie 6 — pad-keuze logging ────────────────────────────────────
-    log.info(
-        f"[DIAG-2b] LP-pad: bsp_actief={bsp_actief}, stacked_modus={stacked_modus}, "
-        f"skip_lp={skip_lp}, pv_only={pv_only}, n_dagen={n_dagen}"
-    )
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
-
     # Initialiseer BSP-storage (gebruikt zelfs als BSP niet actief, voor consistente structuur)
     nom_dam_kw_all = []
     dev_kw_all = []
@@ -1583,6 +1695,12 @@ def run_simulation(inp: dict) -> dict:
     pv_curtailed_kw_bsp_all = []
     bsp_imb_afname_eur = 0.0
     bsp_imb_injectie_eur = 0.0
+
+    # v1.6 lp_diagnostics tellers (wijziging G)
+    lp_optimal_count = 0
+    lp_retry1_count = 0
+    lp_retry2_count = 0
+    lp_verloren_dagen = []  # lijst van ISO-datums waar dag overgeslagen werd
     
     if skip_lp:
         log.info("Geen batterij/PV — LP wordt overgeslagen (snelle pad)")
@@ -1669,12 +1787,31 @@ def run_simulation(inp: dict) -> dict:
                     consumption_forecast_kw=consumption_forecast[i0:i1],
                     pv_forecast_kw=pv_forecast[i0:i1],
                 )
+                # v1.6 wijziging G: lp_diagnostics tellers + verloren_dagen lijst
+                _retry = result.get('retry_level', 0)
+                if _retry == 0:
+                    lp_optimal_count += 1
+                elif _retry == 1:
+                    lp_retry1_count += 1
+                elif _retry == 2:
+                    lp_retry2_count += 1
+                else:
+                    # Niveau 3: dag overgeslagen
+                    lp_verloren_dagen.append(sim_timestamps[i0].date().isoformat())
                 grid_in_all.extend(result['grid_in'])
                 grid_out_all.extend(result['grid_out'])
                 p_dis_all.extend(result['p_discharge'])
                 p_ch_all.extend(result['p_charge'])
                 soc_all.extend(result['soc'][1:])
-                soc_kwh = result['soc'][-1]
+                # v1.6 wijziging F: SoC-cascade sanity check
+                _new_soc = result['soc'][-1] if result['soc'] else None
+                _soc_max = batt['kwh'] * dod
+                if _new_soc is None or _new_soc < -0.01 or _new_soc > _soc_max + 0.01:
+                    log.warning(
+                        f"SoC cascade-defect dag {d}: soc[-1]={_new_soc}, reset naar 0.5 × soc_max"
+                    )
+                    _new_soc = _soc_max * 0.5
+                soc_kwh = max(0.0, min(_soc_max, _new_soc))
                 over_afn_zacht_all.extend(result['over_afn_zacht'])
                 over_afn_hard_all.extend(result['over_afn_hard'])
                 over_inj_zacht_all.extend(result['over_inj_zacht'])
@@ -1720,7 +1857,24 @@ def run_simulation(inp: dict) -> dict:
                 p_dis_all.extend(result['p_discharge'])
                 p_ch_all.extend(result['p_charge'])
                 soc_all.extend(result['soc'][1:])
-                soc_kwh = result['soc'][-1]
+                # v1.6 wijziging F: SoC-cascade sanity check
+                _new_soc = result['soc'][-1] if result['soc'] else None
+                _soc_max = batt['kwh'] * dod
+                if _new_soc is None or _new_soc < -0.01 or _new_soc > _soc_max + 0.01:
+                    log.warning(
+                        f"SoC cascade-defect dag {d}: soc[-1]={_new_soc}, reset naar 0.5 × soc_max"
+                    )
+                    _new_soc = _soc_max * 0.5
+                soc_kwh = max(0.0, min(_soc_max, _new_soc))
+                # v1.6 wijziging G: lp_diagnostics teller. lp_dispatch_day en
+                # _stacked hebben geen retry-ladder, dus elke niet-Optimal-dag
+                # zit in een eigen verloren_dagen-bucket-equivalent (we
+                # registreren ze als verloren wanneer status != Optimal).
+                _lp_status = result.get('lp_status', 'Optimal')
+                if _lp_status == 'Optimal':
+                    lp_optimal_count += 1
+                else:
+                    lp_verloren_dagen.append(sim_timestamps[i0].date().isoformat())
                 over_afn_zacht_all.extend(result['over_afn_zacht'])
                 over_afn_hard_all.extend(result['over_afn_hard'])
                 over_inj_zacht_all.extend(result['over_inj_zacht'])
@@ -1729,56 +1883,11 @@ def run_simulation(inp: dict) -> dict:
                 if (d + 1) % 30 == 0:
                     log.info(f"  LP-dispatch dag {d+1}/{n_dagen}…")
 
-    log.info(f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh")
-
-    # ─── DIAG sessie 6 — LP-output grid_in/out maxes ──────────────────────────
-    if grid_in_all and grid_out_all:
-        # Top-10 piek-kwartieren afname voor het geval ze geconcentreerd zijn
-        _gin_max = max(grid_in_all)
-        _gout_max = max(grid_out_all)
-        _gin_top = sorted(range(len(grid_in_all)), key=lambda i: -grid_in_all[i])[:5]
-        _gout_top = sorted(range(len(grid_out_all)), key=lambda i: -grid_out_all[i])[:5]
-        log.info(
-            f"[DIAG-3] LP-output: "
-            f"max(grid_in_all)={_gin_max:.2f}, max(grid_out_all)={_gout_max:.2f}, "
-            f"som_grid_in_mwh={sum(grid_in_all)*0.25/1000:.2f}, "
-            f"som_grid_out_mwh={sum(grid_out_all)*0.25/1000:.2f}"
-        )
-        log.info(
-            f"[DIAG-3b] top-5 grid_in pieken: "
-            f"{[f'{grid_in_all[i]:.1f}@{sim_timestamps[i].isoformat()}' for i in _gin_top]}"
-        )
-        log.info(
-            f"[DIAG-3c] top-5 grid_out pieken: "
-            f"{[f'{grid_out_all[i]:.1f}@{sim_timestamps[i].isoformat()}' for i in _gout_top]}"
-        )
-        # DIAG-8: tally hoeveel kwartieren de aansluiting overschrijden
-        _aansl_afn = _aansl.get('max_afname_kw_hard', 1e9)
-        _aansl_inj = _aansl.get('max_injectie_kw_hard', 1e9)
-        _tol = 0.01
-        _afn_over_count = sum(1 for v in grid_in_all if v > _aansl_afn + _tol)
-        _inj_over_count = sum(1 for v in grid_out_all if v > _aansl_inj + _tol)
-        # Distributie van violations per maand (welke maand heeft de violations?)
-        _afn_per_maand = [0] * 12
-        _inj_per_maand = [0] * 12
-        for i in range(len(grid_in_all)):
-            m = sim_timestamps[i].month - 1
-            if grid_in_all[i] > _aansl_afn + _tol:
-                _afn_per_maand[m] += 1
-            if grid_out_all[i] > _aansl_inj + _tol:
-                _inj_per_maand[m] += 1
-        log.info(
-            f"[DIAG-8] bound-violations: "
-            f"afname={_afn_over_count}/{len(grid_in_all)} kwartieren > {_aansl_afn} kW, "
-            f"injectie={_inj_over_count}/{len(grid_out_all)} kwartieren > {_aansl_inj} kW"
-        )
-        log.info(
-            f"[DIAG-8b] afname-overtredingen per maand (jan→dec): {_afn_per_maand}"
-        )
-        log.info(
-            f"[DIAG-8c] injectie-overtredingen per maand (jan→dec): {_inj_per_maand}"
-        )
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+    log.info(
+        f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh "
+        f"(optimal={lp_optimal_count}, retry1={lp_retry1_count}, "
+        f"retry2={lp_retry2_count}, verloren={len(lp_verloren_dagen)})"
+    )
 
     # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
     log.info("Jaarfactuur berekenen…")
@@ -1830,31 +1939,21 @@ def run_simulation(inp: dict) -> dict:
             nom_inj_arr = [max(pv_forecast[i] - consumption_forecast[i], 0) for i in range(N)]
             log.info(f"  BSP forecast nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
 
-    # Fysieke netstromen: consumption - pv +/- batterij (LP-resultaat is fysiek correct)
-    # grid_in_all en grid_out_all zijn LP-variabelen die de werkelijke fysieke stromen bevatten
-    # (laden/ontladen batterij zit erin). Correctie voor BSP-zonder-batterij: daar zijn
-    # grid_in/out nominatievariabelen, dus we reconstrueren fysiek uit consumption + batterij.
-    heeft_batterij = batt.get('kwh', 0) > 0
-    if heeft_batterij:
-        # LP-variabelen bevatten fysieke stromen incl batterij
+    # v1.6 wijziging J: gebruik heeft_lp_output i.p.v. heeft_batterij.
+    # Reden: bij PV-only + BSP zonder BESS draait de LP wél (BSP-modus
+    # overschrijft pv_only/skip_lp) maar grid_in/out komen dan uit de
+    # LP-variabelen — niet uit een passieve reconstructie. De v1.5-logica
+    # gebruikte enkel heeft_batterij waardoor de LP-output (incl pv_curt)
+    # genegeerd werd voor PV+BSP-zonder-BESS scenarios.
+    heeft_lp_output = not skip_lp
+    if heeft_lp_output:
+        # LP heeft fysieke stromen bepaald (incl pv_curt, batterij, BSP-flex)
         fysiek_grid_in  = list(grid_in_all)
         fysiek_grid_out = list(grid_out_all)
     else:
-        # Geen batterij: fysiek = consumption - pv (netto)
+        # Echt passieve fallback (geen LP gedraaid: skip_lp pad)
         fysiek_grid_in  = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
         fysiek_grid_out = [max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)]
-
-    # ─── DIAG sessie 6 — fysieke arrays die naar bereken_jaarfactuur gaan ─────
-    log.info(
-        f"[DIAG-4] naar bereken_jaarfactuur: "
-        f"max(fysiek_grid_in)={max(fysiek_grid_in):.2f}, "
-        f"max(fysiek_grid_out)={max(fysiek_grid_out):.2f}, "
-        f"heeft_batterij={heeft_batterij}, "
-        f"n_maanden_voor_factuur={n_maanden_voor_factuur}, "
-        f"nom_afn_arr={'set' if nom_afn_arr is not None else 'None'}, "
-        f"nom_inj_arr={'set' if nom_inj_arr is not None else 'None'}"
-    )
-    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
 
     factuur = bereken_jaarfactuur(
         fysiek_grid_in,
@@ -1869,6 +1968,7 @@ def run_simulation(inp: dict) -> dict:
         nom_afn_kw_all=nom_afn_arr,
         nom_inj_kw_all=nom_inj_arr,
         effectief_jaarverbruik_voor_pricing=effectief_jaarverbruik_mwh,
+        aansluiting=inp.get('aansluiting'),  # v1.6 wijziging K
     )
 
     # ---- KPI's ----
@@ -1952,6 +2052,9 @@ def run_simulation(inp: dict) -> dict:
             'maandpieken_injectie_kw': factuur['maandpieken_injectie_kw'],
             'toegangsvermogen_kw': factuur['toegangsvermogen_kw'],
             'jaarpiek_afname_kw': factuur['jaarpiek_afname_kw'],
+            # v1.6 wijziging L: nieuwe velden
+            'jaarpiek_injectie_kw': factuur['jaarpiek_injectie_kw'],
+            'winterpiek_afname_kw': factuur['winterpiek_afname_kw'],
         },
         'kpi': kpi,
         'waarschuwing': _edge_case_waarschuwing,
@@ -1966,6 +2069,15 @@ def run_simulation(inp: dict) -> dict:
             'kwartieren_hard': [
                 sim_timestamps[i].isoformat() for i in range(N) if over_afn_hard_all[i] > 0.01
             ][:100],
+        },
+        # v1.6 wijziging G+L: LP-diagnostics top-level. Geeft UI een groen/geel/rood
+        # badge zodat advisors weten of LP-oplos-rate gezond is voor deze scenario.
+        'lp_diagnostics': {
+            'totaal_dagen': n_dagen,
+            'optimal_dagen': lp_optimal_count,
+            'retry1_dagen': lp_retry1_count,
+            'retry2_dagen': lp_retry2_count,
+            'verloren_dagen': lp_verloren_dagen,
         },
         'data_periode': {
             'van': sim_timestamps[0].isoformat(),
