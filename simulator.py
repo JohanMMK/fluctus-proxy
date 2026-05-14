@@ -1,8 +1,30 @@
 #!/usr/bin/env python3
+# ============================================================================
+# FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.5.1-diag (sessie 6 diagnose — toegangsvermogen-bug)
+# Geproduceerd:  2026-05-14 06:00 UTC
+# Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
+# Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
+# Vereist:       server.js v15.12.1-diag (paired log-only release)
+# ============================================================================
 """
-Fluctus Battery Dispatch Simulator v1.5
-========================================
-Lees JSON van stdin, schrijf JSON naar stdout.
+Fluctus Battery Dispatch Simulator v1.5.1-diag
+================================================
+TIJDELIJKE diagnose-release voor sessie 6. GEEN LOGICA-WIJZIGING.
+
+Wijzigingen v1.5.1-diag vs v1.5:
+  - Vijf extra log.info regels met [DIAG]-prefix:
+    (1) na PV-clipping: max(pv_kw), max(consumption_kw)
+    (2) na LP-dispatch: max(grid_in_all), max(grid_out_all)
+    (3) vóór bereken_jaarfactuur: max(fysiek_grid_in), max(fysiek_grid_out)
+    (4) in bereken_jaarfactuur na maandpieken-berekening: maandpieken_afname,
+        maandpieken_injectie, toegangsvermogen
+    (5) optioneel: aansluiting-hard-bounds gerapporteerd
+  - Doel: hypothese A/B/C uit sessie6_toegangsvermogen_bug.md
+    discrimineren op één SMARTUNIT_v7 Sc4-run.
+  - Anti-regressie: pure log-additie. Geen wijziging aan input-handling,
+    LP-bouw, factuurberekening of output-shape. Identieke JSON output
+    op stdout. Wordt verwijderd in v1.6 na gerichte fix.
 
 Wijzigingen v1.5 (BaseCase Uitbreiding sessie 4 — periode-handling):
   - Nieuwe simulatieperiode-modus "specifiek": simulatieperiode.type='specifiek'
@@ -873,6 +895,17 @@ def bereken_jaarfactuur(
     jaarpiek_afname = math.ceil(max(winter_kw)) if winter_kw else 0
     toegangsvermogen = max(maandpieken_afname)  # = max(maandpieken)
 
+    # ─── DIAG sessie 6 (v1.5.1-diag) — maandpieken en toegangsvermogen ───────
+    log.info(
+        f"[DIAG-5] maandpieken_afname={maandpieken_afname}, "
+        f"jaarpiek={jaarpiek_afname}, toegangsvermogen={toegangsvermogen}"
+    )
+    log.info(
+        f"[DIAG-5b] maandpieken_injectie={maandpieken_injectie}, "
+        f"max(grid_in_kw)={max(grid_in_kw):.2f}, max(grid_out_kw)={max(grid_out_kw):.2f}"
+    )
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
     # ---- GROEP A: ENERGIEKOST (commodity) ----
     # v1.4 refactor: DAM-tak rekent op nominatie, IMB-tak op deviation, belastingen op fysiek volume.
     # In passive-modus (geen BSP) zijn nominatie = werkelijk → identiek aan oude logica.
@@ -1229,7 +1262,7 @@ def lp_dispatch_day_stacked(
 
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.5 — start ===")
+    log.info("=== Fluctus Simulator v1.5.1-diag — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -1418,6 +1451,22 @@ def run_simulation(inp: dict) -> dict:
         cyclus_kost = 0.0
     log.info(f"Cyclus-kost: €{cyclus_kost:.4f}/kWh ontladen")
 
+    # ─── DIAG sessie 6 (v1.5.1-diag) — aansluiting + PV/consumption maxes ────
+    _aansl = inp.get('aansluiting', {})
+    log.info(
+        f"[DIAG-1] aansluiting: "
+        f"max_afn_hard={_aansl.get('max_afname_kw_hard', 'MISSING')}, "
+        f"max_inj_hard={_aansl.get('max_injectie_kw_hard', 'MISSING')}, "
+        f"max_afn_zacht={_aansl.get('max_afname_kw_zacht', 'MISSING')}, "
+        f"max_inj_zacht={_aansl.get('max_injectie_kw_zacht', 'MISSING')}"
+    )
+    log.info(
+        f"[DIAG-2a] na PV-clipping: max(pv_kw)={max(pv_kw) if pv_kw else 0:.2f}, "
+        f"max(consumption_kw)={max(consumption_kw):.2f}, "
+        f"batt: kw={batt.get('kw', 0)} kwh={batt.get('kwh', 0)}"
+    )
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
     # ---- LP per dag ----
     log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
     nom_grid_in_all  = []  # v1.5 stacked: DAM-nominatie afname
@@ -1450,7 +1499,14 @@ def run_simulation(inp: dict) -> dict:
     if bsp_actief and (max(pv_kw) > 0 or batt['kwh'] > 0):
         skip_lp = False
         pv_only = False
-    
+
+    # ─── DIAG sessie 6 — pad-keuze logging ────────────────────────────────────
+    log.info(
+        f"[DIAG-2b] LP-pad: bsp_actief={bsp_actief}, stacked_modus={stacked_modus}, "
+        f"skip_lp={skip_lp}, pv_only={pv_only}, n_dagen={n_dagen}"
+    )
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
     # Initialiseer BSP-storage (gebruikt zelfs als BSP niet actief, voor consistente structuur)
     nom_dam_kw_all = []
     dev_kw_all = []
@@ -1607,6 +1663,29 @@ def run_simulation(inp: dict) -> dict:
 
     log.info(f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh")
 
+    # ─── DIAG sessie 6 — LP-output grid_in/out maxes ──────────────────────────
+    if grid_in_all and grid_out_all:
+        # Top-10 piek-kwartieren afname voor het geval ze geconcentreerd zijn
+        _gin_max = max(grid_in_all)
+        _gout_max = max(grid_out_all)
+        _gin_top = sorted(range(len(grid_in_all)), key=lambda i: -grid_in_all[i])[:5]
+        _gout_top = sorted(range(len(grid_out_all)), key=lambda i: -grid_out_all[i])[:5]
+        log.info(
+            f"[DIAG-3] LP-output: "
+            f"max(grid_in_all)={_gin_max:.2f}, max(grid_out_all)={_gout_max:.2f}, "
+            f"som_grid_in_mwh={sum(grid_in_all)*0.25/1000:.2f}, "
+            f"som_grid_out_mwh={sum(grid_out_all)*0.25/1000:.2f}"
+        )
+        log.info(
+            f"[DIAG-3b] top-5 grid_in pieken: "
+            f"{[f'{grid_in_all[i]:.1f}@{sim_timestamps[i].isoformat()}' for i in _gin_top]}"
+        )
+        log.info(
+            f"[DIAG-3c] top-5 grid_out pieken: "
+            f"{[f'{grid_out_all[i]:.1f}@{sim_timestamps[i].isoformat()}' for i in _gout_top]}"
+        )
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
     # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
     log.info("Jaarfactuur berekenen…")
     contract_for_factuur = dict(inp['contract'])
@@ -1670,6 +1749,18 @@ def run_simulation(inp: dict) -> dict:
         # Geen batterij: fysiek = consumption - pv (netto)
         fysiek_grid_in  = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
         fysiek_grid_out = [max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)]
+
+    # ─── DIAG sessie 6 — fysieke arrays die naar bereken_jaarfactuur gaan ─────
+    log.info(
+        f"[DIAG-4] naar bereken_jaarfactuur: "
+        f"max(fysiek_grid_in)={max(fysiek_grid_in):.2f}, "
+        f"max(fysiek_grid_out)={max(fysiek_grid_out):.2f}, "
+        f"heeft_batterij={heeft_batterij}, "
+        f"n_maanden_voor_factuur={n_maanden_voor_factuur}, "
+        f"nom_afn_arr={'set' if nom_afn_arr is not None else 'None'}, "
+        f"nom_inj_arr={'set' if nom_inj_arr is not None else 'None'}"
+    )
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
 
     factuur = bereken_jaarfactuur(
         fysiek_grid_in,
