@@ -1,13 +1,23 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.12.0 (Maak-Voorstel + BESS-Custom — sessie 5b)
-// Geproduceerd:  2026-05-13 20:00 UTC
+// Versie:        v15.12.1-diag (sessie 6 diagnose — toegangsvermogen-bug)
+// Geproduceerd:  2026-05-14 06:00 UTC
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
 // Vereist:       Simulator.txt v1.17.0+ (UI verwacht /api/scenarios-batch-bewaren)
-//                simulator.py v1.5 (geen wijziging — accepteert al dict-shape batterij)
+//                simulator.py v1.5.1-diag (paired log-only release)
 //                apply_base_case.js v1.16+ (top-level klantBtw/leveringsadres velden)
+// Wijzigingen v15.12.1-diag vs v15.12.0:
+//   - TIJDELIJK voor sessie 6 diagnose. GEEN logica-wijziging.
+//   - Eén extra console.log in /api/nominatie-sim direct na buildSimInput():
+//     print [DIAG] de cruciale velden die simulator.py ontvangt
+//     (aansluiting, batterij.kw/kwh, pv.kwp, bsp.actief, contract.modus).
+//     Doel: hypothese A (server stuurt verkeerde max_*_kw_hard naar Sc4)
+//     definitief uitsluiten of bevestigen op SMARTUNIT_v7 Sc4-run.
+//   - Anti-regressie: pure additieve console.log. Geen route-MODIFY, geen
+//     STATE-velden, geen response-shape wijziging. Alle bestaande tests
+//     produceren identieke output. Wordt verwijderd in v15.13 na fix.
 // Wijzigingen v15.12.0 vs v15.11.1:
 //   - BESS-CUSTOM detectie in buildSimInput: wanneer ui.batterijId === 'CUSTOM'
 //     en ui.batterijCustom aanwezig is, gebruik die dict in plaats van de
@@ -905,6 +915,25 @@ app.post('/api/nominatie-sim', (req, res) => {
   const simInput  = buildSimInput(input);
   console.log('[sim] pvVorm length:', simInput.pv ? simInput.pv.vorm_kwartier.length : 0,
     'nonzero:', simInput.pv ? simInput.pv.vorm_kwartier.filter(v=>v>0).length : 0);
+
+  // ─── DIAG sessie 6 (v15.12.1-diag) — toegangsvermogen-bug diagnose ─────────
+  // Print de cruciale velden die simulator.py ontvangt VOOR de child-spawn.
+  // Doel: hypothese A (server stuurt verkeerde max_*_kw_hard voor Sc4) testen
+  // op SMARTUNIT_v7 Sc4 vs Sc5 vergelijking. Te verwijderen in v15.13.
+  console.log('[DIAG] scenario:', input.scenario || '(geen)', '| project:', input.project || '(geen)');
+  console.log('[DIAG] aansluiting:', JSON.stringify(simInput.aansluiting));
+  console.log('[DIAG] batterij: kw=' + simInput.batterij.kw +
+              ' kwh=' + simInput.batterij.kwh +
+              ' rte=' + simInput.batterij.rte_pct +
+              ' dod=' + simInput.batterij.dod_pct);
+  console.log('[DIAG] pv.kwp=' + simInput.pv.kwp +
+              ' bsp.actief=' + (simInput.bsp && simInput.bsp.actief) +
+              ' curtail.actief=' + (simInput.pv_curtailment && simInput.pv_curtailment.actief));
+  console.log('[DIAG] contract.modus=' + (simInput.contract && simInput.contract.modus) +
+              ' simperiode=' + JSON.stringify(simInput.simulatieperiode));
+  console.log('[DIAG] jaarverbruik_mwh=' + simInput.jaarverbruik_mwh);
+  // ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
   const proc = spawn('python3', [simulatorPath], { env:{...process.env, PYTHONUNBUFFERED:'1'} });
 
   let stdout = '', stderr = '';
