@@ -1,7 +1,7 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.13 (sessie 6 fix — asymmetrie afname/injectie + DIAG weg)
+// Versie:        v15.13.1 (sessie 6 optie 2 — profielpiek-heuristiek max_afname_kw_zacht)
 // Geproduceerd:  2026-05-14
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
@@ -9,6 +9,24 @@
 //                                       sectie B injectie in stap 7)
 //                simulator.py v1.6+ (LP-bound-violation fix + asymmetrie)
 //                apply_base_case.js v1.16+ (ongewijzigd t.o.v. v15.12)
+// Wijzigingen v15.13.1 vs v15.13:
+//   - PROFIELPIEK-HEURISTIEK voor max_afname_kw_zacht in buildSimInput.
+//     buildSimInput berekent profielpiekKw uit het basisprofiel × jaarverbruik
+//     en stelt max_afname_kw_zacht = min(aanslKw, ceil(profielpiekKw × 1.20))
+//     in plaats van het oude aanslKw. max_afname_kw_hard blijft aanslKw.
+//   - DOEL: voorkomt dat BSP-modus de aansluitingscap volledig benut voor
+//     BESS-laden, wat onnodig de Groep B (maandpiek) kost de hoogte injaagt.
+//     Bewezen op SMARTUNIT_v10 Sc4: gem(maandpieken_afname) was 126 kW i.p.v.
+//     profielpiek 92 kW = +€3.578/jaar onterechte capaciteit. LP voelt nu
+//     pen_afname_zacht × overschrijding boven 111 kW en kiest andere laad-momenten.
+//   - UI-override: ui.max_afname_zacht_kw / ui.maxAfnameZachtKw heeft voorrang.
+//     Sales kan dit handmatig finetunen per scenario indien gewenst.
+//   - BUFFER 20%: dekt aanvullingen (laadinfra/elektrificatie niet in basisprofiel),
+//     kwartier-variabiliteit, sporadische werkdag-pieken. Conservatief.
+//   - Anti-regressie: Sc1-3 zonder PV/BESS: profielpiek × 1.20 < aanslKw → zacht
+//     is dezelfde of lager dan voorheen. Bij identieke LP-resultaten geen impact
+//     (LP raakt zacht-cap niet). Bij BSP-pad merkbaar lagere maandpieken.
+//   - Sessie 7: optie 3 (Groep B-kost in LP-objective via monthly-peak constraint).
 // Wijzigingen v15.13 vs v15.12.1-diag:
 //   - DIAG-blok in /api/nominatie-sim verwijderd (was tijdelijk voor RCA
 //     sessie 6 toegangsvermogen-bug; root-cause nu opgelost in simulator.py v1.6).
@@ -1084,21 +1102,42 @@ function buildSimInput(ui) {
     console.warn('[sim] solar_norm niet beschikbaar, pvVorm=[]. PV-productie = 0.');
   }
 
-  return {
-    profiel_kwartier: (() => {
-      // Laad het gevraagde profiel uit data/profielen/
-      const pNaam = ui.profielNaam || ui.profiel_naam || 'Slager';
-      const profielDir = path.join(__dirname, 'data', 'profielen');
-      if (fs.existsSync(profielDir)) {
-        const files = fs.readdirSync(profielDir);
-        const match = files.find(f => f.toLowerCase() === pNaam.toLowerCase() + '.json');
-        if (match) {
-          const d = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
-          return Array.isArray(d) ? d : d.profiel_kwartier || [];
-        }
+  // v15.13.1 sessie 6 optie 2: bereken profielpiek voor max_afname_kw_zacht heuristiek.
+  // Doel: geef LP een zachte penalty voor grid_in boven natuurlijke profielpiek + 20% buffer.
+  // Voorkomt dat BSP-modus de aansluitingscap volledig benut voor BESS-laden, wat onnodig
+  // de Groep B (maandpiek) kost de hoogte injaagt — zie SMARTUNIT_v10 Sc4 cijfers
+  // (gem maandpiek 126 kW i.p.v. profielpiek 92 kW → +€3.578/jaar onterechte capaciteit).
+  // Buffer 20% dekt (a) aanvullingen (laadinfra/elektrificatie niet meegenomen in basisprofiel),
+  // (b) profiel-variabiliteit per kwartier, (c) sporadische werkdag-pieken.
+  // Hard cap blijft aanslKw — alleen zacht-penalty triggert eerder.
+  // Sessie 7 zal Groep B-kost echt in LP-objective opnemen via monthly-peak constraint.
+  const profielKwartier = (() => {
+    const pNaam = ui.profielNaam || ui.profiel_naam || 'Slager';
+    const profielDir = path.join(__dirname, 'data', 'profielen');
+    if (fs.existsSync(profielDir)) {
+      const files = fs.readdirSync(profielDir);
+      const match = files.find(f => f.toLowerCase() === pNaam.toLowerCase() + '.json');
+      if (match) {
+        const d = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
+        return Array.isArray(d) ? d : d.profiel_kwartier || [];
       }
-      return (MARKT && MARKT.profiel) || [];
-    })(),
+    }
+    return (MARKT && MARKT.profiel) || [];
+  })();
+  let profielMax = 0;
+  for (let i = 0; i < profielKwartier.length; i++) {
+    if (profielKwartier[i] > profielMax) profielMax = profielKwartier[i];
+  }
+  // profielMax is genormaliseerd (profielKwartier som = 1.0).
+  // profielMax × jaarverbruik_MWh × 1000 kWh/MWh / 0.25 h/kwartier = kW.
+  const profielpiekKw = profielMax * jaarverbruik * 1000 / 0.25;
+  // UI-override voor zachte cap (voor sales-tuning): ui.max_afname_zacht_kw.
+  const zachtAfnameKw = Number(ui.max_afname_zacht_kw || ui.maxAfnameZachtKw || 0) ||
+                        Math.max(1, Math.min(aanslKw, Math.ceil(profielpiekKw * 1.20)));
+  console.log(`[sim] profielpiek=${profielpiekKw.toFixed(1)} kW → max_afname_kw_zacht=${zachtAfnameKw} kW (aanslKw=${aanslKw} hard)`);
+
+  return {
+    profiel_kwartier: profielKwartier,
     jaarverbruik_mwh: jaarverbruik,
     aanvullingen: {},
     pv: {
@@ -1121,8 +1160,10 @@ function buildSimInput(ui) {
       // afname-cap = contractueel toegangsvermogen (aanslKw).
       // injectie-cap = som fysieke inverter-vermogens (PV-omvormer + BESS-omvormer),
       // tenzij UI expliciet maxInjectieKw zet.
-      max_afname_kw_zacht:  aanslKw,        max_afname_kw_hard:  aanslKw,
-      max_injectie_kw_zacht: maxInjectieKw, max_injectie_kw_hard: maxInjectieKw,
+      // v15.13.1: max_afname_kw_zacht = profielpiek × 1.20 (i.p.v. aanslKw) zodat
+      // LP een penalty krijgt voor BSP-laden boven natuurlijke profielpiek.
+      max_afname_kw_zacht:  zachtAfnameKw,   max_afname_kw_hard:  aanslKw,
+      max_injectie_kw_zacht: maxInjectieKw,  max_injectie_kw_hard: maxInjectieKw,
       tarief_overschrijding_afname_eur_per_kw_jaar: TARIEVEN_LS.overschrijding_toegangsvermogen_eur_kw_jaar,
       tarief_overschrijding_injectie_eur_per_kw_jaar: 1.0,
     },
