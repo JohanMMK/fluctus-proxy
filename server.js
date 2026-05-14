@@ -1,14 +1,25 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.13.1 (sessie 6 optie 2 — profielpiek-heuristiek max_afname_kw_zacht)
+// Versie:        v15.14 (sessie 7 — gepaird met simulator.py v1.7 maand-LP)
 // Geproduceerd:  2026-05-14
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-// Vereist:       Simulator.txt v1.18+ (UI verwacht lp_diagnostics badge +
-//                                       sectie B injectie in stap 7)
-//                simulator.py v1.6+ (LP-bound-violation fix + asymmetrie)
+// Vereist:       Simulator.txt v1.19+ (UI projecten-loading fix +
+//                                       lp_diagnostics maand-niveau badge)
+//                simulator.py v1.7+ (maand-LP met Groep B-kost in objective)
 //                apply_base_case.js v1.16+ (ongewijzigd t.o.v. v15.12)
+// Wijzigingen v15.14 vs v15.13.1:
+//   - HEADER-BUMP voor sessie 7. Geen functionele wijziging in de
+//     buildSimInput payload-structuur: simulator.py v1.7 leest de tarieven
+//     uit inp.netbeheer.tarieven (al aanwezig in v15.13.1 payload) en bouwt
+//     daarmee de monthly_peak-kost-term in de LP-objective op.
+//   - Resultaat-structuur uitgebreid: lp_diagnostics bevat nu naast de
+//     bestaande dag-niveau-velden ook totaal_maanden / optimal_maanden /
+//     retry1_maanden / retry2_maanden / verloren_maanden. Server.js geeft
+//     deze ongewijzigd door (geen serialisatie-specifieke handling nodig).
+//   - Verwachte impact SMARTUNIT_v10 Sc4: subtotaal €14.898/jaar → ≤€13.500/jaar
+//     (+€1.500-2.500 extra besparing per jaar). Zie sessie 7 acceptatie-criteria.
 // Wijzigingen v15.13.1 vs v15.13:
 //   - PROFIELPIEK-HEURISTIEK voor max_afname_kw_zacht in buildSimInput.
 //     buildSimInput berekent profielpiekKw uit het basisprofiel × jaarverbruik
@@ -1110,7 +1121,10 @@ function buildSimInput(ui) {
   // Buffer 20% dekt (a) aanvullingen (laadinfra/elektrificatie niet meegenomen in basisprofiel),
   // (b) profiel-variabiliteit per kwartier, (c) sporadische werkdag-pieken.
   // Hard cap blijft aanslKw — alleen zacht-penalty triggert eerder.
-  // Sessie 7 zal Groep B-kost echt in LP-objective opnemen via monthly-peak constraint.
+  // Sessie 7 (v1.7) voegt monthly_peak-constraint toe aan BSP-LP objective met
+  // c_per_maand_kw uit netbeheer.tarieven; deze profielpiek-heuristiek (zachte band)
+  // blijft als bovengrens voor de LP staan zodat ZEER hoge BSP-laad-pieken alsnog
+  // worden afgeremd. De combinatie pakt de meeste maandpiek-shaving op.
   const profielKwartier = (() => {
     const pNaam = ui.profielNaam || ui.profiel_naam || 'Slager';
     const profielDir = path.join(__dirname, 'data', 'profielen');
@@ -1630,7 +1644,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.9 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.14 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt geladen: ${MARKT ? 'ja ('+MARKT.n_kwartieren+' kwartieren)' : 'nee'}`);
 });
