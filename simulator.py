@@ -1,18 +1,60 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.6 (sessie 6 productie-fix — LP-bound-violation + asymmetrie)
+# Versie:        v1.7 (sessie 7 — Groep B-kost in BSP-LP-objective)
 # Geproduceerd:  2026-05-14
 # Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 # Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
 # Vereist:       server.js v15.13+ (asymmetrie max_injectie_kw_hard veld)
 # ============================================================================
 """
-Fluctus Battery Dispatch Simulator v1.6
+Fluctus Battery Dispatch Simulator v1.7
 ========================================
-Productie-release. Lost de toegangsvermogen-bug uit sessie 6 op door drie
-LP-architectuur design-defects te elimineren. Backwards-compatible:
-calls met identieke input én oude paden (Sc1-3) geven IDENTIEKE output.
+Sessie 7 — Strategie A: maand-niveau BSP-LP met expliciete monthly_peak-kost.
+
+Doel: LP "voelt" de werkelijke Groep B / D capaciteit-kost in plaats van enkel
+de zachte profielpiek-heuristiek penalty. LP kiest economisch optimale balans
+tussen BSP-arbitrage-winst en stijging van het maandpiek-aggregaat.
+
+Wijzigingen v1.7 vs v1.6:
+  ARCHITECTUUR (BSP-LP) — lp_dispatch_month_bsp (nieuw, vervangt per-dag-loop):
+  - Per kalendermaand bouwt run_simulation één LP over alle kwartieren in die
+    maand (28-31 × 96 = 2688-2976 kwartieren). monthly_peak is een unieke
+    LP-variabele die grid_in[t] in die maand bounded.
+  - Objective bevat per-maand-share van Groep B + Groep D capaciteit-kosten:
+      c_per_maand = tar_maandpiek_B / 12        (Groep B maandpiek-aggregaat)
+                  + tar_tr_maandpiek_D          (Groep D transport-maandpiek)
+                  + tar_jaarpiek_B / 12         (Groep B toegangsvermogen,
+                                                 benadering uniform-spreid)
+                  + tar_tr_beschikb_D / 12      (Groep D beschikbaar vermogen)
+    monthly_peak[m] × c_per_maand wordt opgenomen in de objective.
+  - SoC casadeert nu per kalendermaand (van laatste kwartier maand m naar
+    eerste kwartier maand m+1). Voorheen casadeerde SoC per dag.
+  - Per-dag spec_dev budget blijft behouden (n_dagen aparte LP-constraints
+    binnen één maand-LP). Anti-regressie t.o.v. v1.6 paper-deviation gedrag.
+  - Retry-ladder werkt nu per MAAND i.p.v. per dag:
+      Niveau 0: spec_budget × 1
+      Niveau 1: spec_budget × 10
+      Niveau 2: spec_budget volledig verwijderd
+      Niveau 3: maand verloren (alle dagen in die maand: grid_in/out = 0,
+                SoC blijft constant). GEEN passieve fallback (consistent met
+                v1.6 design beslissing 4.3).
+  - Verwachte impact SMARTUNIT_v10 Sc4: subtotaal €14.898/jaar → ≤€13.500/jaar
+    (+€1.500-2.500 extra besparing per jaar t.o.v. v1.6).
+
+  DIAGNOSTICS — lp_diagnostics:
+  - Nieuwe maand-niveau tellers: totaal_maanden, optimal_maanden,
+    retry1_maanden, retry2_maanden, verloren_maanden.
+  - Backwards-compat: optimal_dagen / retry1_dagen / retry2_dagen / verloren_dagen
+    blijven aanwezig — afgeleid uit maand-tellers (dagen = aantal dagen in
+    bijbehorende maand). Simulator.txt v1.18 badge-logica blijft werken.
+
+  BACKWARDS-COMPAT:
+  - Sc1-3 paden (skip_lp / pv_only): UNCHANGED, identieke output aan v1.6.
+  - Niet-BSP LP-paden (lp_dispatch_day, lp_dispatch_day_stacked): UNCHANGED.
+  - lp_dispatch_day_bsp blijft aanwezig (deprecated, niet meer aangeroepen
+    vanuit run_simulation). Voor externe callers behoudt v1.6-gedrag.
+  - Sc4 BSP+BESS: NIEUW gedrag (monthly_peak in objective) → andere output.
 
 Wijzigingen v1.6 vs v1.5.2-diag:
   ARCHITECTUUR (LP) — alle drie LP-functies (lp_dispatch_day,
@@ -939,6 +981,375 @@ def lp_dispatch_day_bsp(
 
 
 # =============================================================================
+# BSP-LP PER KALENDERMAAND (v1.7 sessie 7 — Strategie A: Groep B in objective)
+# =============================================================================
+
+def lp_dispatch_month_bsp(
+    consumption_kw: list,         # H kwartieren — H = n_dagen × 96 voor één maand
+    pv_kw: list,                  # H kwartieren
+    spot_eur_mwh: list,           # H kwartieren
+    imb_eur_mwh: list,            # H kwartieren
+    soc_start_kwh: float,
+    batterij: dict,
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+    paper_capture_rate: float,    # bv 0.018 (1.8%) × forecast_modus_multiplier
+    pv_curtailment_allowed: bool,
+    netbeheer_tarieven: dict,     # v1.7: nodig voor monthly_peak-kost in objective
+    consumption_forecast_kw: list = None,
+    pv_forecast_kw: list = None,
+) -> dict:
+    """
+    Maand-niveau BSP-LP. Refactor v1.7 van lp_dispatch_day_bsp.
+    Voegt monthly_peak-variabele + Groep B/D capaciteit-kost toe aan objective.
+
+    Werking:
+      H = n_dagen × 96 (bv 31 × 96 = 2976 voor juli)
+      n_dagen = H // 96
+
+    Constraints (per kwartier t in [0, H)):
+      grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv[t] - pv_curt[t])
+          = consumption[t]
+      soc[t+1] = soc[t] + eta·p_ch[t]·dt - (1/eta)·p_dis[t]·dt
+      monthly_peak >= grid_in[t]   # ← NIEUW v1.7
+      over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+      over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+      p_ch[t] + p_dis[t] <= kw_batt
+      (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t])
+          = spec_dev_pos[t] - spec_dev_neg[t]
+      Per dag d: sum_{t in dag d} (spec_dev_pos[t] + spec_dev_neg[t]) * dt / 1000
+          <= paper_capture_rate × volume_dag_d_MWh
+
+    Objective (samenvattend):
+      DAM-tak op nominatie + IMB-tak op deviation + belastingen op fysiek volume
+      + cyclus_kost × p_dis + zachte penalties + eps_penalty × volume
+      + monthly_peak × c_per_maand    # ← NIEUW v1.7
+      waar c_per_maand = tar_maandpiek_B/12 + tar_tr_maandpiek_D
+                       + tar_jaarpiek_B/12 + tar_tr_beschikb_D/12
+
+    Retry-ladder bij niet-Optimal:
+      Niveau 0 (multiplier 1.0)  → Niveau 1 (×10) → Niveau 2 (geen budget)
+      → Niveau 3 (maand verloren: grid_in/out = 0 voor alle H kwartieren,
+         SoC blijft constant op soc_start_kwh).
+
+    Returns dict:
+      - p_charge[H], p_discharge[H], grid_in[H], grid_out[H], soc[H+1]
+      - over_afn_zacht[H], over_inj_zacht[H], over_afn_hard[H]=0, over_inj_hard[H]=0
+      - nom_dam_kw[H] (= consumption - pv, op forecast),
+        nom_eff_afn_kw[H], nom_eff_inj_kw[H], dev_kw[H]
+      - pv_curtailed_kw[H]
+      - nom_revenue_eur (float)
+      - lp_status ('Optimal'/'retry1_optimal'/'retry2_optimal'/'verloren')
+      - retry_level (0/1/2/3)
+      - monthly_peak_kw (float) — gerealiseerde maandpiek-afname uit LP
+    """
+    H = len(consumption_kw)
+    if H % 96 != 0:
+        log.error(f"lp_dispatch_month_bsp: H={H} niet deelbaar door 96, valt terug op dag-modulo.")
+    n_dagen = max(1, H // 96)
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)
+
+    soc_min = 0.0
+    soc_max = kwh_batt * dod
+
+    # Aansluiting-bounds (v1.6: hard via LpVariable upper bound, zacht via
+    # penalty op over_zacht; geen over_hard meer, zie RCA defect 3).
+    tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    pen_afname_zacht = tar_afname_kw / 12.0
+    pen_injectie_zacht = tar_injectie_kw / 12.0
+
+    max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+
+    injectie_toegelaten = contract.get('injectie_toegelaten', True)
+    if not injectie_toegelaten:
+        max_injectie_zacht = 0.0
+        max_injectie_hard = 0.0
+
+    # v1.7: Groep B + D capaciteit-tarieven uit netbeheer.tarieven.
+    # Per-maand "marginale" kost voor 1 kW extra in monthly_peak[m]:
+    #   - Groep B maandpiek: gem(maandpieken) × tar_maandpiek_B  → per maand: × /12
+    #   - Groep D transport-maandpiek: sum(maandpieken) × tar_tr_maandpiek_D  → × 1
+    #   - Groep B toegangsvermogen: max(maandpieken) × tar_jaarpiek_B
+    #       Benadering uniform-spreid (alsof elke maand met kans 1/12 de jaarpiek
+    #       wordt): per maand × /12. Dit is een onderschatting voor de echte
+    #       jaarpiek-maand maar geeft LP een consistente prikkel om ALLE
+    #       maandpieken te shaven (= robuust). Single-pass jaar-LP zou exacter
+    #       zijn maar te zwaar voor CBC; iterative shadow-price komt in v1.8+.
+    #   - Groep D beschikbaar vermogen: toegangsvermogen × tar_tr_beschikb_D
+    #       Idem benadering uniform-spreid: per maand × /12.
+    _tar_maandpiek_B    = (netbeheer_tarieven or {}).get('maandpiek_eur_kw_jaar', 0.0)
+    _tar_jaarpiek_B     = (netbeheer_tarieven or {}).get('toegangsvermogen_eur_kw_jaar', 0.0)
+    _tar_tr_maandpiek_D = (netbeheer_tarieven or {}).get('transport_maandpiek_eur_kw_mnd', 0.0)
+    _tar_tr_beschikb_D  = (netbeheer_tarieven or {}).get('transport_beschikbaar_eur_kva_jaar', 0.0)
+    c_per_maand_kw = (
+        _tar_maandpiek_B / 12.0
+        + _tar_tr_maandpiek_D
+        + _tar_jaarpiek_B / 12.0
+        + _tar_tr_beschikb_D / 12.0
+    )
+
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / (n_dagen if n_dagen else 1) / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+
+    markup_per_mwh = pricing['markup_dam']
+    markdown_per_mwh = pricing['markdown_dam']
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
+
+    # Nominatie = forecast-met-ruis (referentie voor speculation budget)
+    cons_for_nom = consumption_forecast_kw if consumption_forecast_kw is not None else consumption_kw
+    pv_for_nom = pv_forecast_kw if pv_forecast_kw is not None else pv_kw
+    forecast_afn = [max(cons_for_nom[t] - pv_for_nom[t], 0) for t in range(H)]
+    forecast_inj = [max(pv_for_nom[t] - cons_for_nom[t], 0) for t in range(H)]
+    nom_net = [cons_for_nom[t] - pv_for_nom[t] for t in range(H)]
+
+    # Per-dag papier-budget (in MWh, gebaseerd op werkelijk dagvolume).
+    # Anti-regressie t.o.v. v1.6: ZELFDE per-dag budget-mechanisme behouden.
+    daily_paper_budget_mwh = []
+    for d in range(n_dagen):
+        i0 = d * 96
+        i1 = min(i0 + 96, H)
+        vol_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
+        daily_paper_budget_mwh.append(paper_capture_rate * vol_mwh)
+
+    def _build_and_solve_month(spec_budget_multiplier: float, label: str):
+        """
+        v1.7 retry-helper: bouwt en solveert het maand-niveau BSP-LP.
+        multiplier=1.0  → normale spec_budget (niveau 0)
+        multiplier=10.0 → relaxed spec_budget (niveau 1)
+        multiplier=-1   → spec_budget volledig verwijderd (niveau 2)
+        """
+        prob = pulp.LpProblem(f'battery_dispatch_month_bsp_{label}', pulp.LpMinimize)
+
+        p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+        p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+        grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+        grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+        soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+        over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+        over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+
+        # v1.7 NIEUW: monthly_peak — één unieke variabele over de hele maand,
+        # bound door grid_in[t] voor alle t. LP minimiseert (cost term in objective),
+        # dus zal automatisch = max(grid_in[t]) worden in optimum.
+        monthly_peak = pulp.LpVariable('monthly_peak', 0, max_afname_hard)
+
+        if pv_curtailment_allowed:
+            pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
+        else:
+            pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
+
+        # Nominatie met fysieke richting-constraint per kwartier
+        nom_afn = []
+        nom_inj = []
+        for t in range(H):
+            if forecast_afn[t] > 0:
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))
+            else:
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
+
+        spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
+        spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
+
+        # SoC-startwaarde
+        prob += soc[0] == soc_start_kwh
+
+        # Per-kwartier constraints
+        for t in range(H):
+            prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
+            prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+            prob += monthly_peak >= grid_in[t]  # v1.7 monthly_peak constraint
+            prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+            prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+            prob += p_ch[t] + p_dis[t] <= kw_batt
+            prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
+
+        # Per-dag spec_dev budget constraint
+        if spec_budget_multiplier >= 0:
+            for d in range(n_dagen):
+                i0 = d * 96
+                i1 = min(i0 + 96, H)
+                if daily_paper_budget_mwh[d] >= 0:
+                    effective_budget = daily_paper_budget_mwh[d] * spec_budget_multiplier
+                    daily_spec = pulp.lpSum(spec_dev_pos[t] + spec_dev_neg[t] for t in range(i0, i1)) * dt_h / 1000.0
+                    prob += daily_spec <= effective_budget
+        # multiplier < 0 → geen spec-budget constraint (volledig vrij)
+
+        # Objective
+        obj_terms = []
+        eps_penalty = 1.0 / 1000.0  # 1 €/MWh anti-fake-volume
+
+        for t in range(H):
+            prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0
+            prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
+            prijs_imb = imb_eur_mwh[t] / 1000.0
+            belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
+
+            obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
+            obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+            obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
+            obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
+            obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
+            obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+            obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+            obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+            obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+
+        # v1.7 NIEUW: monthly_peak × c_per_maand_kw (Groep B + D capaciteit-kost)
+        obj_terms.append(c_per_maand_kw * monthly_peak)
+
+        prob += pulp.lpSum(obj_terms)
+
+        # Maand-LP is groter dan dag-LP. CBC timeLimit verhogen tot 60s per maand
+        # (acceptatie-criterium sessie 7: ≤60s per scenario ⇒ ~5s per maand zou
+        # genoeg moeten zijn, 60s is ruime veiligheidsmarge per maand).
+        solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=60)
+        status = prob.solve(solver)
+        status_str = pulp.LpStatus[status]
+
+        # Extract values
+        nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
+        nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
+        pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
+        p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+        p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+        grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+        grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+        soc_vals = [pulp.value(v) or 0.0 for v in soc]
+        oaz_vals = [pulp.value(v) or 0.0 for v in over_afn_zacht]
+        oiz_vals = [pulp.value(v) or 0.0 for v in over_inj_zacht]
+        mp_val = pulp.value(monthly_peak) or 0.0
+
+        return status_str, {
+            'p_ch': p_ch_vals, 'p_dis': p_dis_vals,
+            'grid_in': grid_in_vals, 'grid_out': grid_out_vals,
+            'soc': soc_vals,
+            'nom_afn': nom_afn_vals, 'nom_inj': nom_inj_vals,
+            'pv_curt': pv_curt_vals,
+            'oaz': oaz_vals, 'oiz': oiz_vals,
+            'monthly_peak': mp_val,
+        }
+
+    # ── Retry-ladder per maand ──
+    status_str, r = _build_and_solve_month(1.0, 'n0')
+    retry_level = 0
+
+    if status_str != 'Optimal':
+        log.warning(f"Maand-BSP-LP niveau 0 non-optimal ({status_str}) — retry niveau 1 (spec_budget × 10)")
+        status_str, r = _build_and_solve_month(10.0, 'n1')
+        retry_level = 1
+        if status_str != 'Optimal':
+            log.warning(f"Maand-BSP-LP niveau 1 non-optimal ({status_str}) — retry niveau 2 (spec_budget verwijderd)")
+            status_str, r = _build_and_solve_month(-1.0, 'n2')
+            retry_level = 2
+            if status_str != 'Optimal':
+                log.warning(
+                    f"Maand-BSP-LP niveau 2 nog steeds non-optimal ({status_str}) — maand wordt overgeslagen "
+                    f"(grid_in/out/p_ch/p_dis = 0 voor {H} kwartieren, SoC constant)"
+                )
+                retry_level = 3
+                _zeros = [0.0] * H
+                r = {
+                    'p_ch': list(_zeros), 'p_dis': list(_zeros),
+                    'grid_in': list(_zeros), 'grid_out': list(_zeros),
+                    'soc': [soc_start_kwh] * (H + 1),  # SoC blijft constant op startwaarde
+                    'nom_afn': list(_zeros), 'nom_inj': list(_zeros),
+                    'pv_curt': list(_zeros),
+                    'oaz': list(_zeros), 'oiz': list(_zeros),
+                    'monthly_peak': 0.0,
+                }
+
+    # Extract uit dict
+    p_ch_vals = r['p_ch']
+    p_dis_vals = r['p_dis']
+    grid_in_vals = r['grid_in']
+    grid_out_vals = r['grid_out']
+    soc_vals = r['soc']
+    nom_afn_vals = r['nom_afn']
+    nom_inj_vals = r['nom_inj']
+    pv_curt_vals = r['pv_curt']
+    oaz_vals = r['oaz']
+    oiz_vals = r['oiz']
+    monthly_peak_kw = r['monthly_peak']
+
+    # v1.6 post-solve clip (defensieve clip, identiek aan dag-versie)
+    _tol = 0.01
+    if grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
+        log.warning(
+            f"Maand-BSP grid_in bound-violation: max={max(grid_in_vals):.2f} > cap={max_afname_hard:.2f} — clip toegepast"
+        )
+        grid_in_vals = [min(v, max_afname_hard) for v in grid_in_vals]
+    if grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
+        log.warning(
+            f"Maand-BSP grid_out bound-violation: max={max(grid_out_vals):.2f} > cap={max_injectie_hard:.2f} — clip toegepast"
+        )
+        grid_out_vals = [min(v, max_injectie_hard) for v in grid_out_vals]
+    if p_ch_vals and max(p_ch_vals) > kw_batt + _tol:
+        log.warning(f"Maand-BSP p_ch bound-violation: max={max(p_ch_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_ch_vals = [min(v, kw_batt) for v in p_ch_vals]
+    if p_dis_vals and max(p_dis_vals) > kw_batt + _tol:
+        log.warning(f"Maand-BSP p_dis bound-violation: max={max(p_dis_vals):.2f} > cap={kw_batt:.2f} — clip toegepast")
+        p_dis_vals = [min(v, kw_batt) for v in p_dis_vals]
+
+    dev_net_vals = [(grid_in_vals[t] - nom_afn_vals[t]) - (grid_out_vals[t] - nom_inj_vals[t]) for t in range(H)]
+
+    nom_revenue = sum(
+        (spot_eur_mwh[t] + markup_per_mwh) / 1000.0 * nom_afn_vals[t] * dt_h -
+        (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0 * nom_inj_vals[t] * dt_h
+        for t in range(H)
+    )
+
+    lp_status_label = (
+        'Optimal' if retry_level == 0 else
+        'retry1_optimal' if retry_level == 1 else
+        'retry2_optimal' if retry_level == 2 else
+        'verloren'
+    )
+
+    return {
+        'p_charge': p_ch_vals,
+        'p_discharge': p_dis_vals,
+        'grid_in': grid_in_vals,
+        'grid_out': grid_out_vals,
+        'soc': soc_vals,
+        'over_afn_zacht': oaz_vals,
+        'over_inj_zacht': oiz_vals,
+        # over_*_hard zijn vervallen in v1.6, leveren 0-arrays voor backwards-compat
+        'over_afn_hard': [0.0] * H,
+        'over_inj_hard': [0.0] * H,
+        # BSP-specifiek
+        'nom_dam_kw': list(nom_net),
+        'nom_eff_afn_kw': nom_afn_vals,
+        'nom_eff_inj_kw': nom_inj_vals,
+        'dev_kw': dev_net_vals,
+        'pv_curtailed_kw': pv_curt_vals,
+        'nom_revenue_eur': nom_revenue,
+        # Diagnostics
+        'lp_status': lp_status_label,
+        'retry_level': retry_level,
+        # v1.7 NIEUW
+        'monthly_peak_kw': monthly_peak_kw,
+        'n_dagen': n_dagen,
+    }
+
+
+# =============================================================================
 # JAARFACTUUR (volgens Facturatielogica.xlsx)
 # =============================================================================
 
@@ -1465,7 +1876,7 @@ def lp_dispatch_day_stacked(
 
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.6 — start ===")
+    log.info("=== Fluctus Simulator v1.7 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -1701,6 +2112,11 @@ def run_simulation(inp: dict) -> dict:
     lp_retry1_count = 0
     lp_retry2_count = 0
     lp_verloren_dagen = []  # lijst van ISO-datums waar dag overgeslagen werd
+    # v1.7 lp_diagnostics tellers maand-niveau (BSP-modus draait nu per maand)
+    lp_optimal_maanden = 0
+    lp_retry1_maanden = 0
+    lp_retry2_maanden = 0
+    lp_verloren_maanden = []  # lijst van YYYY-MM strings waar maand overgeslagen werd
     
     if skip_lp:
         log.info("Geen batterij/PV — LP wordt overgeslagen (snelle pad)")
@@ -1749,10 +2165,11 @@ def run_simulation(inp: dict) -> dict:
     else:
         # === STANDAARD LP-PAD (batterij of BSP-modus) ===
         if bsp_actief:
-            # BSP-modus: gebruik lp_dispatch_day_bsp met perfect IMB-foresight.
-            # Nominatie wordt gebaseerd op consumption_forecast/pv_forecast (= forecast-met-ruis).
-            # Vermenigvuldigers van ruis komen uit profielconfig + globale modus.
-            log.info("BSP-modus actief — gebruik lp_dispatch_day_bsp met IMB-foresight")
+            # BSP-modus v1.7: gebruik lp_dispatch_month_bsp (één LP per kalendermaand).
+            # Voegt Groep B/D capaciteit-kost toe aan objective via monthly_peak-variabele,
+            # zodat LP economisch optimale balans kiest tussen BSP-arbitrage-winst en
+            # maandpiek-kost. SoC casadeert nu per kalendermaand (was: per dag).
+            log.info("BSP-modus actief (v1.7 maand-LP) — Groep B-kost in objective via monthly_peak")
             pv_curt_allowed = bsp_cfg.get('pv_curtailment_allowed', True)
             # Capture rate: hoeveel paper-deviation toelaten per dag als % van werkelijk dagvolume.
             # Default 1.8% = gekalibreerd tegen externe simulator op rolling 12m slager 200MWh + 125 kWp.
@@ -1765,14 +2182,35 @@ def run_simulation(inp: dict) -> dict:
             }.get(forecast_modus, 1.0)
             paper_capture_rate = bsp_cfg.get('paper_capture_rate', 0.018) * modus_multiplier
             log.info(f"BSP capture rate: {paper_capture_rate*100:.1f}% ({forecast_modus} × {modus_multiplier})")
-            for d in range(n_dagen):
-                i0 = d * 96
-                i1 = i0 + 96
-                # Per-dag papier-budget: cap_rate × (werkelijk dagvolume in MWh)
-                daily_volume_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
-                daily_paper_budget_mwh = paper_capture_rate * daily_volume_mwh
-                
-                result = lp_dispatch_day_bsp(
+
+            # v1.7: bepaal kalendermaand-grenzen op basis van sim_timestamps.
+            # Een "maand-blok" is een aaneengesloten reeks kwartieren waarvan
+            # alle ts.month gelijk zijn (zodat een maand-grens overgang in januari
+            # van het volgende jaar ook correct wordt herkend).
+            maand_grenzen = []  # lijst van (i0, i1, year, month)
+            if sim_timestamps:
+                _start = 0
+                _cur_year = sim_timestamps[0].year
+                _cur_month = sim_timestamps[0].month
+                for _i, _ts in enumerate(sim_timestamps):
+                    if _ts.year != _cur_year or _ts.month != _cur_month:
+                        maand_grenzen.append((_start, _i, _cur_year, _cur_month))
+                        _start = _i
+                        _cur_year = _ts.year
+                        _cur_month = _ts.month
+                maand_grenzen.append((_start, N, _cur_year, _cur_month))
+            n_maanden_bsp = len(maand_grenzen)
+            log.info(f"BSP: {n_maanden_bsp} kalendermaand-blokken te verwerken")
+
+            _netbeheer_tarieven = inp.get('netbeheer', {}).get('tarieven', {})
+
+            for _midx, (i0, i1, _yr, _mo) in enumerate(maand_grenzen):
+                _H_maand = i1 - i0
+                if _H_maand <= 0:
+                    continue
+                _n_dagen_maand = max(1, _H_maand // 96)
+
+                result = lp_dispatch_month_bsp(
                     consumption_kw=consumption_kw[i0:i1],
                     pv_kw=pv_kw[i0:i1],
                     spot_eur_mwh=spot_actual[i0:i1],   # DAM perfect (D-1 bekend)
@@ -1782,33 +2220,44 @@ def run_simulation(inp: dict) -> dict:
                     aansluiting=inp['aansluiting'],
                     contract=inp['contract'],
                     cyclus_kost_eur_per_kwh=cyclus_kost,
-                    daily_paper_risk_mwh=daily_paper_budget_mwh,  # capture-rate budget
+                    paper_capture_rate=paper_capture_rate,
                     pv_curtailment_allowed=pv_curt_allowed,
+                    netbeheer_tarieven=_netbeheer_tarieven,
                     consumption_forecast_kw=consumption_forecast[i0:i1],
                     pv_forecast_kw=pv_forecast[i0:i1],
                 )
-                # v1.6 wijziging G: lp_diagnostics tellers + verloren_dagen lijst
+
+                # v1.7 lp_diagnostics: maand-niveau tellers + dagen-aggregaat
                 _retry = result.get('retry_level', 0)
+                _maand_label = f"{_yr:04d}-{_mo:02d}"
                 if _retry == 0:
-                    lp_optimal_count += 1
+                    lp_optimal_maanden += 1
+                    lp_optimal_count += _n_dagen_maand
                 elif _retry == 1:
-                    lp_retry1_count += 1
+                    lp_retry1_maanden += 1
+                    lp_retry1_count += _n_dagen_maand
                 elif _retry == 2:
-                    lp_retry2_count += 1
+                    lp_retry2_maanden += 1
+                    lp_retry2_count += _n_dagen_maand
                 else:
-                    # Niveau 3: dag overgeslagen
-                    lp_verloren_dagen.append(sim_timestamps[i0].date().isoformat())
+                    # Niveau 3: maand overgeslagen — alle dagen in die maand zijn verloren
+                    lp_verloren_maanden.append(_maand_label)
+                    for _d in range(_n_dagen_maand):
+                        _idx = i0 + _d * 96
+                        if _idx < N:
+                            lp_verloren_dagen.append(sim_timestamps[_idx].date().isoformat())
+
                 grid_in_all.extend(result['grid_in'])
                 grid_out_all.extend(result['grid_out'])
                 p_dis_all.extend(result['p_discharge'])
                 p_ch_all.extend(result['p_charge'])
                 soc_all.extend(result['soc'][1:])
-                # v1.6 wijziging F: SoC-cascade sanity check
+                # SoC-cascade sanity check (v1.6 wijziging F, behouden in v1.7)
                 _new_soc = result['soc'][-1] if result['soc'] else None
                 _soc_max = batt['kwh'] * dod
                 if _new_soc is None or _new_soc < -0.01 or _new_soc > _soc_max + 0.01:
                     log.warning(
-                        f"SoC cascade-defect dag {d}: soc[-1]={_new_soc}, reset naar 0.5 × soc_max"
+                        f"SoC cascade-defect maand {_maand_label}: soc[-1]={_new_soc}, reset naar 0.5 × soc_max"
                     )
                     _new_soc = _soc_max * 0.5
                 soc_kwh = max(0.0, min(_soc_max, _new_soc))
@@ -1822,8 +2271,12 @@ def run_simulation(inp: dict) -> dict:
                 nom_eff_afn_kw_all.extend(result['nom_eff_afn_kw'])
                 nom_eff_inj_kw_all.extend(result['nom_eff_inj_kw'])
                 pv_curtailed_kw_bsp_all.extend(result['pv_curtailed_kw'])
-                if (d + 1) % 30 == 0:
-                    log.info(f"  BSP-dispatch dag {d+1}/{n_dagen}…")
+
+                _mp = result.get('monthly_peak_kw', 0.0)
+                log.info(
+                    f"  BSP-maand {_maand_label} ({_n_dagen_maand} dagen) klaar: "
+                    f"monthly_peak={_mp:.1f} kW, status={result.get('lp_status', '?')}"
+                )
         else:
             for d in range(n_dagen):
                 i0 = d * 96
@@ -1886,7 +2339,9 @@ def run_simulation(inp: dict) -> dict:
     log.info(
         f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh "
         f"(optimal={lp_optimal_count}, retry1={lp_retry1_count}, "
-        f"retry2={lp_retry2_count}, verloren={len(lp_verloren_dagen)})"
+        f"retry2={lp_retry2_count}, verloren={len(lp_verloren_dagen)}) "
+        f"| maand-niveau (BSP): optimal_m={lp_optimal_maanden}, retry1_m={lp_retry1_maanden}, "
+        f"retry2_m={lp_retry2_maanden}, verloren_m={len(lp_verloren_maanden)}"
     )
 
     # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
@@ -2072,12 +2527,23 @@ def run_simulation(inp: dict) -> dict:
         },
         # v1.6 wijziging G+L: LP-diagnostics top-level. Geeft UI een groen/geel/rood
         # badge zodat advisors weten of LP-oplos-rate gezond is voor deze scenario.
+        # v1.7: maand-niveau velden toegevoegd (BSP-modus draait nu per maand);
+        # bestaande dag-niveau velden blijven gevuld als aggregaat (dagen in maanden)
+        # voor backwards-compat met Simulator.txt v1.18 badge-logica.
         'lp_diagnostics': {
             'totaal_dagen': n_dagen,
             'optimal_dagen': lp_optimal_count,
             'retry1_dagen': lp_retry1_count,
             'retry2_dagen': lp_retry2_count,
             'verloren_dagen': lp_verloren_dagen,
+            # v1.7 maand-niveau (alleen gevuld in BSP-modus; anders 0/[])
+            'totaal_maanden': (
+                lp_optimal_maanden + lp_retry1_maanden + lp_retry2_maanden + len(lp_verloren_maanden)
+            ),
+            'optimal_maanden': lp_optimal_maanden,
+            'retry1_maanden': lp_retry1_maanden,
+            'retry2_maanden': lp_retry2_maanden,
+            'verloren_maanden': lp_verloren_maanden,
         },
         'data_periode': {
             'van': sim_timestamps[0].isoformat(),
