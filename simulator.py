@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.5.1-diag (sessie 6 diagnose — toegangsvermogen-bug)
-# Geproduceerd:  2026-05-14 06:00 UTC
+# Versie:        v1.5.2-diag (sessie 6 diepere diagnose — LP-bound-violation RCA)
+# Geproduceerd:  2026-05-14 06:40 UTC
 # Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 # Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-# Vereist:       server.js v15.12.1-diag (paired log-only release)
+# Vereist:       server.js v15.12.1-diag (compatible, geen wijziging vereist)
 # ============================================================================
 """
-Fluctus Battery Dispatch Simulator v1.5.1-diag
+Fluctus Battery Dispatch Simulator v1.5.2-diag
 ================================================
-TIJDELIJKE diagnose-release voor sessie 6. GEEN LOGICA-WIJZIGING.
+TIJDELIJKE root-cause diagnose. GEEN LOGICA-WIJZIGING.
+
+Wijzigingen v1.5.2-diag vs v1.5.1-diag:
+  - DIAG-6: in lp_dispatch_day_bsp wordt per dag de LpStatus geverifieerd EN
+    de output gecheckt op bound-violation (grid_in > max_afname_hard of
+    grid_out > max_injectie_hard). Alleen problematische dagen worden gelogd
+    om logspam te beperken.
+  - DIAG-7: bij een bound-violation wordt de complete kwartier-context gedumpt
+    (consumption, pv, spot, imb, soc, p_ch, p_dis, grid_in, grid_out,
+    over_afn_hard, nom_afn, nom_inj, forecast_afn, forecast_inj) zodat de
+    LP-input EN de LP-output van het foute kwartier zichtbaar zijn.
+  - DIAG-8: aan einde van run wordt totaal aantal bound-violations samengevat.
+  - Doel: bewijzen of (a) status != Optimal de oorzaak is, of (b) een PuLP/CBC
+    bound-violation onder Optimal-status, of (c) iets anders.
+  - Resultaat wordt gedocumenteerd in fluctus-kennisbank voor toekomstige
+    LP-implementaties.
 
 Wijzigingen v1.5.1-diag vs v1.5:
   - Vijf extra log.info regels met [DIAG]-prefix:
@@ -761,7 +776,60 @@ def lp_dispatch_day_bsp(
     p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
     grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
     grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
-    
+
+    # ─── DIAG sessie 6 (v1.5.2-diag) — RCA LP-bound-violation ─────────────────
+    # Check 1: was de LP-status problematisch?
+    # Check 2: is er een bound-violation in de output (grid_in > max_afname_hard
+    #          of grid_out > max_injectie_hard, met tolerance 0.01)?
+    # Bij een van beide → dump volledige context van het eerste foute kwartier.
+    _status_str = pulp.LpStatus[status]
+    _bound_tol = 0.01
+    _afn_viols = [t for t in range(H) if grid_in_vals[t] > max_afname_hard + _bound_tol]
+    _inj_viols = [t for t in range(H) if grid_out_vals[t] > max_injectie_hard + _bound_tol]
+    _has_viol = bool(_afn_viols or _inj_viols)
+    _bad_status = _status_str not in ('Optimal',)
+
+    if _has_viol or _bad_status:
+        log.info(
+            f"[DIAG-6] LP-day issue: status={_status_str}, "
+            f"afn_viols={len(_afn_viols)}, inj_viols={len(_inj_viols)}, "
+            f"max_grid_in={max(grid_in_vals):.2f} (cap={max_afname_hard}), "
+            f"max_grid_out={max(grid_out_vals):.2f} (cap={max_injectie_hard}), "
+            f"obj_value={pulp.value(prob.objective):.2f}"
+        )
+        # Dump het ergste afname-kwartier (of injectie als geen afname-viols)
+        _bad_t = None
+        if _afn_viols:
+            _bad_t = max(_afn_viols, key=lambda t: grid_in_vals[t])
+        elif _inj_viols:
+            _bad_t = max(_inj_viols, key=lambda t: grid_out_vals[t])
+        if _bad_t is not None:
+            t = _bad_t
+            _oah = pulp.value(over_afn_hard[t]) or 0.0
+            _oih = pulp.value(over_inj_hard[t]) or 0.0
+            _soc_t = pulp.value(soc[t]) or 0.0
+            _soc_tp1 = pulp.value(soc[t + 1]) or 0.0
+            log.info(
+                f"[DIAG-7] worst quarter t={t}: "
+                f"cons={consumption_kw[t]:.2f}, pv={pv_kw[t]:.2f}, "
+                f"spot={spot_eur_mwh[t]:.2f}, imb={imb_eur_mwh[t]:.2f}, "
+                f"soc[t]={_soc_t:.2f} soc[t+1]={_soc_tp1:.2f}, "
+                f"p_ch={p_ch_vals[t]:.2f}, p_dis={p_dis_vals[t]:.2f}"
+            )
+            log.info(
+                f"[DIAG-7b] worst quarter t={t}: "
+                f"grid_in={grid_in_vals[t]:.2f}, grid_out={grid_out_vals[t]:.2f}, "
+                f"over_afn_hard={_oah:.2f}, over_inj_hard={_oih:.2f}, "
+                f"nom_afn={nom_afn_vals[t]:.2f}, nom_inj={nom_inj_vals[t]:.2f}, "
+                f"fcst_afn={forecast_afn[t]:.2f}, fcst_inj={forecast_inj[t]:.2f}, "
+                f"pv_curt={pv_curt_vals[t]:.2f}"
+            )
+            # Energy-balance verificatie: grid_in - grid_out + p_dis - p_ch + (pv - pv_curt) == cons
+            _balance = (grid_in_vals[t] - grid_out_vals[t] + p_dis_vals[t] - p_ch_vals[t]
+                        + (pv_kw[t] - pv_curt_vals[t]) - consumption_kw[t])
+            log.info(f"[DIAG-7c] energy balance residual (zou 0 moeten zijn): {_balance:.4f}")
+    # ─── EINDE DIAG ────────────────────────────────────────────────────────────
+
     dev_net_vals = [(grid_in_vals[t] - nom_afn_vals[t]) - (grid_out_vals[t] - nom_inj_vals[t]) for t in range(H)]
 
     nom_revenue = sum(
@@ -1262,7 +1330,7 @@ def lp_dispatch_day_stacked(
 
 
 def run_simulation(inp: dict) -> dict:
-    log.info("=== Fluctus Simulator v1.5.1-diag — start ===")
+    log.info("=== Fluctus Simulator v1.5.2-diag — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
 
@@ -1683,6 +1751,32 @@ def run_simulation(inp: dict) -> dict:
         log.info(
             f"[DIAG-3c] top-5 grid_out pieken: "
             f"{[f'{grid_out_all[i]:.1f}@{sim_timestamps[i].isoformat()}' for i in _gout_top]}"
+        )
+        # DIAG-8: tally hoeveel kwartieren de aansluiting overschrijden
+        _aansl_afn = _aansl.get('max_afname_kw_hard', 1e9)
+        _aansl_inj = _aansl.get('max_injectie_kw_hard', 1e9)
+        _tol = 0.01
+        _afn_over_count = sum(1 for v in grid_in_all if v > _aansl_afn + _tol)
+        _inj_over_count = sum(1 for v in grid_out_all if v > _aansl_inj + _tol)
+        # Distributie van violations per maand (welke maand heeft de violations?)
+        _afn_per_maand = [0] * 12
+        _inj_per_maand = [0] * 12
+        for i in range(len(grid_in_all)):
+            m = sim_timestamps[i].month - 1
+            if grid_in_all[i] > _aansl_afn + _tol:
+                _afn_per_maand[m] += 1
+            if grid_out_all[i] > _aansl_inj + _tol:
+                _inj_per_maand[m] += 1
+        log.info(
+            f"[DIAG-8] bound-violations: "
+            f"afname={_afn_over_count}/{len(grid_in_all)} kwartieren > {_aansl_afn} kW, "
+            f"injectie={_inj_over_count}/{len(grid_out_all)} kwartieren > {_aansl_inj} kW"
+        )
+        log.info(
+            f"[DIAG-8b] afname-overtredingen per maand (jan→dec): {_afn_per_maand}"
+        )
+        log.info(
+            f"[DIAG-8c] injectie-overtredingen per maand (jan→dec): {_inj_per_maand}"
         )
     # ─── EINDE DIAG ────────────────────────────────────────────────────────────
 
