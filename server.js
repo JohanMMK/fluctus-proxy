@@ -1,23 +1,33 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.12.1-diag (sessie 6 diagnose — toegangsvermogen-bug)
-// Geproduceerd:  2026-05-14 06:00 UTC
+// Versie:        v15.13 (sessie 6 fix — asymmetrie afname/injectie + DIAG weg)
+// Geproduceerd:  2026-05-14
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-// Vereist:       Simulator.txt v1.17.0+ (UI verwacht /api/scenarios-batch-bewaren)
-//                simulator.py v1.5.1-diag (paired log-only release)
-//                apply_base_case.js v1.16+ (top-level klantBtw/leveringsadres velden)
-// Wijzigingen v15.12.1-diag vs v15.12.0:
-//   - TIJDELIJK voor sessie 6 diagnose. GEEN logica-wijziging.
-//   - Eén extra console.log in /api/nominatie-sim direct na buildSimInput():
-//     print [DIAG] de cruciale velden die simulator.py ontvangt
-//     (aansluiting, batterij.kw/kwh, pv.kwp, bsp.actief, contract.modus).
-//     Doel: hypothese A (server stuurt verkeerde max_*_kw_hard naar Sc4)
-//     definitief uitsluiten of bevestigen op SMARTUNIT_v7 Sc4-run.
-//   - Anti-regressie: pure additieve console.log. Geen route-MODIFY, geen
-//     STATE-velden, geen response-shape wijziging. Alle bestaande tests
-//     produceren identieke output. Wordt verwijderd in v15.13 na fix.
+// Vereist:       Simulator.txt v1.18+ (UI verwacht lp_diagnostics badge +
+//                                       sectie B injectie in stap 7)
+//                simulator.py v1.6+ (LP-bound-violation fix + asymmetrie)
+//                apply_base_case.js v1.16+ (ongewijzigd t.o.v. v15.12)
+// Wijzigingen v15.13 vs v15.12.1-diag:
+//   - DIAG-blok in /api/nominatie-sim verwijderd (was tijdelijk voor RCA
+//     sessie 6 toegangsvermogen-bug; root-cause nu opgelost in simulator.py v1.6).
+//   - ASYMMETRIE afname ≠ injectie in buildSimInput aansluiting-blok:
+//       max_afname_kw_*  = aanslKw (contractueel toegangsvermogen)
+//       max_injectie_kw_* = maxInjectieKw (default = pvInverterKw + batt.kw,
+//                          override via ui.max_injectie_kw)
+//     Reden: Belgisch tarief weegt afname-piek (Groep B/D) zwaar, injectie-cap
+//     is fysiek bepaald door inverter-vermogen. v1.5 stuurde beide identiek,
+//     wat scenario's met PV+BESS achter een kleine aansluiting onnodig duur
+//     deed lijken (LP injectie-cap = afname-cap maakt curtailment kunstmatig).
+//   - NIEUW veld pv.inverter_kw doorgegeven aan simulator.py (default via
+//     _invTabel: 125→96, 150→115, 200→153, anders 0.77 × kWp).
+//   - Anti-regressie: bij payloads zonder ui.pv_inverter_kw / ui.max_injectie_kw
+//     worden defaults berekend op basis van pvKwp en batt.kw — identieke
+//     scenario's met catalogus-batterijen krijgen consistent grotere
+//     max_injectie_kw_hard dan v15.12 (= zelfde aanslKw). Voor Sc1-3 zonder
+//     PV/BESS: maxInjectieKw = max(1, 0+0) = 1, wat injectie effectief blokkeert.
+//     Voor afname-only scenarios geen verschil op factuur.
 // Wijzigingen v15.12.0 vs v15.11.1:
 //   - BESS-CUSTOM detectie in buildSimInput: wanneer ui.batterijId === 'CUSTOM'
 //     en ui.batterijCustom aanwezig is, gebruik die dict in plaats van de
@@ -916,24 +926,6 @@ app.post('/api/nominatie-sim', (req, res) => {
   console.log('[sim] pvVorm length:', simInput.pv ? simInput.pv.vorm_kwartier.length : 0,
     'nonzero:', simInput.pv ? simInput.pv.vorm_kwartier.filter(v=>v>0).length : 0);
 
-  // ─── DIAG sessie 6 (v15.12.1-diag) — toegangsvermogen-bug diagnose ─────────
-  // Print de cruciale velden die simulator.py ontvangt VOOR de child-spawn.
-  // Doel: hypothese A (server stuurt verkeerde max_*_kw_hard voor Sc4) testen
-  // op SMARTUNIT_v7 Sc4 vs Sc5 vergelijking. Te verwijderen in v15.13.
-  console.log('[DIAG] scenario:', input.scenario || '(geen)', '| project:', input.project || '(geen)');
-  console.log('[DIAG] aansluiting:', JSON.stringify(simInput.aansluiting));
-  console.log('[DIAG] batterij: kw=' + simInput.batterij.kw +
-              ' kwh=' + simInput.batterij.kwh +
-              ' rte=' + simInput.batterij.rte_pct +
-              ' dod=' + simInput.batterij.dod_pct);
-  console.log('[DIAG] pv.kwp=' + simInput.pv.kwp +
-              ' bsp.actief=' + (simInput.bsp && simInput.bsp.actief) +
-              ' curtail.actief=' + (simInput.pv_curtailment && simInput.pv_curtailment.actief));
-  console.log('[DIAG] contract.modus=' + (simInput.contract && simInput.contract.modus) +
-              ' simperiode=' + JSON.stringify(simInput.simulatieperiode));
-  console.log('[DIAG] jaarverbruik_mwh=' + simInput.jaarverbruik_mwh);
-  // ─── EINDE DIAG ────────────────────────────────────────────────────────────
-
   const proc = spawn('python3', [simulatorPath], { env:{...process.env, PYTHONUNBUFFERED:'1'} });
 
   let stdout = '', stderr = '';
@@ -1004,6 +996,20 @@ function buildSimInput(ui) {
   const stacked  = batt.kwh > 0;
   const bspActief    = !!(ui.bsp && ui.bsp.actief);
   const curtailActief = !!(ui.pv_curtailment && ui.pv_curtailment.actief);
+
+  // v1.6 / v15.13: asymmetrie injectie ≠ afname.
+  // PV-omvormer is meestal kleiner dan piek-kWp (clipping). De _invTabel encodeert
+  // de meest voorkomende defaults uit de Fluctus-catalogus voor populaire kWp's.
+  // Bij geen match: 0.77 × kWp (fabriekstypisch).
+  const _invTabel = { 125: 96, 150: 115, 200: 153 };
+  const pvInverterKw = Number(ui.pv_inverter_kw || ui.pvInverterKw || 0) ||
+                       (pvKwp > 0 ? (_invTabel[pvKwp] || Math.round(pvKwp * 0.77)) : 0);
+  // Injectie-cap = som van fysieke injectie-vermogens (PV-omvormer + BESS-omvormer).
+  // UI kan dit overschrijven via ui.max_injectie_kw. Default = pvInverterKw + batt.kw.
+  // De afname-cap (aanslKw) blijft het contractueel toegangsvermogen — onafhankelijk
+  // van fysieke injectie-capaciteit (Belgisch tarief: Groep B/D wegen op afname-piek).
+  const maxInjectieKw = Number(ui.max_injectie_kw || ui.maxInjectieKw || 0) ||
+                        Math.max(1, pvInverterKw + (batt.kw || 0));
 
   // Gebruik de dynamisch bepaalde marktperiode als rolling12 gevraagd wordt
   // v15.11 sessie 4: nieuwe modus 'specifiek' — STATE.jaar='specifiek' met
@@ -1100,6 +1106,9 @@ function buildSimInput(ui) {
       specifiek_rendement_kwh_per_kwp: 900,
       vorm_kwartier: pvVorm,
       capex_eur: pvKwp > 0 ? (pvKwp <= 125 ? 71875 : pvKwp <= 150 ? 86250 : 115000) : 0,
+      // v15.13: expliciete inverter_kw doorgeven (simulator gebruikt dit voor
+      // PV-clipping; default fallback in simulator.py is 0.77 × kWp).
+      inverter_kw: pvInverterKw,
     },
     pv_curtailment: {
       actief: curtailActief,
@@ -1108,8 +1117,12 @@ function buildSimInput(ui) {
     },
     batterij: batt,
     aansluiting: {
-      max_afname_kw_zacht:  aanslKw, max_afname_kw_hard:  aanslKw,
-      max_injectie_kw_zacht: aanslKw, max_injectie_kw_hard: aanslKw,
+      // v15.13: asymmetrie afname ≠ injectie.
+      // afname-cap = contractueel toegangsvermogen (aanslKw).
+      // injectie-cap = som fysieke inverter-vermogens (PV-omvormer + BESS-omvormer),
+      // tenzij UI expliciet maxInjectieKw zet.
+      max_afname_kw_zacht:  aanslKw,        max_afname_kw_hard:  aanslKw,
+      max_injectie_kw_zacht: maxInjectieKw, max_injectie_kw_hard: maxInjectieKw,
       tarief_overschrijding_afname_eur_per_kw_jaar: TARIEVEN_LS.overschrijding_toegangsvermogen_eur_kw_jaar,
       tarief_overschrijding_injectie_eur_per_kw_jaar: 1.0,
     },
