@@ -1,14 +1,24 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.14 (sessie 7 — gepaird met simulator.py v1.7 maand-LP)
+// Versie:        v15.14.1 (hotfix — robuuste marktdata-loading + retry-ladder)
 // Geproduceerd:  2026-05-14
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-// Vereist:       Simulator.txt v1.19+ (UI projecten-loading fix +
-//                                       lp_diagnostics maand-niveau badge)
-//                simulator.py v1.7+ (maand-LP met Groep B-kost in objective)
-//                apply_base_case.js v1.16+ (ongewijzigd t.o.v. v15.12)
+// Vereist:       Simulator.txt v1.19+ / simulator.py v1.7+
+// Wijzigingen v15.14.1 vs v15.14 (HOTFIX productie-bug 503 Marktdata):
+//   Symptoom: HTTP 503 "Marktdata nog niet geladen" bleef permanent hangen.
+//   Oorzaak: laadMarktdata() faalde stil bij koude Railway-start (prebuild >60s
+//     of cache-fetch fout) → MARKT bleef null → elke /api/nominatie-sim gaf 503.
+//     De melding beloofde "probeer over 30s opnieuw" maar niets laadde ooit
+//     opnieuw (geen retry-mechanisme).
+//   FIX 1: status-tracking (MARKT_STATUS init/loading/ok/failed) + automatische
+//     retry-ladder. Bij falen retry na 30s, daarna elke 5 min tot geladen.
+//     Server herstelt zichzelf zonder redeploy.
+//   FIX 2: prebuild-timeout 60s → 120s (koude ENTSO-E/Elia fetch kan traag zijn).
+//   FIX 3: informatieve 503 reflecteert werkelijke status (loading vs failed
+//     + laatste_fout). Health + / tonen markt_status.
+//   FIX 4: nieuw POST /api/markt-reload voor handmatige reload zonder redeploy.
 // Wijzigingen v15.14 vs v15.13.1:
 //   - HEADER-BUMP voor sessie 7. Geen functionele wijziging in de
 //     buildSimInput payload-structuur: simulator.py v1.7 leest de tarieven
@@ -108,23 +118,63 @@ app.use((req, res, next) => {
 
 // ─── MARKTDATA: laad bij startup via Python prebuild script ──────────────────
 let MARKT = null;  // { spot_q, imb_q, solar_norm, profiel, van, tot }
+// v15.14.1 hotfix: status-tracking + retry-ladder voor robuuste markt-loading.
+// Symptoom (productie): HTTP 503 "Marktdata nog niet geladen" bleef hangen omdat
+// laadMarktdata() bij koude Railway-start stil faalde (prebuild >60s of cache-fetch
+// fout) en MARKT permanent null bleef zonder enige herpoging.
+let MARKT_STATUS = 'init';   // 'init' | 'loading' | 'ok' | 'failed'
+let MARKT_LAATSTE_FOUT = null;
+let MARKT_POGINGEN = 0;
+let _marktRetryTimer = null;
 
-function laadMarktdata() {
+function laadMarktdata(isRetry = false) {
   const prebuildScript = path.join(__dirname, 'prebuild_data.py');
   if (!fs.existsSync(prebuildScript)) {
     console.warn('[markt] prebuild_data.py niet gevonden — simulator zal lege marktdata gebruiken');
+    MARKT_STATUS = 'failed';
+    MARKT_LAATSTE_FOUT = 'prebuild_data.py ontbreekt';
     return;
   }
+  MARKT_STATUS = 'loading';
+  MARKT_POGINGEN += 1;
   try {
-    console.log('[markt] Marktdata pre-bouwen...');
-    execFileSync('python3', [prebuildScript], { timeout: 60000 });
+    console.log(`[markt] Marktdata pre-bouwen... (poging ${MARKT_POGINGEN}${isRetry ? ', retry' : ''})`);
+    // v15.14.1: timeout verhoogd van 60s naar 120s (koude ENTSO-E/Elia fetch kan
+    // bij eerste run van de dag traag zijn; cache-fetch daarna is snel).
+    execFileSync('python3', [prebuildScript], { timeout: 120000 });
     const marktPath = '/tmp/fluctus_markt.json';
     if (fs.existsSync(marktPath)) {
       MARKT = JSON.parse(fs.readFileSync(marktPath, 'utf8'));
+      MARKT_STATUS = 'ok';
+      MARKT_LAATSTE_FOUT = null;
+      if (_marktRetryTimer) { clearInterval(_marktRetryTimer); _marktRetryTimer = null; }
       console.log(`[markt] OK — ${MARKT.n_kwartieren} kwartieren, periode ${MARKT.van} → ${MARKT.tot}`);
+    } else {
+      throw new Error('prebuild voltooide maar /tmp/fluctus_markt.json ontbreekt');
     }
   } catch (e) {
-    console.error('[markt] Pre-build gefaald:', e.message);
+    MARKT_STATUS = 'failed';
+    MARKT_LAATSTE_FOUT = e.message;
+    console.error(`[markt] Pre-build gefaald (poging ${MARKT_POGINGEN}):`, e.message);
+    // v15.14.1: automatische retry-ladder. Bij falen, herprobeer met groeiende
+    // interval (30s, dan elke 5 min) zodat de server zichzelf herstelt zonder
+    // handmatige redeploy. Stopt zodra MARKT geladen is.
+    if (!_marktRetryTimer) {
+      const eersteRetryMs = 30000;  // 30s na eerste falen
+      console.log(`[markt] Automatische retry over ${eersteRetryMs/1000}s ingepland`);
+      setTimeout(() => {
+        laadMarktdata(true);
+        // Daarna elke 5 minuten blijven proberen tot het lukt
+        if (!_marktRetryTimer && MARKT_STATUS !== 'ok') {
+          _marktRetryTimer = setInterval(() => {
+            if (MARKT_STATUS === 'ok') {
+              clearInterval(_marktRetryTimer); _marktRetryTimer = null; return;
+            }
+            laadMarktdata(true);
+          }, 5 * 60 * 1000);
+        }
+      }, eersteRetryMs);
+    }
   }
 }
 
@@ -436,7 +486,10 @@ const PROJECTEN_DB = new Set();
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.12.0', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.14.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  markt_status: MARKT_STATUS, markt_pogingen: MARKT_POGINGEN,
+  markt_laatste_fout: MARKT_LAATSTE_FOUT,
+  markt_periode: MARKT ? { van: MARKT.van, tot: MARKT.tot, n_kwartieren: MARKT.n_kwartieren } : null,
   market_config: {
     owner: MARKET_DATA_OWNER,
     repo: MARKET_DATA_REPO,
@@ -444,7 +497,18 @@ app.get('/',       (req, res) => res.json({
     has_token: !!GITHUB_TOKEN
   }
 }));
-app.get('/health', (req, res) => res.json({ status:'ok' }));
+app.get('/health', (req, res) => res.json({ status:'ok', markt_status: MARKT_STATUS }));
+
+// v15.14.1: handmatige markt-reload endpoint. Forceert een nieuwe laadpoging
+// zonder Railway-redeploy. Idempotent: geen effect als al aan het laden.
+app.post('/api/markt-reload', (req, res) => {
+  if (MARKT_STATUS === 'loading') {
+    return res.status(409).json({ status: 'loading', error: 'Markt wordt al geladen' });
+  }
+  console.log('[markt] Handmatige reload aangevraagd via /api/markt-reload');
+  setImmediate(() => laadMarktdata(true));
+  res.json({ status: 'reload_gestart', vorige_status: MARKT_STATUS, pogingen: MARKT_POGINGEN });
+});
 
 app.get('/api/postcode-grd', (req, res) => {
   const pc = String(req.query.postcode||'').trim();
@@ -936,8 +1000,26 @@ app.post('/api/nominatie-sim', (req, res) => {
   const input = req.body;
   if (!input || typeof input !== 'object')
     return res.status(400).json({ error:'body is verplicht' });
-  if (!MARKT)
-    return res.status(503).json({ error:'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  if (!MARKT) {
+    // v15.14.1: informatieve 503 op basis van werkelijke status + actieve retry-ladder.
+    if (MARKT_STATUS === 'loading') {
+      return res.status(503).json({
+        error: 'Marktdata wordt geladen — probeer over 30 seconden opnieuw',
+        status: 'loading', pogingen: MARKT_POGINGEN,
+      });
+    }
+    if (MARKT_STATUS === 'failed') {
+      return res.status(503).json({
+        error: 'Marktdata kon niet geladen worden. De server probeert automatisch opnieuw (elke 5 min). ' +
+               'Indien dit blijft duren, contacteer beheer.',
+        status: 'failed', pogingen: MARKT_POGINGEN, laatste_fout: MARKT_LAATSTE_FOUT,
+      });
+    }
+    return res.status(503).json({
+      error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw',
+      status: MARKT_STATUS,
+    });
+  }
 
   const simulatorPath = path.join(__dirname, 'simulator.py');
   if (!fs.existsSync(simulatorPath))
@@ -1644,7 +1726,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.14 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.14.1 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
-  console.log(`Markt geladen: ${MARKT ? 'ja ('+MARKT.n_kwartieren+' kwartieren)' : 'nee'}`);
+  console.log(`Markt status: ${MARKT_STATUS}${MARKT ? ' ('+MARKT.n_kwartieren+' kwartieren)' : ''}`);
 });
