@@ -1,7 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.15.1 (hotfix sessie 9a — CORS Authorization-header)
+// Versie:        v15.15.2 (hotfix sessie 9a — projecten-lijst na restart)
+// Wijziging v15.15.2 vs v15.15.1: GET /api/projecten doet read-through naar
+//   de GitHub projecten/-directory wanneer de in-memory cache leeg is (na
+//   elke Railway-restart). Pre-existente bug, zichtbaar geworden door de
+//   9a-deploys. Gevonden bij deploy-stap A5 (07/07).
+// Basis:         v15.15.1 (hotfix sessie 9a — CORS Authorization-header)
 // Wijziging v15.15.1 vs v15.15: Access-Control-Allow-Headers uitgebreid met
 //   'Authorization'. Zonder die header blokkeerde de browser-preflight ALLE
 //   cross-origin calls met Bearer-token (fluctus.net -> railway.app):
@@ -824,7 +829,7 @@ function _magScenarioZien(u, data) {
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.15.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.15.2', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   markt_status: MARKT_STATUS, markt_pogingen: MARKT_POGINGEN,
   markt_laatste_fout: MARKT_LAATSTE_FOUT,
   markt_periode: MARKT ? { van: MARKT.van, tot: MARKT.tot, n_kwartieren: MARKT.n_kwartieren } : null,
@@ -989,7 +994,29 @@ app.post('/api/batterij-toevoegen', (req, res) => {
   res.json({ ok:true, id, totaal:BATTERIJEN.length });
 });
 
-app.get('/api/projecten', (req, res) => res.json({ projecten:[...PROJECTEN_DB] }));
+// v15.15.2 hotfix: PROJECTEN_DB is in-memory en start LEEG na elke
+// Railway-restart — dropdown bleef dan leeg tot een scenario-route het
+// project aanraakte (bestond al vóór 9a, werd gemaskeerd doordat de server
+// zelden herstartte; door de 9a-deploys zichtbaar geworden). Fix:
+// read-through naar de GitHub projecten/-directory bij lege cache.
+app.get('/api/projecten', async (req, res) => {
+  if (PROJECTEN_DB.size === 0) {
+    try {
+      const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${SCENARIOS_PATH_PREFIX}`;
+      const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+      if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+      const r = await fetch(apiUrl, { headers });
+      if (r.ok) {
+        const entries = await r.json();
+        entries.filter(e => e.type === 'dir').forEach(e => PROJECTEN_DB.add(e.name));
+        console.log(`[projecten] ${PROJECTEN_DB.size} projecten geladen uit GitHub (cache was leeg)`);
+      } else if (r.status !== 404) {
+        console.warn(`[projecten] GitHub-lijst faalde: HTTP ${r.status}`);
+      }
+    } catch (e) { console.warn(`[projecten] GitHub-lijst faalde: ${e.message}`); }
+  }
+  res.json({ projecten: [...PROJECTEN_DB] });
+});
 
 // v15.11 sessie 4 sub-track 4: GET /api/scenarios — read-through cache.
 // Bij cache-miss (eerste call voor project, of na Railway-restart):
@@ -2122,7 +2149,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.15.1 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.15.2 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt status: ${MARKT_STATUS}${MARKT ? ' ('+MARKT.n_kwartieren+' kwartieren)' : ''}`);
 });
