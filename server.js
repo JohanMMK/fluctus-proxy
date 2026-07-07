@@ -1,7 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.15 (sessie 9a — Fluctus App Access / Manager Control Plane)
+// Versie:        v15.15.1 (hotfix sessie 9a — CORS Authorization-header)
+// Wijziging v15.15.1 vs v15.15: Access-Control-Allow-Headers uitgebreid met
+//   'Authorization'. Zonder die header blokkeerde de browser-preflight ALLE
+//   cross-origin calls met Bearer-token (fluctus.net -> railway.app):
+//   migratie-endpoint, app-access/check, activity-log en scenario-routes.
+//   Gevonden bij deploy-stap A4 (07/07). Geen andere wijzigingen.
+// Basis:         v15.15 (sessie 9a — Fluctus App Access / Manager Control Plane)
 // Geproduceerd:  2026-07-06
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
@@ -142,7 +148,9 @@ app.use(express.json({ limit: '20mb' }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  // v15.15.1 hotfix: Authorization toegestaan voor FluctusAppAuth-calls
+  // (app-access/check, activity/log, scenario-routes met Bearer-token).
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
@@ -816,7 +824,7 @@ function _magScenarioZien(u, data) {
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.15', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.15.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   markt_status: MARKT_STATUS, markt_pogingen: MARKT_POGINGEN,
   markt_laatste_fout: MARKT_LAATSTE_FOUT,
   markt_periode: MARKT ? { van: MARKT.van, tot: MARKT.tot, n_kwartieren: MARKT.n_kwartieren } : null,
@@ -2114,7 +2122,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.15 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.15.1 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt status: ${MARKT_STATUS}${MARKT ? ' ('+MARKT.n_kwartieren+' kwartieren)' : ''}`);
 });
