@@ -1,11 +1,42 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.14.1 (hotfix — robuuste marktdata-loading + retry-ladder)
-// Geproduceerd:  2026-05-14
+// Versie:        v15.15 (sessie 9a — Fluctus App Access / Manager Control Plane)
+// Geproduceerd:  2026-07-06
 // Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 // Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
-// Vereist:       Simulator.txt v1.19+ / simulator.py v1.7+
+// Vereist:       Simulator.txt v1.20+ / simulator.py v1.7+ / Supabase-migratie
+//                supabase_migratie_9a.sql uitgevoerd (apps, user_app_access,
+//                app_activity_log).
+// Wijzigingen v15.15 vs v15.14.1 (SESSIE 9a):
+//   - NIEUWE ENV: SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (Railway env-vars).
+//     Optioneel FLUCTUS_AUTH_ENFORCE ('true'/'false', default 'true') als
+//     rollback-schakelaar. Zonder geldige Supabase-env valt enforcement
+//     automatisch UIT met een console-warn — server brickt nooit op auth.
+//   - POST /api/app-access/check — valideert Supabase-JWT, leest profiel,
+//     checkt user_app_access. Managers (role='manager', status='active')
+//     hebben impliciet toegang tot alle apps. Best-effort certificaten-lijst.
+//   - POST /api/app-activity/log — best-effort audit-insert in
+//     app_activity_log. Antwoordt ALTIJD 200 {ok}, ook bij Supabase-fout
+//     (non-blocking by design, zie roadmap 9a).
+//   - GET  /api/manager/activity — manager-only log-viewer met filters
+//     verkoper/app/klant_btw/van/tot/limit, namen verrijkt uit profielen.
+//   - SCENARIO-OWNERSHIP: /api/scenarios, /api/scenario, /api/scenario-bewaren
+//     en /api/scenarios-batch-bewaren vereisen nu een geldige Bearer-token
+//     (bij enforcement aan). Verkopers zien/schrijven enkel scenarios met
+//     eigen owner_uid; managers zien alles. Nieuwe saves worden automatisch
+//     gestempeld met data.owner_uid + data.owner_naam.
+//   - POST /api/admin/migrate-scenario-owners — eenmalige, manager-only
+//     migratie: alle scenario-JSONs in fluctus-scenarios zonder owner_uid
+//     krijgen owner_uid = Johan Konings (auth-uid 36802fa6-..., gecheckt in
+//     Supabase Auth 06/07 — roadmap-UUIDs waren geen auth-ids). Idempotent.
+//   - Token-validatie-cache 60s (in-memory) om Supabase-roundtrips per
+//     wizard-klik te vermijden.
+//   - FIX VÓÓR DEPLOY (naspeuring Academy-broncode): profiel-lookup gebruikt
+//     tabel 'profiles' + kolom auth_uid (Academy-realiteit), NIET 'profielen'
+//     + id (roadmap-naam). Role-waarden zijn 'manager'/'seller'; er is geen
+//     status-kolom (default 'active'). Fallback op 'profielen' blijft staan.
+//   - GEEN wijziging aan simulatie-, markt- of factuur-routes.
 // Wijzigingen v15.14.1 vs v15.14 (HOTFIX productie-bug 503 Marktdata):
 //   Symptoom: HTTP 503 "Marktdata nog niet geladen" bleef permanent hangen.
 //   Oorzaak: laadMarktdata() faalde stil bij koude Railway-start (prebuild >60s
@@ -484,9 +515,308 @@ async function _scenariosGithubListProject(project) {
 const SCENARIOS_DB = {};
 const PROJECTEN_DB = new Set();
 
+// ─── SESSIE 9a: FLUCTUS APP ACCESS (Supabase) ────────────────────────────────
+// Fundament voor alle apps in HTML-blocks. Server valideert Supabase-JWTs
+// van de Academy en beheert permissies + activity-log via de service-role
+// key (passeert RLS; client-RLS staat in supabase_migratie_9a.sql).
+const SUPABASE_URL         = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const SUPABASE_OK          = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+// Rollback-schakelaar: FLUCTUS_AUTH_ENFORCE=false schakelt scenario-gating
+// uit zonder redeploy van code. Zonder Supabase-env automatisch uit.
+const AUTH_ENFORCE = SUPABASE_OK && (process.env.FLUCTUS_AUTH_ENFORCE || 'true') === 'true';
+if (!SUPABASE_OK) {
+  console.warn('[auth] SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY ontbreken — ' +
+    'app-access-endpoints antwoorden 503, scenario-gating staat UIT.');
+} else if (!AUTH_ENFORCE) {
+  console.warn('[auth] FLUCTUS_AUTH_ENFORCE=false — scenario-gating staat UIT (rollback-modus).');
+}
+
+// Default-owner voor de eenmalige scenario-migratie.
+// FIX na Supabase Auth-screenshot (06/07): de roadmap-UUIDs (c54ca361-... /
+// 9cce5f61-...) bestaan NIET in auth.users — vermoedelijk profiles-PKs of
+// verouderd. Owner_uid = auth.users.id (komt uit de token), dus:
+//   johan@fluctus.net      = 36802fa6-c567-41cd-83e5-d4de4a3c73dd
+//   daviddecock@live.be    = 5cae0b46-b267-4cd4-b687-1346ee6d4222
+//   admin@fluctus.net      = 7d85b5eb-7a8a-4b0a-8219-3f0d17ce621f
+const MIGRATIE_DEFAULT_OWNER = '36802fa6-c567-41cd-83e5-d4de4a3c73dd';
+
+async function _sbRest(padEnQuery, opts) {
+  // Kleine wrapper rond de Supabase REST-API (PostgREST) met service-role key.
+  const o = opts || {};
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/${padEnQuery}`, {
+    method: o.method || 'GET',
+    headers: Object.assign({
+      'apikey': SUPABASE_SERVICE_KEY,
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': 'application/json',
+    }, o.headers || {}),
+    body: o.body ? JSON.stringify(o.body) : undefined,
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`supabase ${o.method || 'GET'} ${padEnQuery.split('?')[0]}: HTTP ${r.status} ${t.slice(0, 200)}`);
+  }
+  const txt = await r.text();
+  return txt ? JSON.parse(txt) : null;
+}
+
+// Token-validatie-cache: JWT → {val, exp}. 60s TTL; houdt Supabase-roundtrips
+// laag bij wizard-gebruik (elke apiGet/apiPost stuurt dezelfde token mee).
+const _AUTH_CACHE = new Map();
+const _AUTH_CACHE_TTL_MS = 60 * 1000;
+
+async function resolveUser(req) {
+  // Returnt {id, email, naam, role, status} of null. Gooit nooit.
+  try {
+    if (!SUPABASE_OK) return null;
+    const h = req.headers['authorization'] || '';
+    const m = h.match(/^Bearer\s+(.+)$/i);
+    if (!m) return null;
+    const jwt = m[1];
+    const hit = _AUTH_CACHE.get(jwt);
+    if (hit && hit.exp > Date.now()) return hit.val;
+    // 1) JWT valideren bij Supabase Auth
+    const uResp = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { 'apikey': SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${jwt}` },
+    });
+    if (!uResp.ok) return null;
+    const user = await uResp.json();
+    if (!user || !user.id) return null;
+    // 2) profiel ophalen. FIX na naspeuring Academy-broncode (vóór deploy):
+    //    de Academy gebruikt tabel 'profiles' met kolom auth_uid (→ auth.users.id),
+    //    naam-kolom 'name' en role 'manager'/'seller'. GEEN status-kolom.
+    //    Fallback op 'profielen'/id voor het geval de roadmap-naam ooit komt.
+    let profiel = null;
+    try {
+      const rows = await _sbRest(`profiles?auth_uid=eq.${encodeURIComponent(user.id)}&select=*`);
+      profiel = Array.isArray(rows) && rows.length ? rows[0] : null;
+    } catch (e) {
+      console.warn(`[auth] profiles-lookup faalde voor ${user.id}: ${e.message}`);
+    }
+    if (!profiel) {
+      try {
+        const rows = await _sbRest(`profielen?id=eq.${encodeURIComponent(user.id)}&select=*`);
+        profiel = Array.isArray(rows) && rows.length ? rows[0] : null;
+      } catch (_) { /* fallback-tabel bestaat niet — ok */ }
+    }
+    const val = {
+      id: user.id,
+      email: user.email || (profiel && profiel.email) || '',
+      naam: (profiel && (profiel.name || profiel.naam || profiel.full_name)) || user.email || user.id,
+      role: (profiel && profiel.role) || 'seller',
+      // profiles heeft geen status-kolom → default 'active'
+      status: (profiel && profiel.status) || 'active',
+    };
+    _AUTH_CACHE.set(jwt, { val, exp: Date.now() + _AUTH_CACHE_TTL_MS });
+    // Cache-grootte begrenzen (Railway long-running proces)
+    if (_AUTH_CACHE.size > 500) {
+      const oudste = _AUTH_CACHE.keys().next().value;
+      _AUTH_CACHE.delete(oudste);
+    }
+    return val;
+  } catch (e) {
+    console.warn(`[auth] resolveUser fout: ${e.message}`);
+    return null;
+  }
+}
+
+function _isManager(u) {
+  return !!(u && u.role === 'manager' && u.status === 'active');
+}
+
+async function _heeftAppToegang(u, appId) {
+  if (!u || u.status !== 'active') return false;
+  if (_isManager(u)) return true; // managers impliciet alle apps
+  try {
+    const rows = await _sbRest(
+      `user_app_access?user_id=eq.${encodeURIComponent(u.id)}&app_id=eq.${encodeURIComponent(appId)}&select=app_id`);
+    return Array.isArray(rows) && rows.length > 0;
+  } catch (e) {
+    console.warn(`[auth] toegangs-lookup faalde: ${e.message}`);
+    return false;
+  }
+}
+
+function _normBtw(btw) {
+  // 'BE 0757.494.180' → 'BE0757494180' zodat klant-attributie-groepering klopt.
+  if (!btw) return null;
+  const n = String(btw).toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return n || null;
+}
+
+// POST /api/app-access/check  { app_id }  + Authorization: Bearer <supabase-jwt>
+// → { toegang, user:{id,naam,email,role}, app_id, certificaten:[] }
+app.post('/api/app-access/check', async (req, res) => {
+  if (!SUPABASE_OK) {
+    return res.status(503).json({ toegang: false, reden: 'auth_niet_geconfigureerd' });
+  }
+  const appId = (req.body || {}).app_id;
+  if (!appId) return res.status(400).json({ toegang: false, reden: 'app_id verplicht' });
+  const u = await resolveUser(req);
+  if (!u) return res.status(401).json({ toegang: false, reden: 'niet_ingelogd' });
+  const toegang = await _heeftAppToegang(u, appId);
+  // Certificaten best-effort: tabel kan (nog) niet bestaan in de Academy —
+  // fout wordt stil genegeerd, lege lijst terug.
+  let certificaten = [];
+  try {
+    const rows = await _sbRest(`certificaten?user_id=eq.${encodeURIComponent(u.id)}&select=*`);
+    certificaten = Array.isArray(rows) ? rows : [];
+  } catch (_) { /* tabel ontbreekt of ander schema — geen blocker */ }
+  return res.json({
+    toegang,
+    app_id: appId,
+    user: { id: u.id, naam: u.naam, email: u.email, role: u.role },
+    certificaten,
+  });
+});
+
+// POST /api/app-activity/log  { app_id, actie, klant_btw?, klant_naam?, details? }
+// Best-effort by design: antwoordt ALTIJD 200 {ok:...}. Een falende log mag
+// nooit een sim of save blokkeren (roadmap 9a: "best-effort, non-blocking").
+app.post('/api/app-activity/log', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.json({ ok: false, reden: 'auth_niet_geconfigureerd' });
+    const b = req.body || {};
+    if (!b.app_id || !b.actie) return res.json({ ok: false, reden: 'app_id en actie verplicht' });
+    const u = await resolveUser(req);
+    if (!u) return res.json({ ok: false, reden: 'niet_ingelogd' });
+    await _sbRest('app_activity_log', {
+      method: 'POST',
+      headers: { 'Prefer': 'return=minimal' },
+      body: {
+        user_id: u.id,
+        app_id: b.app_id,
+        actie: String(b.actie).slice(0, 120),
+        klant_btw: _normBtw(b.klant_btw),
+        klant_naam: b.klant_naam ? String(b.klant_naam).slice(0, 200) : null,
+        details: (b.details && typeof b.details === 'object') ? b.details : {},
+      },
+    });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.warn(`[activity] log-insert faalde: ${e.message}`);
+    return res.json({ ok: false, reden: 'insert_faalde' });
+  }
+});
+
+// GET /api/manager/activity?verkoper=<uuid>&app=<id>&klant_btw=&van=&tot=&limit=
+// Manager-only. Retourneert log-rijen (nieuwste eerst) verrijkt met
+// verkoper_naam uit profielen.
+app.get('/api/manager/activity', async (req, res) => {
+  if (!SUPABASE_OK) return res.status(503).json({ error: 'auth_niet_geconfigureerd' });
+  const u = await resolveUser(req);
+  if (!u) return res.status(401).json({ error: 'niet ingelogd' });
+  if (!_isManager(u)) return res.status(403).json({ error: 'alleen voor managers' });
+  try {
+    const q = req.query || {};
+    const delen = ['select=*', 'order=ts.desc'];
+    const limit = Math.min(Math.max(parseInt(q.limit, 10) || 100, 1), 1000);
+    delen.push(`limit=${limit}`);
+    if (q.verkoper)  delen.push(`user_id=eq.${encodeURIComponent(q.verkoper)}`);
+    if (q.app)       delen.push(`app_id=eq.${encodeURIComponent(q.app)}`);
+    if (q.klant_btw) delen.push(`klant_btw=eq.${encodeURIComponent(_normBtw(q.klant_btw))}`);
+    if (q.van)       delen.push(`ts=gte.${encodeURIComponent(q.van)}`);
+    if (q.tot)       delen.push(`ts=lte.${encodeURIComponent(q.tot)}`);
+    const rijen = await _sbRest(`app_activity_log?${delen.join('&')}`);
+    // Namen verrijken in één tweede query
+    const ids = [...new Set((rijen || []).map(r => r.user_id).filter(Boolean))];
+    const namen = {};
+    if (ids.length) {
+      try {
+        const profs = await _sbRest(`profiles?auth_uid=in.(${ids.map(encodeURIComponent).join(',')})&select=*`);
+        for (const p of (profs || [])) namen[p.auth_uid] = p.name || p.naam || p.full_name || p.email || p.auth_uid;
+      } catch (_) { /* namen-verrijking best-effort */ }
+    }
+    return res.json({
+      activiteit: (rijen || []).map(r => Object.assign({}, r, { verkoper_naam: namen[r.user_id] || r.user_id })),
+      limit,
+    });
+  } catch (e) {
+    console.error(`[manager/activity] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/admin/migrate-scenario-owners  { default_owner_uid? }
+// Eenmalige migratie (manager-only, idempotent): loopt alle scenario-JSONs in
+// de fluctus-scenarios repo af en stempelt owner_uid = Johan waar het veld
+// ontbreekt (roadmap v6 §2.1). Bestaande owner_uid wordt NOOIT overschreven.
+app.post('/api/admin/migrate-scenario-owners', async (req, res) => {
+  if (!SUPABASE_OK) return res.status(503).json({ error: 'auth_niet_geconfigureerd' });
+  const u = await resolveUser(req);
+  if (!u) return res.status(401).json({ error: 'niet ingelogd' });
+  if (!_isManager(u)) return res.status(403).json({ error: 'alleen voor managers' });
+  const eigenaar = (req.body || {}).default_owner_uid || MIGRATIE_DEFAULT_OWNER;
+  const samenvatting = { eigenaar, projecten: 0, scenarios_totaal: 0, gemigreerd: 0, overgeslagen: 0, fouten: [] };
+  try {
+    // Projectenlijst = directories onder projecten/ in de repo
+    const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${SCENARIOS_PATH_PREFIX}`;
+    const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+    if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+    const r = await fetch(apiUrl, { headers });
+    if (r.status === 404) return res.json(Object.assign(samenvatting, { melding: 'projecten/ map bestaat (nog) niet' }));
+    if (!r.ok) throw new Error(`projecten-lijst: HTTP ${r.status}`);
+    const entries = await r.json();
+    const projecten = entries.filter(e => e.type === 'dir').map(e => e.name);
+    samenvatting.projecten = projecten.length;
+    for (const project of projecten) {
+      let namen = [];
+      try { namen = await _scenariosGithubListProject(project); }
+      catch (e) { samenvatting.fouten.push(`${project}: list faalde (${e.message})`); continue; }
+      for (const naam of namen) {
+        samenvatting.scenarios_totaal++;
+        const pad = _scenarioPad(project, naam);
+        try {
+          const { data, sha } = await _scenariosGithubRead(pad);
+          if (data && data.owner_uid) { samenvatting.overgeslagen++; continue; }
+          const nieuw = Object.assign({}, data, {
+            owner_uid: eigenaar,
+            _owner_gemigreerd_op: new Date().toISOString(),
+          });
+          await _scenariosGithubWrite(pad, nieuw, sha);
+          // Cache verversen zodat read-through direct de gestempelde versie ziet
+          if (SCENARIOS_DB[project]) SCENARIOS_DB[project][naam] = nieuw;
+          samenvatting.gemigreerd++;
+        } catch (e) {
+          samenvatting.fouten.push(`${project}/${naam}: ${e.message}`);
+        }
+      }
+    }
+    return res.json(samenvatting);
+  } catch (e) {
+    console.error(`[migrate-owners] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message, samenvatting });
+  }
+});
+
+// Guard-helper voor scenario-routes. Returnt user-object of null; bij null is
+// de response al verstuurd (401/403). Bij enforcement UIT: returnt een
+// permissief pseudo-user zodat bestaande flows blijven werken (rollback-pad).
+async function _scenarioGuard(req, res) {
+  if (!AUTH_ENFORCE) return { id: null, naam: null, role: 'manager', status: 'active', _enforcementUit: true };
+  const u = await resolveUser(req);
+  if (!u) {
+    res.status(401).json({ error: 'Niet ingelogd. Log in via de Fluctus Academy.' });
+    return null;
+  }
+  if (u.status !== 'active') {
+    res.status(403).json({ error: 'Account niet actief. Neem contact op met uw manager.' });
+    return null;
+  }
+  return u;
+}
+
+function _magScenarioZien(u, data) {
+  if (_isManager(u)) return true;
+  // Verkoper: enkel eigen scenarios. Zonder owner_uid (nog niet gemigreerd)
+  // → niet zichtbaar voor verkopers; migratie-endpoint lost dit op.
+  return !!(data && data.owner_uid && data.owner_uid === u.id);
+}
+
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.14.1', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version:'15.15', ts:new Date().toISOString(), markt_geladen: !!MARKT,
   markt_status: MARKT_STATUS, markt_pogingen: MARKT_POGINGEN,
   markt_laatste_fout: MARKT_LAATSTE_FOUT,
   markt_periode: MARKT ? { van: MARKT.van, tot: MARKT.tot, n_kwartieren: MARKT.n_kwartieren } : null,
@@ -656,12 +986,37 @@ app.get('/api/projecten', (req, res) => res.json({ projecten:[...PROJECTEN_DB] }
 // v15.11 sessie 4 sub-track 4: GET /api/scenarios — read-through cache.
 // Bij cache-miss (eerste call voor project, of na Railway-restart):
 // listen we projecten/{project}/ in de fluctus-scenarios repo.
+// v15.15 sessie 9a: owner-filtering. Managers zien alle scenarios; verkopers
+// enkel scenarios met eigen owner_uid. Filtering vereist de scenario-inhoud
+// (owner staat IN de JSON), dus voor verkopers doen we een read-through per
+// naam. Projecten hebben typisch ≤ 6 scenarios — cache houdt dit snel.
+async function _filterScenarioNamen(u, project, namen) {
+  if (_isManager(u)) return namen;
+  const zichtbaar = [];
+  for (const naam of namen) {
+    let data = (SCENARIOS_DB[project] || {})[naam];
+    if (!data) {
+      try {
+        const gelezen = await _scenariosGithubRead(_scenarioPad(project, naam));
+        data = gelezen.data;
+        if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
+        SCENARIOS_DB[project][naam] = data;
+      } catch (_) { continue; } // onleesbaar → niet tonen
+    }
+    if (_magScenarioZien(u, data)) zichtbaar.push(naam);
+  }
+  return zichtbaar;
+}
+
 app.get('/api/scenarios', async (req, res) => {
   const project = req.query.project;
   if (!project) return res.status(400).json({ error: 'project query-param verplicht' });
-  // Cache hit: returnt direct
+  const u = await _scenarioGuard(req, res);
+  if (!u) return;
+  // Cache hit: returnt direct (na owner-filter)
   if (SCENARIOS_DB[project]) {
-    return res.json({ scenarios: Object.keys(SCENARIOS_DB[project]), source: 'cache' });
+    const namen = await _filterScenarioNamen(u, project, Object.keys(SCENARIOS_DB[project]));
+    return res.json({ scenarios: namen, source: 'cache' });
   }
   // Cache miss: probeer GitHub
   try {
@@ -674,7 +1029,8 @@ app.get('/api/scenarios', async (req, res) => {
       }
       PROJECTEN_DB.add(project);
     }
-    return res.json({ scenarios: names, source: 'github' });
+    const namen = await _filterScenarioNamen(u, project, names);
+    return res.json({ scenarios: namen, source: 'github' });
   } catch (e) {
     console.warn(`[scenarios] list ${project} fail: ${e.message}`);
     // Bij fout: returnt lege array (niet 500, want UI moet kunnen verder)
@@ -689,9 +1045,14 @@ app.get('/api/scenario', async (req, res) => {
   if (!project || !scenario) {
     return res.status(400).json({ error: 'project en scenario query-params verplicht' });
   }
+  const u = await _scenarioGuard(req, res); // v15.15 sessie 9a
+  if (!u) return;
   // Cache hit (en data niet null = niet alleen lazy-marker)
   const cached = (SCENARIOS_DB[project] || {})[scenario];
   if (cached) {
+    if (!_magScenarioZien(u, cached)) {
+      return res.status(403).json({ error: 'Geen toegang tot dit scenario.' });
+    }
     return res.json({ data: cached, source: 'cache' });
   }
   // Cache miss of lazy-marker: lees van GitHub
@@ -700,6 +1061,9 @@ app.get('/api/scenario', async (req, res) => {
     if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
     SCENARIOS_DB[project][scenario] = data;
     PROJECTEN_DB.add(project);
+    if (!_magScenarioZien(u, data)) {
+      return res.status(403).json({ error: 'Geen toegang tot dit scenario.' });
+    }
     return res.json({ data, source: 'github' });
   } catch (e) {
     console.warn(`[scenario] read ${project}/${scenario} fail: ${e.message}`);
@@ -715,6 +1079,21 @@ app.post('/api/scenario-bewaren', async (req, res) => {
   const { project, scenario, data } = req.body || {};
   if (!project || !scenario) {
     return res.status(400).json({ error: 'project en scenario zijn verplicht' });
+  }
+  // v15.15 sessie 9a: owner-stempel + schrijf-guard.
+  const u = await _scenarioGuard(req, res);
+  if (!u) return;
+  if (data && typeof data === 'object') {
+    const bestaand = (SCENARIOS_DB[project] || {})[scenario];
+    if (bestaand && bestaand.owner_uid && !_magScenarioZien(u, bestaand)) {
+      return res.status(403).json({ error: 'Dit scenario is van een andere verkoper.' });
+    }
+    if (!data.owner_uid && u.id) {
+      data.owner_uid  = u.id;
+      data.owner_naam = u.naam;
+    } else if (data.owner_uid && !_magScenarioZien(u, data)) {
+      return res.status(403).json({ error: 'Dit scenario is van een andere verkoper.' });
+    }
   }
   // Cache update eerst (zodat UI direct kan lezen, ook als GitHub traag is)
   if (!SCENARIOS_DB[project]) SCENARIOS_DB[project] = {};
@@ -777,6 +1156,15 @@ app.post('/api/scenarios-batch-bewaren', async (req, res) => {
   const { project, scenarios } = req.body || {};
   if (!project || !Array.isArray(scenarios) || scenarios.length === 0) {
     return res.status(400).json({ error: 'project en scenarios[] zijn verplicht' });
+  }
+  // v15.15 sessie 9a: owner-stempel op elk scenario in de batch.
+  const u = await _scenarioGuard(req, res);
+  if (!u) return;
+  for (const s of scenarios) {
+    if (s && s.data && typeof s.data === 'object' && !s.data.owner_uid && u.id) {
+      s.data.owner_uid  = u.id;
+      s.data.owner_naam = u.naam;
+    }
   }
   if (scenarios.length > 10) {
     return res.status(400).json({ error: 'Max 10 scenarios per batch' });
@@ -1726,7 +2114,7 @@ app.all('/claude-explain-refresh', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.14.1 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v15.15 luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt status: ${MARKT_STATUS}${MARKT ? ' ('+MARKT.n_kwartieren+' kwartieren)' : ''}`);
 });
