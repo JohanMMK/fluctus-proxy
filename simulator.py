@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.7 (sessie 7 — Groep B-kost in BSP-LP-objective)
+# Versie:        v1.7.1 (3-sturingen — 'geen arbitrage'-modus voor variant 1)
+# Wijziging v1.7.1 vs v1.7: nieuwe input-vlag `geen_arbitrage` (default False).
+#   Wanneer True: de batterij mag zelfconsumptie + piekshaving doen maar GEEN
+#   spot/IMB-arbitrage. Implementatie: vlakke dispatch-prijs (spot_forecast =
+#   gemiddelde spot) + forceer plain lp_dispatch_day (stacked/BSP uit). De
+#   facturatie blijft op de echte spot rekenen. Gebruikt als baseline (variant 1)
+#   in de 3-sturingen-KPI. Alle bestaande paden ongewijzigd wanneer vlag afwezig.
 # Geproduceerd:  2026-05-14
 # Doelomgeving:  Railway (lucid-amazement-production.up.railway.app)
 # Repo:          JohanMMK/fluctus-proxy (auto-deploy bij merge naar main)
@@ -2052,6 +2058,17 @@ def run_simulation(inp: dict) -> dict:
     # ---- Forecasts (D-1) ----
     sf = inp.get('forecast', {})
     spot_forecast = add_gaussian_noise(spot_actual, sf.get('sigma_da', 0), rng)
+    # v1.7.1: sturing-modus 'geen arbitrage' (variant 1 van de 3-sturingen-KPI).
+    # De batterij mag WEL zelfconsumptie + piekshaving doen, maar GEEN spot/IMB-
+    # arbitrage. We voeden de LP een VLAKKE dispatch-prijs (= gemiddelde spot),
+    # zodat er geen tijdsarbitrage-prikkel is. De FACTURATIE blijft op de echte
+    # spot (spot_actual) rekenen. Zelfconsumptie blijft geprikkeld door de
+    # markup/markdown-spread; piekshaving door de overschrijdings-penalty.
+    geen_arbitrage = bool(inp.get('geen_arbitrage', False))
+    if geen_arbitrage and spot_actual:
+        _vlak = sum(spot_actual) / len(spot_actual)
+        spot_forecast = [_vlak] * N
+        log.info(f"geen_arbitrage-modus: vlakke dispatch-prijs {_vlak:.2f} €/MWh (enkel zelfconsumptie + piekshaving)")
     consumption_forecast = add_relative_noise(consumption_kw, sf.get('sigma_volume_verbruik_pct', 0), rng)
     pv_forecast = add_relative_noise(pv_kw, sf.get('sigma_volume_pv_pct', 0), rng)
 
@@ -2087,6 +2104,12 @@ def run_simulation(inp: dict) -> dict:
     bsp_cfg = inp.get('bsp', {})
     bsp_actief = bsp_cfg.get('actief', False)
     stacked_modus = bsp_cfg.get('stacked', False) and batt.get('kwh', 0) > 0 and not bsp_actief
+    # v1.7.1: in geen_arbitrage-modus dwingen we de plain lp_dispatch_day af
+    # (geen stacked DAM+IMB-arbitrage, geen BSP). Samen met de vlakke dispatch-
+    # prijs hierboven levert dit een batterij die enkel zelfconsumeert + piekshaaft.
+    if geen_arbitrage:
+        stacked_modus = False
+        bsp_actief = False
     
     # === SNELLE PAD 1: geen batterij EN geen PV → geen LP nodig ===
     skip_lp = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) <= 0
