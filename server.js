@@ -1,7 +1,17 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.15.2 (hotfix sessie 9a — projecten-lijst na restart)
+// Versie:        v15.15.3 (bugfix — profiel-naam→bestand normalisatie)
+// Wijziging v15.15.3 vs v15.15.2: profiel-lookup matcht nu op genormaliseerde
+//   naam. Root cause bug 1: de profielenlijst toont nette namen met spaties
+//   ("Boer aardappel", "Opslag / Magazijn") terwijl de bestanden underscores
+//   gebruiken (boer_aardappel.json, opslag___magazijn.json). De oude
+//   exact/lowercase-lookup vond enkel enkelwoord-profielen; meerwoord-profielen
+//   gaven 404 op POST /api/factuur-staffel-bepalen, waardoor de verkoper in de
+//   factuur-modal geen profiel kon "aanvaarden". Stap 3 (GET /api/profiel)
+//   verborg ditzelfde probleem via zijn MARKT-fallback (rekende dan fout op het
+//   default-profiel). Fix: gedeelde _profielFileNormalize() in beide routes +
+//   MARKT-fallback als laatste vangnet in _laadProfielKwartier.
 // Wijziging v15.15.2 vs v15.15.1: GET /api/projecten doet read-through naar
 //   de GitHub projecten/-directory wanneer de in-memory cache leeg is (na
 //   elke Railway-restart). Pre-existente bug, zichtbaar geworden door de
@@ -448,6 +458,22 @@ if (fs.existsSync(profielenLijstPath)) {
   console.log(`[profielen] ${PROFIELEN_LIJST.length} profielen geladen`);
 } else {
   console.warn('[profielen] data/profielen-lijst.json niet gevonden');
+}
+
+// v15.15.3 (bug 1): profiel-naam → bestandsnaam normalisatie. De profielenlijst
+// toont nette namen met spaties/hoofdletters ("Boer aardappel", "Opslag /
+// Magazijn"), maar de bestanden in data/profielen/ heten met underscores
+// (boer_aardappel.json, opslag___magazijn.json). De oude exact/lowercase-lookup
+// vond enkel enkelwoord-profielen; meerwoord-profielen gaven 404 op
+// /api/factuur-staffel-bepalen (en stap 3 verborg dat via de MARKT-fallback).
+// We normaliseren beide kanten (lowercase, niet-alfanumeriek → '_', runs
+// gecollapst, rand-underscores gestript) en vergelijken dan.
+function _profielFileNormalize(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\.json$/, '')
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
 }
 
 // ─── SCENARIO-PERSISTENTIE GITHUB (v15.11 sessie 4 sub-track 4) ──────────────
@@ -969,7 +995,9 @@ app.get('/api/profiel', (req, res) => {
     // Probeer case-insensitive match in de directory
     try {
       const files = fs.readdirSync(profielDir);
-      const match = files.find(f => f.toLowerCase() === naam.toLowerCase() + '.json');
+      const _target = _profielFileNormalize(naam);
+      const match = files.find(f => f.toLowerCase() === naam.toLowerCase() + '.json')
+                 || files.find(f => _profielFileNormalize(f) === _target);
       if (match) {
         const data = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
         return res.json({ naam, kwartier: Array.isArray(data) ? data : data.profiel_kwartier || [] });
@@ -1364,12 +1392,23 @@ function _laadProfielKwartier(profielNaam) {
   }
   try {
     const files = fs.readdirSync(profielDir);
-    const match = files.find(f => f.toLowerCase() === profielNaam.toLowerCase() + '.json');
+    const _target = _profielFileNormalize(profielNaam);
+    const match = files.find(f => f.toLowerCase() === profielNaam.toLowerCase() + '.json')
+               || files.find(f => _profielFileNormalize(f) === _target);
     if (match) {
       const data = JSON.parse(fs.readFileSync(path.join(profielDir, match), 'utf8'));
       return Array.isArray(data) ? data : (data.profiel_kwartier || null);
     }
   } catch (e) {}
+  // v15.15.3 (bug: profiel niet "aanvaard" in factuur-modal): zelfde fallback
+  // als GET /api/profiel. Zonder profiel-bestand gaf /api/factuur-staffel-bepalen
+  // een 404 (profiel niet gevonden), terwijl stap 3 via /api/profiel wél werkte
+  // omdat die al terugvalt op het in-memory MARKT-profiel. Nu consistent, zodat
+  // de tier-bepaling in de modal niet meer faalt.
+  if (MARKT && MARKT.profiel && MARKT.profiel.length === 35040) {
+    console.warn(`[factuur-staffel] profiel '${profielNaam}' niet gevonden — fallback naar MARKT-profiel`);
+    return MARKT.profiel;
+  }
   return null;
 }
 
