@@ -1608,10 +1608,30 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
 
   const startTime = Date.now();
   try {
+    // Flex-detectie: zonder batterij ÉN zonder PV is er geen stuurbare asset,
+    // dus onbalans-sturing levert niets reëels op. Variant 3 wordt dan gelijk
+    // aan variant 2 (meerwaarde onbalans = 0). Zonder deze gate toont de sim een
+    // schijn-winst die louter het verschil forfaitair-vs-passthrough is (bij
+    // afwezigheid van flex is de passthrough-onbalans immers 0 in het model).
+    const _heeftPv = Number(input.pv_kwp || input.pvKwp || 0) > 0;
+    let _heeftBatt = false;
+    if (input.batterijId === 'CUSTOM') {
+      const _c = input.batterijCustom || {};
+      _heeftBatt = Number(_c.kwh) > 0 && Number(_c.kw) > 0;
+    } else {
+      _heeftBatt = !!(input.batterijId);
+    }
+    const heeftFlex = _heeftPv || _heeftBatt;
+
     const keys = ['geen', 'sturing', 'onbalans'];
     const varianten = {};
     // Sequentieel: vermijdt geheugenpieken van 3 parallelle LP-processen.
     for (const k of keys) {
+      if (k === 'onbalans' && !heeftFlex) {
+        // Geen flex → variant 3 = variant 2 (hergebruik, geen extra sim-run).
+        varianten.onbalans = varianten.sturing;
+        continue;
+      }
       const simInput = buildSimInput(_variantUi(input, k));
       varianten[k] = await _runSimulatorOnce(simInput);
     }
@@ -1623,13 +1643,14 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
       kost_onbalans_excl_btw:  ko,
       meerwaarde_sturing_excl_btw:  kg - ks,   // >0 = besparing door sturing t.o.v. geen sturing
       meerwaarde_onbalans_excl_btw: ks - ko,   // >0 = extra besparing door onbalans t.o.v. sturing
+      onbalans_niet_van_toepassing: !heeftFlex, // geen flex → onbalans-KPI = 0 (n.v.t.)
     };
-    console.log(`[sim-3] klaar in ${Date.now() - startTime}ms — geen=${kg.toFixed(0)} sturing=${ks.toFixed(0)} onbalans=${ko.toFixed(0)}`);
+    console.log(`[sim-3] klaar in ${Date.now() - startTime}ms — geen=${kg.toFixed(0)} sturing=${ks.toFixed(0)} onbalans=${ko.toFixed(0)}${heeftFlex ? '' : ' (geen flex → onbalans n.v.t.)'}`);
     return res.json({
       ok: true,
       varianten,
       kpi_sturing,
-      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.3', varianten: keys },
+      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.3', varianten: keys, heeftFlex },
     });
   } catch (e) {
     console.error('[sim-3] fout:', e.message);
