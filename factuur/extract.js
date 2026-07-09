@@ -4,7 +4,17 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.1 (mei 2026)
+ * Versie: 1.3 (juli 2026)
+ *
+ * Wijzigingen v1.2 → v1.3 (bug: netto te betalen i.p.v. totale kost):
+ *   1. Prompt: totaalExclBtw/totaalInclBtw = TOTALE kost van de periode (bruto,
+ *      vóór aftrek voorschotten). Expliciet NIET het netto te betalen saldo.
+ *   2. Prompt + schema: nieuwe velden voorschottenInclBtw en
+ *      totaalTeBetalenInclBtw (informatief) voor afrekeningen/slotfacturen.
+ *   3. Server-side reconciliatie: bij AFWIJKING + voorschot-indicatie wordt
+ *      totaalExclBtw gecorrigeerd naar de som van de kost-componenten (bruto),
+ *      totaalInclBtw herberekend, sumcheck bijgewerkt, _voorschot_correctie
+ *      + flag 'totaal_gecorrigeerd_voor_voorschotten' toegevoegd.
  *
  * Wijzigingen v1.0 → v1.1 (na test-batch Eneco/Elindus/Luminus):
  *   1. Prompt: leverancier = commerciële merk (Eneco niet "Eneco Belgium",
@@ -142,9 +152,30 @@ TOTAALBEDRAGEN — VERMIJD DUBBELTELLING:
   tarief correctie). Som van alle "Capaciteitstarief" regels zonder de "-Maximumtarief"
   correctie eraf te trekken.
 - totaalHeffingenExclBtw = bijdragen, accijnzen, energiefonds, federale bijdragen.
-- totaalExclBtw = de werkelijke totaal-excl-BTW van de factuur (zoals leverancier
-  het OPTELT, kan inclusief BTW-correcties, kortingen, voorschotten zijn).
-- totaalInclBtw = werkelijk totaal incl BTW.
+- totaalExclBtw = de TOTALE KOST (excl BTW) van de verbruiksperiode: de som van
+  energie + distributie + capaciteit + heffingen zoals de factuur die optelt,
+  VÓÓR aftrek van reeds betaalde voorschotten. Dit is NIET het "netto te betalen"
+  saldo.
+- totaalInclBtw = diezelfde TOTALE KOST maar inclusief BTW (eveneens vóór aftrek
+  van voorschotten).
+
+AFREKENING / SLOTFACTUUR / REGULARISATIE — VOORSCHOTTEN (ZEER BELANGRIJK):
+Veel facturen zijn een AFREKENING: ze tonen eerst de volledige "Totale kost" /
+"Totaal energiekost" / "Totaal van deze afrekening" voor de periode, en trekken
+daarna reeds gefactureerde VOORSCHOTTEN af. Wat overblijft is een klein bedrag
+"Saldo", "Te betalen", "Netto te betalen" of "Terug te krijgen".
+  - Gebruik voor totaalExclBtw en totaalInclBtw ALTIJD de volledige TOTALE KOST
+    (onderaan de afrekening) — NOOIT het netto te betalen saldo na voorschotten.
+    Zoek expliciet naar de regel die het periodetotaal geeft vóór de aftrek van
+    voorschotten; die som moet ± gelijk zijn aan energie+distributie+capaciteit+
+    heffingen.
+  - Zet het reeds betaalde/afgetrokken voorschot-bedrag (positief getal, incl BTW
+    zoals vermeld) in "voorschottenInclBtw". Meerdere voorschotten: som ze op.
+  - Zet het uiteindelijke netto te betalen (of terug te krijgen, dan negatief)
+    saldo in "totaalTeBetalenInclBtw". Dit veld is puur informatief en wordt NIET
+    als factuurtotaal gebruikt.
+  - Gewone maandfactuur zonder voorschotten: voorschottenInclBtw = 0 en
+    totaalTeBetalenInclBtw = totaalInclBtw.
 
 JSON SCHEMA (output):
 {
@@ -172,6 +203,8 @@ JSON SCHEMA (output):
   "totaalCapaciteitExclBtw": number,
   "totaalExclBtw": number,
   "totaalInclBtw": number,
+  "totaalTeBetalenInclBtw": number of null,
+  "voorschottenInclBtw": number of null,
   "leverancier": string,
   "leverancierTariefformule": string,
   "_aansluitvermogenBron": {
@@ -644,11 +677,66 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
   // 2g. Sumcheck consistentie
   const consistentie = consistentieCheck(parsed);
 
+  // 2g-bis. Afrekening/voorschot-reconciliatie (v1.3).
+  // Op een AFREKENING/SLOTFACTUUR wordt soms het NETTO te betalen saldo (na
+  // aftrek van reeds betaalde voorschotten) als totaalExclBtw/totaalInclBtw
+  // gelezen i.p.v. de TOTALE kost. De som van de kost-componenten
+  // (energie+distributie+heffingen+capaciteit) is de bruto periode-kost en is
+  // onafhankelijk van voorschotten. Wanneer die som de gelezen totaalExclBtw
+  // duidelijk overschrijdt (>5%) ÉN er een voorschot-indicatie is — en het géén
+  // capaciteit-dubbeltelling betreft — corrigeren we naar de bruto totale kost.
+  // De simulatie vergelijkt periodekost vs simulatiekost; een netto saldo (na
+  // voorschotten) zou die vergelijking systematisch onderschatten.
+  let totaalExclBtwFinal = parseFloat(parsed.totaalExclBtw);
+  if (!isFinite(totaalExclBtwFinal)) totaalExclBtwFinal = 0;
+  let totaalInclBtwFinal = (parsed.totaalInclBtw !== null && parsed.totaalInclBtw !== undefined && isFinite(parseFloat(parsed.totaalInclBtw)))
+    ? parseFloat(parsed.totaalInclBtw) : null;
+  let voorschotCorrectie = null;
+
+  const somComponenten = consistentie.sum_componenten;            // e+d+h+c
+  const voorschotIncl = parseFloat(parsed.voorschottenInclBtw) || 0;
+  const heeftVoorschotIndicatie = voorschotIncl > 0 ||
+    factuurType === 'regularisatie' ||
+    /afreken|slotfactuur|regularisat|voorschot/i.test(parsed._provider_notes || '');
+  const deltaSomTotaal = somComponenten - totaalExclBtwFinal;      // >0 => totaal te laag gelezen
+  const relAfwijking = totaalExclBtwFinal > 0.01 ? (deltaSomTotaal / totaalExclBtwFinal) : 0;
+
+  if (consistentie.status === 'AFWIJKING' &&
+      deltaSomTotaal > 0 && relAfwijking > 0.05 &&
+      heeftVoorschotIndicatie && somComponenten > 0) {
+    const btwRatio = (totaalInclBtwFinal && totaalExclBtwFinal > 0.01)
+      ? (totaalInclBtwFinal / totaalExclBtwFinal) : 1.21;
+    voorschotCorrectie = {
+      gelezen_totaalExclBtw: totaalExclBtwFinal,
+      gecorrigeerd_totaalExclBtw: somComponenten,
+      voorschottenInclBtw: voorschotIncl || null,
+      netto_te_betalen_inclBtw: (parsed.totaalTeBetalenInclBtw !== null && parsed.totaalTeBetalenInclBtw !== undefined)
+        ? parseFloat(parsed.totaalTeBetalenInclBtw) : totaalInclBtwFinal,
+      reden: 'Gelezen totaal leek het netto te betalen saldo (na aftrek voorschotten); ' +
+             'gecorrigeerd naar de bruto totale kost = som van de kost-componenten.'
+    };
+    totaalExclBtwFinal = somComponenten;
+    totaalInclBtwFinal = Math.round(somComponenten * btwRatio * 100) / 100;
+    if (!_provider_flags.includes('totaal_gecorrigeerd_voor_voorschotten')) {
+      _provider_flags.push('totaal_gecorrigeerd_voor_voorschotten');
+    }
+    // Sumcheck bijwerken zodat de wizard geen valse AFWIJKING-waarschuwing toont.
+    consistentie.status = 'OK_NA_VOORSCHOT_CORRECTIE';
+    consistentie.totaal_factuur = totaalExclBtwFinal;
+    consistentie.delta_eur = 0;
+    consistentie.delta_pct = 0;
+    consistentie.opmerking = `Totaal gecorrigeerd naar bruto totale kost (€${somComponenten}) ` +
+      `na detectie van aftrek-voorschotten; som componenten klopt nu.`;
+  }
+
   // Stap 3: response payload
   const baseCase = {
     ...parsed,
     factuurType,
     aansluitVermogenKva,
+    totaalExclBtw: totaalExclBtwFinal,
+    totaalInclBtw: totaalInclBtwFinal,
+    _voorschot_correctie: voorschotCorrectie,
     spanningsniveau: spanningsniveauFinal,
     dnb: dnbFinal,
     pvKwpAanwezig: pvKwp,
@@ -681,7 +769,7 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.2'
+      version: '1.3'
     }
   };
 }
