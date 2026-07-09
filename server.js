@@ -1528,6 +1528,115 @@ app.post('/api/nominatie-sim', (req, res) => {
   proc.stdin.end();
 });
 
+// ─── 3-STURINGEN (v15.15.3) ──────────────────────────────────────────────────
+// Draait per simulatie 3 sturing-varianten en geeft de meerwaarde-KPI's terug.
+// simulator.py blijft ONGEWIJZIGD: we spawnen 'm 3× met per-variant aangepaste
+// input. buildSimInput leidt de sturing af uit bsp.actief / pv_curtailment.actief
+// / batterijId / pvInjStrategie, dus we hoeven enkel die vlaggen te zetten.
+function _runSimulatorOnce(simInput) {
+  return new Promise((resolve, reject) => {
+    const simulatorPath = path.join(__dirname, 'simulator.py');
+    const t0 = Date.now();
+    const proc = spawn('python3', [simulatorPath], { env:{...process.env, PYTHONUNBUFFERED:'1'} });
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', c => { stdout += c.toString(); });
+    proc.stderr.on('data', c => { stderr += c.toString(); });
+    proc.on('close', code => {
+      const elapsed = Date.now() - t0;
+      if (code !== 0) return reject(new Error('Simulator exit ' + code + ': ' + stderr.slice(-800)));
+      const s = stdout.indexOf('{'), e = stdout.lastIndexOf('}');
+      if (s === -1 || e === -1) return reject(new Error('Geen JSON output: ' + stdout.slice(0, 300)));
+      let result;
+      try { result = JSON.parse(stdout.slice(s, e + 1)); }
+      catch (err) { return reject(new Error('JSON parse fout: ' + err.message)); }
+      result._serverLog = stderr;
+      result._elapsedMs = elapsed;
+      resolve(result);
+    });
+    proc.on('error', err => reject(new Error('Spawn error: ' + err.message)));
+    proc.stdin.write(JSON.stringify(simInput));
+    proc.stdin.end();
+  });
+}
+
+// Bouw een per-variant aangepaste UI-input. Zie buildSimInput voor hoe de
+// vlaggen doorwerken (bsp.actief, pv_curtailment.actief, batterijId, contract.modus).
+function _variantUi(ui, variant) {
+  const v = JSON.parse(JSON.stringify(ui || {}));
+  const heeftPv = (Number(v.pv_kwp || v.pvKwp || 0) > 0);
+  v.pv_curtailment = v.pv_curtailment || {};
+  v.bsp = v.bsp || {};
+  v.geen_arbitrage = false;   // default; enkel variant 'geen' zet dit op true
+  if (variant === 'geen') {
+    // Geen sturing: batterij BLIJFT (indien aanwezig), maar wordt enkel gebruikt
+    // voor zelfconsumptie (bij PV) + piekshaving — GEEN spot/IMB-arbitrage.
+    // De vlag geen_arbitrage zet simulator.py in vlakke-dispatch-modus.
+    // batterijId/batterijCustom ongewijzigd (batterij blijft dus in de sim).
+    v.pvInjStrategie = 'geen';
+    v.pv_curtailment.actief = false;
+    v.bsp.actief = false;
+    v.geen_arbitrage = true;
+  } else if (variant === 'sturing') {
+    // Volledige sturing EXCL. onbalans: zelfconsumptie + piekoptimalisatie +
+    // spotmarkt-arbitrage (de LP doet dit inherent zodra er een batterij is).
+    v.pvInjStrategie = heeftPv ? 'curtail_neg' : 'geen';
+    v.pv_curtailment.actief = heeftPv;
+    v.bsp.actief = false;
+  } else { // 'onbalans'
+    // Volledige sturing INCL. onbalans.
+    v.pvInjStrategie = 'bsp_actief';
+    v.pv_curtailment.actief = heeftPv;
+    v.bsp.actief = true;
+  }
+  return v;
+}
+
+app.post('/api/nominatie-sim-3', async (req, res) => {
+  const input = req.body;
+  if (!input || typeof input !== 'object')
+    return res.status(400).json({ error:'body is verplicht' });
+  if (!MARKT) {
+    // Zelfde 503-semantiek als /api/nominatie-sim zodat de UI-retry-ladder werkt.
+    return res.status(503).json({
+      error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw',
+      status: MARKT_STATUS, pogingen: MARKT_POGINGEN,
+    });
+  }
+  const simulatorPath = path.join(__dirname, 'simulator.py');
+  if (!fs.existsSync(simulatorPath))
+    return res.status(500).json({ error:'simulator.py niet gevonden' });
+
+  const startTime = Date.now();
+  try {
+    const keys = ['geen', 'sturing', 'onbalans'];
+    const varianten = {};
+    // Sequentieel: vermijdt geheugenpieken van 3 parallelle LP-processen.
+    for (const k of keys) {
+      const simInput = buildSimInput(_variantUi(input, k));
+      varianten[k] = await _runSimulatorOnce(simInput);
+    }
+    const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+    const kg = _sub(varianten.geen), ks = _sub(varianten.sturing), ko = _sub(varianten.onbalans);
+    const kpi_sturing = {
+      kost_geen_excl_btw:      kg,
+      kost_sturing_excl_btw:   ks,
+      kost_onbalans_excl_btw:  ko,
+      meerwaarde_sturing_excl_btw:  kg - ks,   // >0 = besparing door sturing t.o.v. geen sturing
+      meerwaarde_onbalans_excl_btw: ks - ko,   // >0 = extra besparing door onbalans t.o.v. sturing
+    };
+    console.log(`[sim-3] klaar in ${Date.now() - startTime}ms — geen=${kg.toFixed(0)} sturing=${ks.toFixed(0)} onbalans=${ko.toFixed(0)}`);
+    return res.json({
+      ok: true,
+      varianten,
+      kpi_sturing,
+      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.3', varianten: keys },
+    });
+  } catch (e) {
+    console.error('[sim-3] fout:', e.message);
+    return res.status(500).json({ error: 'Simulatie-3 gefaald: ' + e.message });
+  }
+});
+
 // ─── BUILD SIM INPUT ─────────────────────────────────────────────────────────
 function buildSimInput(ui) {
   const grd     = ui.grd || 'Fluvius West';
@@ -1761,6 +1870,9 @@ function buildSimInput(ui) {
       pv_curtailment_allowed: curtailActief,
       stacked,
     },
+    // v15.15.3: 3-sturingen variant 1 — batterij enkel zelfconsumptie +
+    // piekshaving, geen arbitrage (simulator.py v1.7.1 leest deze vlag).
+    geen_arbitrage: !!ui.geen_arbitrage,
   };
 }
 
