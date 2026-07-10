@@ -4,7 +4,18 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.3 (juli 2026)
+ * Versie: 1.4 (juli 2026)
+ *
+ * Wijzigingen v1.3 → v1.4 (sessie 9b — parser-uitbreiding voor CRM/deal-flow):
+ *   1. Klantidentiteit: klantnummerLeverancier, contactpersoon, contractEinddatum.
+ *   2. Multi-EAN: eanBlokken[] met {ean, rol (afname_elek/injectie_elek/gas),
+ *      leveringsadres}; fallback vanuit eanNrs. eanNrs blijft gevuld (compat).
+ *   3. Tariefkaart: _tariefkaart met eenheidstarieven (best-effort, null indien
+ *      niet vermeld). Aanvullend; de sim gebruikt deze niet.
+ *   4. _crmVelden: factuur-afleidbare Odoo res.partner x_-velden (Groep A +
+ *      factuurdeel Groep B) klaar voor sessie 15. Groep C/D blijven null.
+ *   5. max_tokens 4000 → 8000 (meer velden). Additief/niet-brekend: bestaande
+ *      single-EAN baseCase-velden blijven leidend voor de simulatie.
  *
  * Wijzigingen v1.2 → v1.3 (bug: netto te betalen i.p.v. totale kost):
  *   1. Prompt: totaalExclBtw/totaalInclBtw = TOTALE kost van de periode (bruto,
@@ -177,6 +188,31 @@ daarna reeds gefactureerde VOORSCHOTTEN af. Wat overblijft is een klein bedrag
   - Gewone maandfactuur zonder voorschotten: voorschottenInclBtw = 0 en
     totaalTeBetalenInclBtw = totaalInclBtw.
 
+KLANTIDENTITEIT (v1.4 — voor CRM):
+- klantnummerLeverancier: het klant-/contractnummer dat de LEVERANCIER aan de
+  klant toekent (staat vaak bovenaan bij de klantgegevens). NIET het EAN, NIET
+  het factuurnummer.
+- contactpersoon: naam van de contactpersoon/boekhouding indien vermeld
+  ("T.a.v. ...", "Contact: ..."). Anders null.
+- contractEinddatum: de einddatum van het LEVERINGSCONTRACT indien de factuur die
+  vermeldt (bv. "contract loopt tot 31/12/2026"). Dit is NIET de verbruiksperiode
+  en NIET de vervaldatum. Laat null als niet vermeld.
+
+MEERDERE EAN'S (v1.4):
+Een factuur kan meerdere EAN's bevatten (elektriciteit afname, elektriciteit
+injectie, aardgas). Lijst ELKE gevonden EAN in "eanBlokken" met zijn rol en
+leveringsadres. Blijf daarnaast eanNrs vullen (alle EAN-strings) voor compat.
+  - rol = "afname_elek" | "injectie_elek" | "gas"
+  - Bij twijfel over de rol: kies "afname_elek".
+
+TARIEFKAART (v1.4, best-effort):
+Vul "_tariefkaart" met de EENHEIDSTARIEVEN die letterlijk op de factuur staan
+(niet de totaalbedragen — die zitten al in de totaal*-velden). Eenheden exact
+volgen: €/MWh, €/kW/jaar, €/jaar. Laat elk veld null als het niet expliciet op
+de factuur staat — verzin NOOIT een tarief. Voeg onzekere velden toe aan
+_uncertain. Deze tariefkaart is aanvullend (voor CRM/vergelijking); de sim
+gebruikt ze niet.
+
 JSON SCHEMA (output):
 {
   "factuurNummer": string,
@@ -207,6 +243,27 @@ JSON SCHEMA (output):
   "voorschottenInclBtw": number of null,
   "leverancier": string,
   "leverancierTariefformule": string,
+  "klantnummerLeverancier": string of null,
+  "contactpersoon": string of null,
+  "contractEinddatum": "YYYY-MM-DD" of null,
+  "eanBlokken": [
+    { "ean": string, "rol": "afname_elek" | "injectie_elek" | "gas", "leveringsadres": string of null }
+  ],
+  "_tariefkaart": {
+    "energie_dag_eur_mwh": number of null,
+    "energie_nacht_eur_mwh": number of null,
+    "energie_enkelvoudig_eur_mwh": number of null,
+    "vaste_vergoeding_eur_jaar": number of null,
+    "capaciteitstarief_eur_kw_jaar": number of null,
+    "toegangsvermogen_kw": number of null,
+    "distributie_proportioneel_eur_mwh": number of null,
+    "transport_eur_mwh": number of null,
+    "databeheer_eur_jaar": number of null,
+    "accijnzen_eur_mwh": number of null,
+    "heffingen_eur_mwh": number of null,
+    "gsc_eur_mwh": number of null,
+    "wkk_eur_mwh": number of null
+  },
   "_aansluitvermogenBron": {
     "toegangsvermogenKw": number of null,
     "maandpiekKw": number of null,
@@ -251,7 +308,7 @@ async function callAnthropic({ apiKey, model, files, timeoutMs = 30000 }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 4000,
+        max_tokens: 8000,   // v1.4: meer velden (multi-EAN + tariefkaart + CRM)
         system: buildSystemPrompt(),
         messages: [{ role: 'user', content: contentBlocks }]
       }),
@@ -729,6 +786,53 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
       `na detectie van aftrek-voorschotten; som componenten klopt nu.`;
   }
 
+  // 2h. v1.4 (sessie 9b): multi-EAN normalisatie + CRM-velden.
+  const geldigeRollen = ['afname_elek', 'injectie_elek', 'gas'];
+  let eanBlokken = Array.isArray(parsed.eanBlokken) ? parsed.eanBlokken : [];
+  eanBlokken = eanBlokken
+    .filter(b => b && typeof b === 'object' && b.ean)
+    .map(b => ({
+      ean: String(b.ean).trim(),
+      rol: geldigeRollen.includes(b.rol) ? b.rol : 'afname_elek',
+      leveringsadres: b.leveringsadres || parsed.leveringsadres || null,
+    }));
+  // Fallback: geen eanBlokken maar wel eanNrs → bouw afname-blokken.
+  if (eanBlokken.length === 0 && Array.isArray(parsed.eanNrs)) {
+    eanBlokken = parsed.eanNrs.filter(Boolean).map(e => ({
+      ean: String(e).trim(), rol: 'afname_elek', leveringsadres: parsed.leveringsadres || null,
+    }));
+  }
+  const primaireAfnameEan =
+    (eanBlokken.find(b => b.rol === 'afname_elek') || eanBlokken[0] || {}).ean || null;
+  const injectieEan = (eanBlokken.find(b => b.rol === 'injectie_elek') || {}).ean || null;
+  const gasEan      = (eanBlokken.find(b => b.rol === 'gas') || {}).ean || null;
+
+  const _afnameMwh = (parseFloat(parsed.afnameKwh) || 0) / 1000.0;
+
+  // CRM-velden (Odoo res.partner x_-velden). Enkel FACTUUR-afleidbaar (Groep A +
+  // factuurdeel Groep B). Groep C/D (financials, lead-score) komen uit sessie 20/
+  // analyse en blijven null. x_jaarverbruik_mwh = periode-volume; de jaarprojectie
+  // gebeurt in de wizard/staffel (niet hier).
+  const _crmVelden = {
+    x_ean_elek_afname:    primaireAfnameEan,
+    x_ean_elek_injectie:  injectieEan,
+    x_ean_gas:            gasEan,
+    x_aansluit_kva:       (typeof aansluitVermogenKva === 'number') ? aansluitVermogenKva : null,
+    x_dnb:                dnbFinal || null,
+    x_huidig_leverancier: parsed.leverancier || null,
+    x_jaarverbruik_mwh:        _afnameMwh || null,
+    x_maandpiek_referentie_kw: (bron.maandpiekKw != null ? bron.maandpiekKw
+                                : (bron.gekozenMaxKw != null ? bron.gekozenMaxKw : null)),
+    x_pv_bestaand_kwp:         (typeof pvKwp === 'number') ? pvKwp : null,
+    x_huidig_contract_einddatum: parsed.contractEinddatum || null,
+    x_profiel_type:            null,   // gekozen in de wizard
+    x_bess_aanwezig:           null,   // niet uit factuur afleidbaar
+    x_laadpalen_aanwezig:      null,   // niet uit factuur afleidbaar
+    // Extra identiteitsvelden (buiten de 23-lijst, handig voor CRM/attributie):
+    x_klantnummer_leverancier: parsed.klantnummerLeverancier || null,
+    x_contactpersoon:          parsed.contactpersoon || null,
+  };
+
   // Stap 3: response payload
   const baseCase = {
     ...parsed,
@@ -737,6 +841,8 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
     totaalExclBtw: totaalExclBtwFinal,
     totaalInclBtw: totaalInclBtwFinal,
     _voorschot_correctie: voorschotCorrectie,
+    eanBlokken,
+    _crmVelden,
     spanningsniveau: spanningsniveauFinal,
     dnb: dnbFinal,
     pvKwpAanwezig: pvKwp,
@@ -769,7 +875,7 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.3'
+      version: '1.4'
     }
   };
 }
