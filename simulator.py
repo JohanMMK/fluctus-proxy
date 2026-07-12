@@ -1,7 +1,69 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.7.1 (3-sturingen — 'geen arbitrage'-modus voor variant 1)
+# Versie:        v1.8.6 (maandpiek op volle gerealiseerde piek bij overschrijding)
+# Wijziging v1.8.6 vs v1.8.5: de MAANDPIEK (capaciteitstarief) wordt op de
+#   VOLLEDIGE gerealiseerde piek gerekend (niet gecapt op contract) → een
+#   overschrijding tilt de maandpiek mee omhoog. Toegangsvermogen + beschikbaar
+#   vermogen blijven op het GECONTRACTEERDE niveau (sunk); een klant die NIET
+#   verhoogt betaalt de overschrijdingspenalty (geen dubbeltelling met het
+#   toegangsvermogen-tarief). Verhoogt de klant wél (verhogen-opstelling), dan is
+#   het contract = het verhoogde niveau → die term draagt dan de verhogingskost
+#   (verhoging × toegangsvermogen + maandpiek). Onder contract blijft alles sunk.
+# Versie:        v1.8.5 (variant 1 ongestuurd = mag boven toegangsvermogen)
+# Wijziging v1.8.5 vs v1.8.4: variant 1 (geen sturing) laadt de EV ONMIDDELLIJK
+#   en ongetemperd door het toegangsvermogen, met batterij idle en zuiver
+#   passieve dispatch → de totale afname mag BOVEN het toegangsvermogen (de
+#   overschrijding wordt geregistreerd en gefactureerd). Variant 2 & 3 houden de
+#   totale afname (verbruik + EV + batterij) ONDER het toegangsvermogen. Zo toont
+#   de vergelijking de echte meerwaarde van sturing: binnen contract blijven i.p.v.
+#   overschrijden/verhogen.
+# Versie:        v1.8.4 (harde piekgrens: geen maandpiek-inflatie door sturing)
+# Wijziging v1.8.4 vs v1.8.3: grid_in mag in de normale modus nooit boven de
+#   NATUURLIJKE LASTPIEK (max(verbruik − PV) over de periode, begrensd op
+#   contract). Zo blaast de sturing de (zekere) maandpiek niet op om (onzekere)
+#   spot-arbitrage of onbalans te oogsten — waarde komt enkel uit wat ONDER de
+#   bestaande lastpiek past; piekshaving eronder blijft toegelaten en beloond.
+#   Toegepast in lp_dispatch_day, lp_dispatch_month_bsp (normale modus) en
+#   lp_dispatch_day_stacked. Feasibility-modus behoudt big-M (last moet bediend).
+# Versie:        v1.8.3 (LS/MS-verfijning capaciteitskost)
+# Wijziging v1.8.3 vs v1.8.2: onderscheid gecontracteerde vs gerealiseerde
+#   capaciteitskost. TOEGANGSVERMOGEN + BESCHIKBAAR VERMOGEN (MS-contracttermen;
+#   op LS = 0) blijven SUNK op het gecontracteerde toegangsvermogen — de MS-
+#   besparing van níet-verhogen komt via de twee-opstellingen-vergelijking. De
+#   MAANDPIEK (capaciteitstarief, LS én MS) staat terug op de GEREALISEERDE
+#   maandpiek (gem. van 12 maandpieken, ondergrens 2,5 kW), zodat piekshaving door
+#   batterij/sturing z'n echte besparing toont (LS BatteryActive/SolarActive). De
+#   LP straft weer de reële maandpiek, maar enkel met de realized-gefactureerde
+#   termen (maandpiek B + transport-maandpiek D); toegangsvermogen/beschikbaar
+#   zitten niet meer in de piekprikkel (sunk) → kop-ruimte tot contract vrij voor
+#   arbitrage. Overschrijding (piek boven contract) blijft aan het hogere tarief.
+# Versie:        v1.8.2 (capaciteit = gecontracteerd toegangsvermogen, sunk)
+# Wijziging v1.8.2 vs v1.8.1: netkost op toegangsvermogen wordt aangerekend op
+#   het GECONTRACTEERDE toegangsvermogen (aansluiting.max_afname_kw / factuur),
+#   niet op de gerealiseerde piek. Die capaciteit is 'sunk': de sturing mag de
+#   reeds-betaalde kop-ruimte volluit benutten (variant 2 & 3) zonder extra
+#   netkost. Enkel piek BOVEN contract = overschrijding. BSP-LP straft nog enkel
+#   piek boven contract (peak_over). Injectie: geen capaciteitskost (volluit).
+#   Zonder contract-getal → fallback op gerealiseerde jaarpiek (echte EAN-
+#   profielen leveren toegangsvermogen = hoogste maandpiek/12m aan).
+# Versie:        v1.8.1 (laadpleinen + feasibility-first BSP-terugval)
+# Wijziging v1.8.1 vs v1.8: PRIORITEIT haalbaarheid (Johan). Het maand-BSP-LP
+#   valt bij infeasibiliteit (bv. krappe aansluiting + laadplein waar de batterij
+#   de laadpiek energetisch niet kan dragen) NIET meer terug op een verloren maand
+#   (grid_in/out=0 → €0 = onzin). Nieuw niveau 3 = HAALBAAR dispatch met gesoftende
+#   fysieke aansluitings-caps (big-M + zware penalty): de last wordt altijd bediend,
+#   batterij/shift maximaal ingezet, eventuele cap-overschrijding komt via
+#   over_afn_hard/over_inj_hard als waarschuwing naar boven. Niveau 4 = noodval.
+#   Volgorde: eerst voldoen (bestaand verbruik + laden) → modus 2 → modus 3.
+# Wijziging v1.8 vs v1.7.1: nieuwe input `laadpleinen` (lijst). Per laadplein
+#   (1 voertuigtype: aantal × km/jaar × kWh/km) wordt een flexibele EV-laadlast
+#   opgebouwd binnen een venster (start-eind) op 5/6/7 dagen/week, begrensd door de
+#   laadpunt-capaciteit. Sturing volgt de 3 varianten (onmiddellijk / shift op
+#   spot+PV / shift op onbalans). Bestaande laadpleinen worden uit het basisverbruik
+#   geschaald en als stuurbare last toegevoegd. Output: blok 'laadplein'. Zonder
+#   `laadpleinen` is het gedrag identiek aan v1.7.1.
+# Versie-basis:  v1.7.1 (3-sturingen — 'geen arbitrage'-modus voor variant 1)
 # Wijziging v1.7.1 vs v1.7: nieuwe input-vlag `geen_arbitrage` (default False).
 #   Wanneer True: de batterij mag zelfconsumptie + piekshaving doen maar GEEN
 #   spot/IMB-arbitrage. Implementatie: vlakke dispatch-prijs (spot_forecast =
@@ -441,6 +503,212 @@ def build_pv_profile(
 
 
 # =============================================================================
+# LAADPLEINEN — flexibele EV-laadvraag (v1.8)
+# =============================================================================
+# Model (Johan, 12/07/2026):
+#   - Elk laadplein = 1 voertuigtype: aantal wagens × km/jaar × kWh/km = jaarenergie.
+#   - Sessies binnen een venster (start-eind uur) op 5/6/7 dagen/week
+#     (5=weekdagen, 6=+zaterdag, 7=+zondag). Dagenergie = jaarenergie / (dagen/week×52),
+#     te leveren binnen het venster op elke laaddag.
+#   - Vermogenscap = som laadpunten (AC22=22, DC160=160, DC300=300 kW).
+#   - Sturing = 3 varianten: 'onmiddellijk' (variant 1, dom laden vanaf vensterstart),
+#     'shift_spot' (variant 2: eerst PV-zelfconsumptie, dan goedkoopste spot-uren),
+#     'shift_onbalans' (variant 3: idem maar prijs = min(spot, onbalans) → extra laden
+#     bij zeer lage/negatieve onbalansprijs).
+#   - Bestaand laadplein: energie zit al in het factuur-jaarverbruik → we schalen die
+#     eruit en voegen het als een gewoon (stuurbaar) laadplein toe.
+
+_LAADPUNT_KW = {'AC22': 22.0, 'DC160': 160.0, 'DC300': 300.0}
+
+
+def _is_laaddag(dt, dpw: int) -> bool:
+    wd = dt.weekday()  # ma=0 .. zo=6
+    if dpw >= 7:
+        return True
+    if dpw == 6:
+        return wd <= 5   # ma-za
+    return wd <= 4       # ma-vr
+
+
+def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
+    """Normaliseer de laadpleinen + bereken per plein cap_kw, dagenergie en de
+    energie over de sim-periode (via het aantal laaddagen in de periode)."""
+    pleinen_in = inp.get('laadpleinen') or []
+    out = []
+    tot_cap_kw = 0.0
+    bestaand_periode_kwh = 0.0
+    nieuw_periode_kwh = 0.0
+    # Laaddagen per dagen/week-instelling tellen we één keer.
+    datums = {}
+    for ts in sim_timestamps:
+        datums.setdefault(ts.date(), ts)
+    def _n_laaddagen(dpw):
+        return sum(1 for d, ts in datums.items() if _is_laaddag(ts, dpw))
+
+    for p in pleinen_in:
+        aantal = float(p.get('aantal', 0) or 0)
+        kmj    = float(p.get('km_per_jaar', 0) or 0)
+        kwh_km = float(p.get('kwh_per_km', 0) or 0)
+        jaar_kwh = aantal * kmj * kwh_km
+        dpw = int(p.get('dagen_per_week', 5) or 5)
+        if dpw not in (5, 6, 7):
+            dpw = 5
+        v_start = float(p.get('venster_start', 8) or 0)
+        v_eind  = float(p.get('venster_eind', 18) or 24)
+        if v_eind <= v_start:
+            v_eind = 24.0  # overnacht-venster nog niet ondersteund → hele dag
+        cap = 0.0
+        for lp in (p.get('laadpunten') or []):
+            cap += float(lp.get('aantal', 0) or 0) * _LAADPUNT_KW.get(lp.get('type'), 0.0)
+        if p.get('cap_kw'):
+            cap = float(p['cap_kw'])
+        laaddagen_jaar = dpw * 52
+        dag_kwh = jaar_kwh / laaddagen_jaar if laaddagen_jaar > 0 else 0.0
+        # Als geen laadpunten opgegeven: default cap zodat de dagenergie in het
+        # venster past (spreiding), zodat de sim niet vastloopt.
+        venster_uren = max(0.25, v_eind - v_start)
+        if cap <= 0 and dag_kwh > 0:
+            cap = dag_kwh / venster_uren
+        op_dagen = _n_laaddagen(dpw)
+        periode_kwh = dag_kwh * op_dagen
+        rec = {
+            'naam': p.get('naam', 'laadplein'), 'aantal': aantal,
+            'jaar_kwh': jaar_kwh, 'dag_kwh': dag_kwh, 'cap_kw': cap,
+            'v_start': v_start, 'v_eind': v_eind, 'dpw': dpw,
+            'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
+        }
+        out.append(rec)
+        tot_cap_kw += cap
+        if rec['bestaand']:
+            bestaand_periode_kwh += periode_kwh
+        else:
+            nieuw_periode_kwh += periode_kwh
+    return {
+        'pleinen': out, 'tot_cap_kw': tot_cap_kw,
+        'bestaand_periode_mwh': bestaand_periode_kwh / 1000.0,
+        'nieuw_periode_mwh': nieuw_periode_kwh / 1000.0,
+        'totaal_periode_mwh': (bestaand_periode_kwh + nieuw_periode_kwh) / 1000.0,
+    }
+
+
+def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
+                  pv_kw: list, base_cons_kw: list, modus: str,
+                  connection_kw: float = 1e12, battery_kw: float = 0.0):
+    """Bouw het EV-laadprofiel (kW/kwartier) voor alle laadpleinen samen, CONNECTION-AWARE:
+    per kwartier laden we max = min(laadpunt-cap, vrije ruimte onder het toegangsvermogen
+    (+ batterij-buffer)). We zetten dus nooit 'ineens alle vermogen' aan.
+    Returnt (ev_load, tekort_kwh): tekort = dagenergie die NIET geladen raakte binnen het
+    venster onder de aansluiting (drijft de dimensionering van verhoging/batterij).
+    Modi: 'onmiddellijk' (variant 1, chronologisch vullen), 'shift_spot' (PV-zelfconsumptie
+    dan goedkoopste spot), 'shift_onbalans' (idem maar prijs = min(spot, onbalans))."""
+    N = len(sim_timestamps)
+    ev = [0.0] * N
+    dt_h = 0.25
+    tekort_kwh = 0.0
+    per_dag = {}
+    for i, ts in enumerate(sim_timestamps):
+        per_dag.setdefault(ts.date(), []).append(i)
+
+    def _headroom_kw(i):
+        # Vrije ruimte onder de aansluiting (+ batterijbuffer), na wat al toegewezen is.
+        return max(0.0, connection_kw + battery_kw - base_cons_kw[i] - ev[i])
+
+    for rec in lp_prep['pleinen']:
+        if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
+            continue
+        cap, vs, ve, dpw = rec['cap_kw'], rec['v_start'], rec['v_eind'], rec['dpw']
+        for dag, idxs in per_dag.items():
+            if not _is_laaddag(sim_timestamps[idxs[0]], dpw):
+                continue
+            venster = [i for i in idxs
+                       if vs <= (sim_timestamps[i].hour + sim_timestamps[i].minute / 60.0) < ve]
+            if not venster:
+                continue
+            if modus == 'onmiddellijk':
+                volgorde = list(venster)  # chronologisch
+            else:
+                surplus = dict((i, max(0.0, pv_kw[i] - base_cons_kw[i])) for i in venster)
+                def _prijs(j):
+                    return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
+                # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
+                volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
+            resterend = rec['dag_kwh']
+            for i in volgorde:
+                if resterend <= 1e-9:
+                    break
+                beschikbaar_kw = min(cap, _headroom_kw(i))
+                take = min(beschikbaar_kw * dt_h, resterend)
+                if take > 0:
+                    ev[i] += take / dt_h
+                    resterend -= take
+            if resterend > 1e-6:
+                tekort_kwh += resterend  # paste niet onder de aansluiting in dit venster
+    return ev, tekort_kwh
+
+
+def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
+                          pv_kw: list, base_cons_kw: list, toegangsvermogen: float) -> dict:
+    """Capaciteits-check + dimensionering (v1.8):
+      - Past de EV-laadvraag binnen het venster onder het huidige toegangsvermogen?
+      - Zo niet: (opstelling 1) minimale verhoging van het toegangsvermogen om alle energie
+        er tijdens de sessie door te krijgen; (opstelling 2) minimale batterij (kW/kWh) om
+        binnen het huidige toegangsvermogen te blijven."""
+    leeg = {'voldoende': True, 'tekort_mwh': 0.0,
+            'huidig_toegangsvermogen_kw': round(toegangsvermogen, 1),
+            'benodigd_toegangsvermogen_kw': round(toegangsvermogen, 1), 'verhoging_kw': 0.0,
+            'advies_batterij_kw': 0.0, 'advies_batterij_kwh': 0.0}
+    if not lp_prep['pleinen'] or lp_prep['totaal_periode_mwh'] <= 0:
+        return leeg
+
+    def _tekort(P, batt):
+        _, t = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
+                             'onmiddellijk', connection_kw=P, battery_kw=batt)
+        return t
+
+    short0 = _tekort(toegangsvermogen, 0.0)
+    if short0 <= 1e-6:
+        return leeg
+
+    _bovengrens = toegangsvermogen + lp_prep['tot_cap_kw'] + (max(base_cons_kw) if base_cons_kw else 0) + 1.0
+    # Opstelling 1 — minimale verhoging toegangsvermogen (geen batterij).
+    lo, hi = toegangsvermogen, _bovengrens
+    for _ in range(28):
+        mid = (lo + hi) / 2.0
+        if _tekort(mid, 0.0) <= 1e-6:
+            hi = mid
+        else:
+            lo = mid
+    verhoogd_P = hi
+    # Opstelling 2 — minimale batterij-kW bij het huidige toegangsvermogen.
+    lo, hi = 0.0, _bovengrens
+    for _ in range(28):
+        mid = (lo + hi) / 2.0
+        if _tekort(toegangsvermogen, mid) <= 1e-6:
+            hi = mid
+        else:
+            lo = mid
+    advies_kw = hi
+    # Batterij-kWh = energie op de zwaarste dag boven het toegangsvermogen (met DoD-marge).
+    evb, _ = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
+                           'onmiddellijk', connection_kw=toegangsvermogen, battery_kw=advies_kw)
+    per_dag = {}
+    for i, ts in enumerate(sim_timestamps):
+        per_dag.setdefault(ts.date(), []).append(i)
+    max_dag_kwh = 0.0
+    for dag, idxs in per_dag.items():
+        e = sum(max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen) * 0.25 for i in idxs)
+        max_dag_kwh = max(max_dag_kwh, e)
+    return {
+        'voldoende': False, 'tekort_mwh': round(short0 / 1000.0, 3),
+        'huidig_toegangsvermogen_kw': round(toegangsvermogen, 1),
+        'benodigd_toegangsvermogen_kw': round(verhoogd_P, 1),
+        'verhoging_kw': round(verhoogd_P - toegangsvermogen, 1),
+        'advies_batterij_kw': round(advies_kw, 1),
+        'advies_batterij_kwh': round(max_dag_kwh / 0.90, 1),
+    }
+
+
+# =============================================================================
 # LEVERINGSCONTRACT — STAFFEL HELPER (v1.1)
 # =============================================================================
 
@@ -501,6 +769,32 @@ def resolve_contract_pricing(contract: dict, jaarverbruik_mwh: float) -> dict:
 # =============================================================================
 # LP-DISPATCH PER DAG
 # =============================================================================
+
+def _natuurlijke_lastpiek_kw(consumption_kw: list, pv_kw: list) -> float:
+    """v1.8.4: piek van de NATUURLIJKE afname (verbruik − PV, ondergrens 0) over
+    de periode. De batterij/sturing mag grid_in nooit boven deze piek duwen: zo
+    loopt de (zekere) maandpiek niet op om (onzekere) arbitrage/onbalans te
+    oogsten. Piekshaving ONDER deze grens blijft toegelaten (en beloond)."""
+    H = len(consumption_kw)
+    if H == 0:
+        return 0.0
+    piek = 0.0
+    for t in range(H):
+        pv = pv_kw[t] if pv_kw and t < len(pv_kw) else 0.0
+        netto = consumption_kw[t] - pv
+        if netto > piek:
+            piek = netto
+    return max(0.0, piek)
+
+
+def _gin_cap_normaal(consumption_kw: list, pv_kw: list, max_afname_hard: float) -> float:
+    """grid_in-bovengrens in normale modus = min(contract, natuurlijke lastpiek).
+    Bij verwaarloosbare last (< 0,5 kW) niet begrenzen (val terug op contract)."""
+    p_nat = _natuurlijke_lastpiek_kw(consumption_kw, pv_kw)
+    if p_nat <= 0.5:
+        return max_afname_hard
+    return min(max_afname_hard, math.ceil(p_nat))
+
 
 def lp_dispatch_day(
     consumption_kw: list,         # 96 kwartieren
@@ -575,9 +869,13 @@ def lp_dispatch_day(
     # LP setup
     prob = pulp.LpProblem('battery_dispatch', pulp.LpMinimize)
 
+    # v1.8.4: grid_in nooit boven de natuurlijke lastpiek (geen piek-inflatie
+    # door arbitrage). Piekshaving eronder blijft mogelijk.
+    _gin_cap = _gin_cap_normaal(consumption_kw, pv_kw, max_afname_hard)
+
     p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
     p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
-    grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
+    grid_in = [pulp.LpVariable(f'gin_{t}', 0, _gin_cap) for t in range(H)]
     grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
     soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
     # v1.6: alleen 'zacht' overschrijdings-tracking. De hard cap zit nu in de
@@ -1036,18 +1334,21 @@ def lp_dispatch_month_bsp(
 
     Retry-ladder bij niet-Optimal:
       Niveau 0 (multiplier 1.0)  → Niveau 1 (×10) → Niveau 2 (geen budget)
-      → Niveau 3 (maand verloren: grid_in/out = 0 voor alle H kwartieren,
-         SoC blijft constant op soc_start_kwh).
+      → Niveau 3 (v1.8 PRIORITEIT haalbaarheid: HAALBAAR dispatch met gesoftende
+         fysieke aansluitings-caps + zware penalty; de last wordt ALTIJD bediend,
+         eventuele overschrijding staat in over_afn_hard/over_inj_hard)
+      → Niveau 4 (noodval, zou niet mogen: maand verloren, grid_in/out = 0).
 
     Returns dict:
       - p_charge[H], p_discharge[H], grid_in[H], grid_out[H], soc[H+1]
-      - over_afn_zacht[H], over_inj_zacht[H], over_afn_hard[H]=0, over_inj_hard[H]=0
+      - over_afn_zacht[H], over_inj_zacht[H]
+      - over_afn_hard[H], over_inj_hard[H] (> 0 enkel in feasibility-modus niveau 3)
       - nom_dam_kw[H] (= consumption - pv, op forecast),
         nom_eff_afn_kw[H], nom_eff_inj_kw[H], dev_kw[H]
       - pv_curtailed_kw[H]
       - nom_revenue_eur (float)
-      - lp_status ('Optimal'/'retry1_optimal'/'retry2_optimal'/'verloren')
-      - retry_level (0/1/2/3)
+      - lp_status ('Optimal'/'retry1_optimal'/'retry2_optimal'/'feasibility'/'verloren')
+      - retry_level (0/1/2/3/4)
       - monthly_peak_kw (float) — gerealiseerde maandpiek-afname uit LP
     """
     H = len(consumption_kw)
@@ -1095,14 +1396,16 @@ def lp_dispatch_month_bsp(
     #   - Groep D beschikbaar vermogen: toegangsvermogen × tar_tr_beschikb_D
     #       Idem benadering uniform-spreid: per maand × /12.
     _tar_maandpiek_B    = (netbeheer_tarieven or {}).get('maandpiek_eur_kw_jaar', 0.0)
-    _tar_jaarpiek_B     = (netbeheer_tarieven or {}).get('toegangsvermogen_eur_kw_jaar', 0.0)
     _tar_tr_maandpiek_D = (netbeheer_tarieven or {}).get('transport_maandpiek_eur_kw_mnd', 0.0)
-    _tar_tr_beschikb_D  = (netbeheer_tarieven or {}).get('transport_beschikbaar_eur_kva_jaar', 0.0)
+    # v1.8.3: enkel de op GEREALISEERDE piek gefactureerde capaciteitstermen
+    # (maandpiek B + transport-maandpiek D) sturen de piekshaving-prikkel.
+    # Toegangsvermogen (B) en beschikbaar vermogen (D) zijn nu SUNK (op contract,
+    # zie bereken_jaarfactuur v1.8.3) → géén marginale piekkost meer, dus NIET
+    # meer in c_per_maand_kw. Zo shaaft de LP de piek enkel waar dat écht bespaart
+    # en gebruikt ze de reeds-betaalde kop-ruimte (tot contract) vrij voor arbitrage.
     c_per_maand_kw = (
         _tar_maandpiek_B / 12.0
         + _tar_tr_maandpiek_D
-        + _tar_jaarpiek_B / 12.0
-        + _tar_tr_beschikb_D / 12.0
     )
 
     jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
@@ -1132,27 +1435,53 @@ def lp_dispatch_month_bsp(
         vol_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
         daily_paper_budget_mwh.append(paper_capture_rate * vol_mwh)
 
-    def _build_and_solve_month(spec_budget_multiplier: float, label: str):
+    def _build_and_solve_month(spec_budget_multiplier: float, label: str,
+                               feasibility_only: bool = False):
         """
         v1.7 retry-helper: bouwt en solveert het maand-niveau BSP-LP.
         multiplier=1.0  → normale spec_budget (niveau 0)
         multiplier=10.0 → relaxed spec_budget (niveau 1)
         multiplier=-1   → spec_budget volledig verwijderd (niveau 2)
+
+        v1.8 NIEUW — feasibility_only (niveau 3):
+          Prioriteit Johan: EERST voldoen aan bestaand verbruik + laden, DAN
+          optimaliseren (modus 2), DAN onbalans (modus 3). Als het BSP-LP zelfs
+          zonder spec-budget infeasible blijft (bv. krappe aansluiting + laadplein
+          waar de batterij de laadpiek energetisch niet kan dragen), lossen we
+          NIET meer op met een verloren maand (grid_in/out=0 → €0, onzin). We
+          softenen de FYSIEKE aansluitingslimieten (grid_in/out) met zware
+          penalty, zodat het LP ALTIJD een haalbaar dispatch vindt dat de last
+          bedient. Overschrijding wordt geregistreerd als over_afn_hard/
+          over_inj_hard en gaat als waarschuwing naar de gebruiker.
         """
         prob = pulp.LpProblem(f'battery_dispatch_month_bsp_{label}', pulp.LpMinimize)
 
+        # v1.8: in feasibility-modus zijn de fysieke caps zacht (big-M bound +
+        # penalty), zodat de last altijd bediend kan worden.
+        _BIG = 1e9
+        _PEN_HARD = 1.0e6      # €/kW zware penalty op overschrijding fysieke cap
+        # v1.8.4: normale modus → grid_in ≤ min(contract, natuurlijke lastpiek),
+        # zodat de sturing de maandpiek niet opblaast om waarde te oogsten.
+        # Feasibility-modus → big-M (last moet bediend, overschrijding gepenaliseerd).
+        _gin_ub = _BIG if feasibility_only else _gin_cap_normaal(consumption_kw, pv_kw, max_afname_hard)
+        _gout_ub = _BIG if feasibility_only else max_injectie_hard
+
         p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
         p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
-        grid_in = [pulp.LpVariable(f'gin_{t}', 0, max_afname_hard) for t in range(H)]
-        grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+        grid_in = [pulp.LpVariable(f'gin_{t}', 0, _gin_ub) for t in range(H)]
+        grid_out = [pulp.LpVariable(f'gout_{t}', 0, _gout_ub) for t in range(H)]
         soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
         over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
         over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+        # v1.8: overschrijding van de FYSIEKE aansluiting (enkel actief/gepenaliseerd
+        # in feasibility-modus; anders houdt de harde bound ze op 0).
+        over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
+        over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
 
         # v1.7 NIEUW: monthly_peak — één unieke variabele over de hele maand,
         # bound door grid_in[t] voor alle t. LP minimiseert (cost term in objective),
         # dus zal automatisch = max(grid_in[t]) worden in optimum.
-        monthly_peak = pulp.LpVariable('monthly_peak', 0, max_afname_hard)
+        monthly_peak = pulp.LpVariable('monthly_peak', 0, _gin_ub)
 
         if pv_curtailment_allowed:
             pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(pv_kw[t], 0)) for t in range(H)]
@@ -1164,11 +1493,11 @@ def lp_dispatch_month_bsp(
         nom_inj = []
         for t in range(H):
             if forecast_afn[t] > 0:
-                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, max_afname_hard))
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, _gin_ub))
                 nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))
             else:
                 nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))
-                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, max_injectie_hard))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, _gout_ub))
 
         spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
         spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
@@ -1183,6 +1512,9 @@ def lp_dispatch_month_bsp(
             prob += monthly_peak >= grid_in[t]  # v1.7 monthly_peak constraint
             prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
             prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+            # v1.8: registreer fysieke-cap-overschrijding (enkel > 0 in feasibility-modus)
+            prob += over_afn_hard[t] >= grid_in[t] - max_afname_hard
+            prob += over_inj_hard[t] >= grid_out[t] - max_injectie_hard
             prob += p_ch[t] + p_dis[t] <= kw_batt
             prob += (nom_afn[t] - nom_inj[t]) - (forecast_afn[t] - forecast_inj[t]) == spec_dev_pos[t] - spec_dev_neg[t]
 
@@ -1216,8 +1548,18 @@ def lp_dispatch_month_bsp(
             obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
             obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
             obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+            # v1.8: in feasibility-modus zware penalty op fysieke-cap-overschrijding,
+            # zodat het LP eerst batterij/shift inzet en pas als laatste redmiddel
+            # de aansluiting overschrijdt (haalbaarheid gegarandeerd).
+            if feasibility_only:
+                obj_terms.append(_PEN_HARD * (over_afn_hard[t] + over_inj_hard[t]))
 
-        # v1.7 NIEUW: monthly_peak × c_per_maand_kw (Groep B + D capaciteit-kost)
+        # v1.8.3: piekshaving-prikkel op de GEREALISEERDE maandpiek, met
+        # c_per_maand_kw = enkel de realized-gefactureerde capaciteitstermen
+        # (maandpiek B + transport-maandpiek D). Toegangsvermogen/beschikbaar zijn
+        # sunk (op contract) en zitten niet meer in c_per_maand_kw → de LP gebruikt
+        # de kop-ruimte tot contract vrij voor arbitrage, maar shaaft de piek waar
+        # dat de maandpiek-kost verlaagt.
         obj_terms.append(c_per_maand_kw * monthly_peak)
 
         prob += pulp.lpSum(obj_terms)
@@ -1240,6 +1582,8 @@ def lp_dispatch_month_bsp(
         soc_vals = [pulp.value(v) or 0.0 for v in soc]
         oaz_vals = [pulp.value(v) or 0.0 for v in over_afn_zacht]
         oiz_vals = [pulp.value(v) or 0.0 for v in over_inj_zacht]
+        oah_vals = [pulp.value(v) or 0.0 for v in over_afn_hard]
+        oih_vals = [pulp.value(v) or 0.0 for v in over_inj_hard]
         mp_val = pulp.value(monthly_peak) or 0.0
 
         return status_str, {
@@ -1249,6 +1593,7 @@ def lp_dispatch_month_bsp(
             'nom_afn': nom_afn_vals, 'nom_inj': nom_inj_vals,
             'pv_curt': pv_curt_vals,
             'oaz': oaz_vals, 'oiz': oiz_vals,
+            'oah': oah_vals, 'oih': oih_vals,
             'monthly_peak': mp_val,
         }
 
@@ -1265,21 +1610,37 @@ def lp_dispatch_month_bsp(
             status_str, r = _build_and_solve_month(-1.0, 'n2')
             retry_level = 2
             if status_str != 'Optimal':
+                # v1.8 — PRIORITEIT (Johan): eerst voldoen aan bestaand verbruik +
+                # laden. NIET meer de maand op 0 zetten (dat gaf €0 = onzin bij
+                # krappe aansluiting + laadplein). We solven een HAALBAAR dispatch
+                # met gesoftende fysieke caps: het LP bedient altijd de last en
+                # zet batterij/shift maximaal in; enkel als laatste redmiddel
+                # overschrijdt het de aansluiting (geregistreerd als over_*_hard).
                 log.warning(
-                    f"Maand-BSP-LP niveau 2 nog steeds non-optimal ({status_str}) — maand wordt overgeslagen "
-                    f"(grid_in/out/p_ch/p_dis = 0 voor {H} kwartieren, SoC constant)"
+                    f"Maand-BSP-LP niveau 2 nog steeds non-optimal ({status_str}) — "
+                    f"terugval op HAALBAAR dispatch (feasibility-modus, fysieke caps zacht)"
                 )
+                status_str, r = _build_and_solve_month(-1.0, 'n3', feasibility_only=True)
                 retry_level = 3
-                _zeros = [0.0] * H
-                r = {
-                    'p_ch': list(_zeros), 'p_dis': list(_zeros),
-                    'grid_in': list(_zeros), 'grid_out': list(_zeros),
-                    'soc': [soc_start_kwh] * (H + 1),  # SoC blijft constant op startwaarde
-                    'nom_afn': list(_zeros), 'nom_inj': list(_zeros),
-                    'pv_curt': list(_zeros),
-                    'oaz': list(_zeros), 'oiz': list(_zeros),
-                    'monthly_peak': 0.0,
-                }
+                if status_str != 'Optimal':
+                    # Zou niet mogen gebeuren (big-M maakt het altijd haalbaar).
+                    # Absolute noodval: constante SoC, geen dispatch.
+                    log.error(
+                        f"Maand-BSP-LP feasibility-modus ONVERWACHT non-optimal ({status_str}) — "
+                        f"noodval: maand overgeslagen ({H} kwartieren op 0)"
+                    )
+                    retry_level = 4
+                    _zeros = [0.0] * H
+                    r = {
+                        'p_ch': list(_zeros), 'p_dis': list(_zeros),
+                        'grid_in': list(_zeros), 'grid_out': list(_zeros),
+                        'soc': [soc_start_kwh] * (H + 1),
+                        'nom_afn': list(_zeros), 'nom_inj': list(_zeros),
+                        'pv_curt': list(_zeros),
+                        'oaz': list(_zeros), 'oiz': list(_zeros),
+                        'oah': list(_zeros), 'oih': list(_zeros),
+                        'monthly_peak': 0.0,
+                    }
 
     # Extract uit dict
     p_ch_vals = r['p_ch']
@@ -1292,16 +1653,21 @@ def lp_dispatch_month_bsp(
     pv_curt_vals = r['pv_curt']
     oaz_vals = r['oaz']
     oiz_vals = r['oiz']
+    oah_vals = r.get('oah', [0.0] * H)
+    oih_vals = r.get('oih', [0.0] * H)
     monthly_peak_kw = r['monthly_peak']
 
-    # v1.6 post-solve clip (defensieve clip, identiek aan dag-versie)
+    # v1.6 post-solve clip (defensieve clip, identiek aan dag-versie).
+    # v1.8: NIET clippen in feasibility-modus (retry_level == 3) — daar
+    # OVERSCHRIJDT grid_in bewust de fysieke cap om de last te bedienen;
+    # clippen zou de energiebalans breken. De overschrijding zit in oah/oih.
     _tol = 0.01
-    if grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
+    if retry_level < 3 and grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
         log.warning(
             f"Maand-BSP grid_in bound-violation: max={max(grid_in_vals):.2f} > cap={max_afname_hard:.2f} — clip toegepast"
         )
         grid_in_vals = [min(v, max_afname_hard) for v in grid_in_vals]
-    if grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
+    if retry_level < 3 and grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
         log.warning(
             f"Maand-BSP grid_out bound-violation: max={max(grid_out_vals):.2f} > cap={max_injectie_hard:.2f} — clip toegepast"
         )
@@ -1325,6 +1691,7 @@ def lp_dispatch_month_bsp(
         'Optimal' if retry_level == 0 else
         'retry1_optimal' if retry_level == 1 else
         'retry2_optimal' if retry_level == 2 else
+        'feasibility' if retry_level == 3 else
         'verloren'
     )
 
@@ -1336,9 +1703,9 @@ def lp_dispatch_month_bsp(
         'soc': soc_vals,
         'over_afn_zacht': oaz_vals,
         'over_inj_zacht': oiz_vals,
-        # over_*_hard zijn vervallen in v1.6, leveren 0-arrays voor backwards-compat
-        'over_afn_hard': [0.0] * H,
-        'over_inj_hard': [0.0] * H,
+        # v1.8: over_*_hard = fysieke-cap-overschrijding (> 0 enkel in feasibility-modus)
+        'over_afn_hard': oah_vals,
+        'over_inj_hard': oih_vals,
         # BSP-specifiek
         'nom_dam_kw': list(nom_net),
         'nom_eff_afn_kw': nom_afn_vals,
@@ -1478,9 +1845,20 @@ def bereken_jaarfactuur(
     # jaarpiek berekening bewaren we de winter-piek apart als winterpiek_afname_kw.
     jaarpiek_afname = max(maandpieken_afname) if maandpieken_afname else 0
     jaarpiek_injectie = max(maandpieken_injectie) if maandpieken_injectie else 0
-    # toegangsvermogen blijft als alias bestaan voor backwards-compat in
-    # de output dict — = jaarpiek_afname (= max maandpieken).
-    toegangsvermogen = jaarpiek_afname
+    # v1.8.2: capaciteits-basis voor facturatie = GECONTRACTEERD toegangsvermogen
+    # (komt uit de klantfactuur; = aansluiting.max_afname_kw). Die netkost is
+    # 'sunk': ze staat vast, ongeacht hoe de sturing de reeds-betaalde kop-ruimte
+    # benut. Enkel de gerealiseerde maandpiek BOVEN contract is overschrijding.
+    # Zonder contract-getal (bv. echte EAN-profielen die het niet meegeven):
+    # val terug op de gerealiseerde jaarpiek (= hoogste maandpiek over de periode).
+    _contract_kw = 0.0
+    if aansluiting:
+        _contract_kw = float(aansluiting.get('toegangsvermogen_kw')
+                             or aansluiting.get('max_afname_kw_hard') or 0.0)
+    if _contract_kw and _contract_kw > 0:
+        toegangsvermogen = math.ceil(_contract_kw)   # gecontracteerd (sunk basis)
+    else:
+        toegangsvermogen = jaarpiek_afname           # fallback: gerealiseerd
 
     # Winter-piek (nov-mrt) voor Elia transport-jaarpiek-component (v1.5-semantiek).
     winter_kw = []
@@ -1562,33 +1940,31 @@ def bereken_jaarfactuur(
     tar_databeheer = tarieven.get('databeheer_eur_jaar', 0.0)
     tar_reactief = tarieven.get('reactief_eur_mvarh', 0.0)
 
-    # Maandpiek kost. v1.6: twee-bucket-logica wanneer aansluiting is gegeven
-    # (modelleert Belgisch tarief — wat boven aansluitvermogen valt komt in
-    # overschrijdings-bucket aan ander tarief).
-    if aansluiting and aansluiting.get('max_afname_kw_hard'):
-        # v1.6 twee-bucket
-        cap = math.ceil(aansluiting['max_afname_kw_hard'])
-        maandpieken_binnen = [min(p, cap) for p in maandpieken_afname]
-        maandpieken_over = [max(0, p - cap) for p in maandpieken_afname]
-        gem_binnen = sum(maandpieken_binnen) / 12.0
-        gem_over = sum(maandpieken_over) / 12.0
-        B['maandpiek'] = gem_binnen * tar_maandpiek
-        B['overschrijding_toegangsvermogen'] = gem_over * tar_overschr
-    else:
-        # v1.5-gedrag (backwards-compat): overschrijding = wat boven jaarpiek valt.
-        if maandpieken_afname:
-            gem_maandpiek = sum(maandpieken_afname) / len(maandpieken_afname)
-        else:
-            gem_maandpiek = 0
-        B['maandpiek'] = gem_maandpiek * tar_maandpiek
-        overschr = [max(0, p - toegangsvermogen) for p in maandpieken_afname]
-        if overschr:
-            gem_overschr = sum(overschr) / len(overschr)
-        else:
-            gem_overschr = 0
-        B['overschrijding_toegangsvermogen'] = gem_overschr * tar_overschr
-    # Jaarpiek (toegangsvermogen)
-    B['toegangsvermogen'] = toegangsvermogen * tar_jaarpiek
+    # v1.8.6 — capaciteitskost bij overschrijding (RCA Johan):
+    #   Een overschrijding van het toegangsvermogen draagt TWEE kosten, niet één:
+    #    (1) MAANDPIEK (capaciteitstarief) op de VOLLEDIGE gerealiseerde maandpiek
+    #        (ondergrens 2,5 kW) — NIET gecapt op contract. Piek boven contract
+    #        tilt de maandpiek dus mee omhoog.
+    #    (2) TOEGANGSVERMOGEN op max(contract, gerealiseerde jaarpiek): ≤ contract
+    #        blijft sunk (kop-ruimte gratis); erboven stijgt het naar het
+    #        gerealiseerde niveau (de facto: je zou moeten verhogen).
+    #    (3) OVERSCHRIJDING = extra penalty op het deel boven contract (Fluvius LS
+    #        heeft toegangsvermogen=0 maar overschrijding>0; MS omgekeerd).
+    #   Zo kost een overschrijding van X kW ≈ X × (maandpiek + toegangsvermogen)
+    #   + X × overschrijding — precies de kost die je met verhogen/batterij vermijdt.
+    cap_contract = toegangsvermogen  # = gecontracteerd (of realized-fallback)
+    _mp = lambda p: max(p, 2.5) if p > 0 else 0.0
+    gem_maandpiek = sum(_mp(p) for p in maandpieken_afname) / 12.0     # VOLLE realized
+    maandpieken_over = [max(0, p - cap_contract) for p in maandpieken_afname]
+    gem_over = sum(maandpieken_over) / 12.0
+    B['maandpiek'] = gem_maandpiek * tar_maandpiek                     # volledige gerealiseerde piek
+    B['overschrijding_toegangsvermogen'] = gem_over * tar_overschr     # penalty boven contract
+    # Toegangsvermogen op het GECONTRACTEERDE niveau (sunk). Bij overschrijding
+    # blijft dit op contract — de klant verhoogt niet, maar betaalt de
+    # overschrijdingspenalty (hierboven). Verhoogt de klant wél (verhogen-
+    # opstelling), dan is cap_contract al het verhoogde niveau → dan draagt deze
+    # term correct de verhogingskost (jouw formule: verhoging × toegangsvermogen).
+    B['toegangsvermogen'] = cap_contract * tar_jaarpiek * prorata_factor
     # Proportioneel kWh
     B['proportioneel'] = totaal_afname_mwh * tar_prop
     # Reactief: cosφ=1 in v1 → 0
@@ -1626,15 +2002,15 @@ def bereken_jaarfactuur(
     tar_tr_beschikb = tarieven.get('transport_beschikbaar_eur_kva_jaar', 0.0)
     tar_tr_reactief = tarieven.get('transport_reactief_eur_mvarh', 0.0)
 
-    # Maandpiek transport: som van maandpieken × tarief/maand
-    D['maandpiek_transport'] = sum(maandpieken_afname) * tar_tr_maandpiek
-    # v1.6: Elia transport-jaarpiek gebruikt expliciet WINTER-piek (nov-mrt) —
-    # zelfde semantiek als v1.5 (geen factuur-impact ondanks rename van veld).
+    # v1.8.6: transport-MAANDPIEK op de VOLLEDIGE gerealiseerde maandpiek (stijgt
+    # mee bij overschrijding, net als de distributie-maandpiek).
+    D['maandpiek_transport'] = sum(max(p, 0) for p in maandpieken_afname) * tar_tr_maandpiek
+    # Elia transport-jaarpiek: gerealiseerde WINTER-piek (nov-mrt), vol.
     D['jaarpiek_transport'] = winterpiek_afname * tar_tr_jaarpiek
     D['systeembeheer'] = totaal_afname_mwh * tar_tr_systeem
     D['reserves'] = totaal_afname_mwh * tar_tr_reserves
     D['marktintegratie'] = totaal_afname_mwh * tar_tr_markt
-    D['beschikbaar_vermogen'] = toegangsvermogen * tar_tr_beschikb * prorata_factor
+    D['beschikbaar_vermogen'] = cap_contract * tar_tr_beschikb * prorata_factor
     D['reactief_transport'] = 0.0  # cosφ=1
     D['_subtotaal'] = sum(v for k, v in D.items() if not k.startswith('_'))
 
@@ -1792,12 +2168,15 @@ def lp_dispatch_day_stacked(
     markup   = pricing['markup_dam']
     markdown = pricing['markdown_dam']
 
+    # v1.8.4: grid_in nooit boven de natuurlijke lastpiek (geen piek-inflatie).
+    _gin_cap = _gin_cap_normaal(consumption_kw, pv_kw, max_afname_hard)
+
     def solve_lp(prijs: list, label: str):
         """Generieke LP: minimaliseer energiekost op gegeven prijs."""
         prob = pulp.LpProblem(f'batt_stacked_{label}', pulp.LpMinimize)
         p_ch  = [pulp.LpVariable(f'pch_{t}',  0, kw_batt)         for t in range(H)]
         p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt)         for t in range(H)]
-        gin   = [pulp.LpVariable(f'gin_{t}',  0, max_afname_hard)  for t in range(H)]
+        gin   = [pulp.LpVariable(f'gin_{t}',  0, _gin_cap)        for t in range(H)]
         gout  = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
         soc   = [pulp.LpVariable(f'soc_{t}',  soc_min, soc_max)   for t in range(H+1)]
         oaz   = [pulp.LpVariable(f'oaz_{t}',  0) for t in range(H)]
@@ -1946,6 +2325,20 @@ def run_simulation(inp: dict) -> dict:
     )
     log.info(f"Consumptie: max={max(consumption_kw):.1f} kW, gem={sum(consumption_kw)/N:.1f} kW, totaal={sum(consumption_kw)*0.25/1000:.1f} MWh")
 
+    # ── LAADPLEINEN (v1.8): bestaand EV-verbruik uit het basisprofiel schalen ──
+    # De energie van BESTAANDE laadpleinen zit al in het factuur-jaarverbruik.
+    # We schalen die proportioneel weg zodat de periode-som klopt; alle laadpleinen
+    # (bestaand + nieuw) worden daarna als flexibele EV-last toegevoegd (na marktdata).
+    _lp_prep = _laadplein_prep(inp, sim_timestamps)
+    if _lp_prep['bestaand_periode_mwh'] > 0:
+        _base_mwh = sum(consumption_kw) * 0.25 / 1000.0
+        if _base_mwh > _lp_prep['bestaand_periode_mwh']:
+            _factor = 1.0 - _lp_prep['bestaand_periode_mwh'] / _base_mwh
+            consumption_kw = [c * _factor for c in consumption_kw]
+            log.info(f"Laadpleinen: {_lp_prep['bestaand_periode_mwh']:.2f} MWh bestaand EV-verbruik uit basisprofiel geschaald (factor {_factor:.3f})")
+        else:
+            log.warning(f"Bestaand EV-verbruik ({_lp_prep['bestaand_periode_mwh']:.2f} MWh) >= basisverbruik ({_base_mwh:.2f} MWh) — niet afgetrokken.")
+
     # ── PV PROFIEL + CLIPPING (v1.5) ──────────────────────────────────────────
     # Volgorde:
     #   1. Vormfactor België × kWp  →  bruto potentieel per kwartier (kW)
@@ -2022,6 +2415,52 @@ def run_simulation(inp: dict) -> dict:
         else:
             spot_actual = spot_actual[:N]
             imb_actual = imb_actual[:N]
+
+    # ── LAADPLEINEN (v1.8): flexibele EV-laadlast toevoegen ──────────────────
+    # Modus volgt de 3-sturingen-variant: geen_arbitrage → onmiddellijk (dom laden);
+    # bsp actief → shift op onbalans; anders → shift op spot + PV-zelfconsumptie.
+    _ev_load = [0.0] * N
+    _ev_mwh = 0.0
+    _lp_cap = None
+    _conn_hard = inp['aansluiting'].get('max_afname_kw_hard', 1e12)
+    if _lp_prep['pleinen']:
+        # Capaciteits-check + dimensionering (t.o.v. het HUIDIGE toegangsvermogen, zonder batterij):
+        # past de laadvraag binnen het venster onder de aansluiting? Zo niet → verhoging/batterij-advies.
+        _lp_cap = _laadplein_capaciteit(_lp_prep, sim_timestamps, spot_actual, imb_actual,
+                                        pv_kw, consumption_kw, _conn_hard)
+        if inp.get('geen_arbitrage', False):
+            # v1.8.5: variant 1 = GEEN sturing. EV laadt onmiddellijk en wordt
+            # NIET getemperd door het toegangsvermogen (batterij idle) → de totale
+            # afname mag boven het toegangsvermogen uitkomen. Dit toont de
+            # overschrijding die je zonder sturing zou dragen (referentie).
+            _ev_modus = 'onmiddellijk'
+            _ev_conn = 1e12
+            _batt_kw = 0.0
+        else:
+            # Variant 2 & 3: connection-aware laden — de totale afname (verbruik +
+            # EV + batterij) blijft ONDER het toegangsvermogen (batterij buffert).
+            _ev_modus = 'shift_onbalans' if inp.get('bsp', {}).get('actief', False) else 'shift_spot'
+            _ev_conn = _conn_hard
+            _batt_kw = inp['batterij'].get('kw', 0) or 0
+        _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
+                                             pv_kw, consumption_kw, _ev_modus,
+                                             connection_kw=_ev_conn, battery_kw=_batt_kw)
+        _ev_mwh = sum(_ev_load) * 0.25 / 1000.0
+        consumption_kw = [consumption_kw[i] + _ev_load[i] for i in range(N)]
+        log.info(
+            f"Laadpleinen: EV-last +{_ev_mwh:.2f} MWh (modus={_ev_modus}, piek {max(_ev_load):.0f} kW, "
+            f"cap {_lp_prep['tot_cap_kw']:.0f} kW). Capaciteit: "
+            + ('OK' if _lp_cap['voldoende'] else
+               f"TEKORT — verhoging {_lp_cap['verhoging_kw']:.0f} kW OF batterij "
+               f"{_lp_cap['advies_batterij_kw']:.0f} kW / {_lp_cap['advies_batterij_kwh']:.0f} kWh")
+        )
+        if not _lp_cap['voldoende']:
+            _w = (f"Toegangsvermogen ontoereikend voor de laadvraag: {_lp_cap['tekort_mwh']:.2f} MWh "
+                  f"raakt niet geladen in het venster. Verhoog het toegangsvermogen met "
+                  f"~{_lp_cap['verhoging_kw']:.0f} kW, OF voorzie een batterij van "
+                  f"~{_lp_cap['advies_batterij_kw']:.0f} kW / {_lp_cap['advies_batterij_kwh']:.0f} kWh.")
+            _edge_case_waarschuwing = (_edge_case_waarschuwing + ' ' + _w) if _edge_case_waarschuwing else _w
+            log.warning(_w)
 
     # ---- PV-curtailment (v1.3) ----
     # Strategie: cap PV op eigen verbruik wanneer DAM (spot) onder een ingestelde drempel zakt.
@@ -2139,6 +2578,7 @@ def run_simulation(inp: dict) -> dict:
     lp_optimal_maanden = 0
     lp_retry1_maanden = 0
     lp_retry2_maanden = 0
+    lp_feasibility_maanden = []  # v1.8: maanden opgelost via haalbaar-dispatch (fysieke cap overschreden)
     lp_verloren_maanden = []  # lijst van YYYY-MM strings waar maand overgeslagen werd
     
     if skip_lp:
@@ -2156,8 +2596,12 @@ def run_simulation(inp: dict) -> dict:
             over_afn_hard_all.append(max(0, cons_kw - hard_afn))
             over_inj_zacht_all.append(0.0)
             over_inj_hard_all.append(0.0)
-    elif pv_only:
-        log.info("PV zonder batterij — passieve dispatch (snelle pad)")
+    elif pv_only or geen_arbitrage:
+        # v1.8.5: variant 1 (geen_arbitrage) = GEEN sturing → batterij idle,
+        # zuiver passieve dispatch. grid_in = max(verbruik − PV, 0) mag boven het
+        # toegangsvermogen (overschrijding wordt geregistreerd + gefactureerd),
+        # want zonder sturing wordt er niets afgevlakt.
+        log.info("Passieve dispatch (geen sturing / PV zonder batterij) — batterij idle")
         # PV gaat eerst naar zelfconsumptie, overschot naar net (injectie)
         zacht_afn = inp['aansluiting'].get('max_afname_kw_zacht', float('inf'))
         hard_afn = inp['aansluiting'].get('max_afname_kw_hard', float('inf'))
@@ -2262,8 +2706,14 @@ def run_simulation(inp: dict) -> dict:
                 elif _retry == 2:
                     lp_retry2_maanden += 1
                     lp_retry2_count += _n_dagen_maand
+                elif _retry == 3:
+                    # v1.8 Niveau 3: maand opgelost via HAALBAAR dispatch (de last
+                    # wordt bediend; fysieke aansluiting is overschreden). Maand is
+                    # NIET verloren — de overschrijding komt via over_afn_hard naar
+                    # boven als waarschuwing.
+                    lp_feasibility_maanden.append(_maand_label)
                 else:
-                    # Niveau 3: maand overgeslagen — alle dagen in die maand zijn verloren
+                    # Niveau 4 (noodval): maand overgeslagen — alle dagen verloren
                     lp_verloren_maanden.append(_maand_label)
                     for _d in range(_n_dagen_maand):
                         _idx = i0 + _d * 96
@@ -2364,7 +2814,8 @@ def run_simulation(inp: dict) -> dict:
         f"(optimal={lp_optimal_count}, retry1={lp_retry1_count}, "
         f"retry2={lp_retry2_count}, verloren={len(lp_verloren_dagen)}) "
         f"| maand-niveau (BSP): optimal_m={lp_optimal_maanden}, retry1_m={lp_retry1_maanden}, "
-        f"retry2_m={lp_retry2_maanden}, verloren_m={len(lp_verloren_maanden)}"
+        f"retry2_m={lp_retry2_maanden}, feasibility_m={len(lp_feasibility_maanden)}, "
+        f"verloren_m={len(lp_verloren_maanden)}"
     )
 
     # ---- Werkelijke factuur (met werkelijke spot/imb, niet forecast) ----
@@ -2536,6 +2987,17 @@ def run_simulation(inp: dict) -> dict:
         },
         'kpi': kpi,
         'waarschuwing': _edge_case_waarschuwing,
+        'laadplein': {
+            'aantal_pleinen': len(_lp_prep['pleinen']),
+            'ev_last_mwh': round(_ev_mwh, 3),
+            'bestaand_afgetrokken_mwh': round(_lp_prep['bestaand_periode_mwh'], 3),
+            'nieuw_mwh': round(_lp_prep['nieuw_periode_mwh'], 3),
+            'totaal_laadvermogen_kw': round(_lp_prep['tot_cap_kw'], 1),
+            'ondergrens_batterij_kw': round(_lp_prep['tot_cap_kw'], 1),
+            'piek_ev_kw': round(max(_ev_load) if _ev_load else 0.0, 1),
+            # v1.8: capaciteits-check + dimensionering (opstelling 1 = verhoging, opstelling 2 = batterij).
+            'capaciteit': _lp_cap,
+        },
         'maandstaten': maandstaten,
         'soc_reeks': soc_all[:N],  # cap to N
         'piekoverschrijdingen': {
@@ -2561,11 +3023,15 @@ def run_simulation(inp: dict) -> dict:
             'verloren_dagen': lp_verloren_dagen,
             # v1.7 maand-niveau (alleen gevuld in BSP-modus; anders 0/[])
             'totaal_maanden': (
-                lp_optimal_maanden + lp_retry1_maanden + lp_retry2_maanden + len(lp_verloren_maanden)
+                lp_optimal_maanden + lp_retry1_maanden + lp_retry2_maanden
+                + len(lp_feasibility_maanden) + len(lp_verloren_maanden)
             ),
             'optimal_maanden': lp_optimal_maanden,
             'retry1_maanden': lp_retry1_maanden,
             'retry2_maanden': lp_retry2_maanden,
+            # v1.8: maanden opgelost via haalbaar-dispatch (fysieke aansluiting
+            # bewust overschreden om last te bedienen — prioriteit haalbaarheid)
+            'feasibility_maanden': lp_feasibility_maanden,
             'verloren_maanden': lp_verloren_maanden,
         },
         'data_periode': {

@@ -1,7 +1,17 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.15.3 (bugfix — profiel-naam→bestand normalisatie)
+// Versie:        v15.15.5 (tariefkaart-selectie per netbeheerder + spanning)
+// Wijziging v15.15.5 vs v15.15.4: buildSimInput koos ALTIJD TARIEVEN_LS →
+//   MS-klanten kregen LS-tarieven (toegangsvermogen = 0). Nu selecteert
+//   _kiesTarieven(grd, spanning) de juiste kaart uit data/tarieven.json
+//   ("<zone>|<spanning>"), met GRD_NAAR_ZONE-alias + veilige fallback. Ook het
+//   overschrijdingstarief in aansluiting volgt nu de gekozen kaart.
+//   ⚠ De GRD→zone-alias bevat best-guesses (Enet/Gaselwest/Mechelen/Brabant/IECBW)
+//   die Johan nog moet bevestigen.
+// Versie:        v15.15.4 (laadpleinen doorgeven + profiel-normalisatie + sim-3)
+// Wijziging v15.15.4 vs v15.15.3: buildSimInput geeft ui.laadpleinen door aan
+//   simulator.py v1.8 (flexibele EV-laadvraag). Zonder lijst = inert.
 // Wijziging v15.15.3 vs v15.15.2: profiel-lookup matcht nu op genormaliseerde
 //   naam. Root cause bug 1: de profielenlijst toont nette namen met spaties
 //   ("Boer aardappel", "Opslag / Magazijn") terwijl de bestanden underscores
@@ -241,9 +251,12 @@ function addRange(ranges, grd, dnb) {
 }
 addRange([[8000,8800],[8900,9000]],            'Fluvius West',     'Fluvius West');
 addRange([[8800,8900]],                         'Fluvius Gaselwest','Fluvius Gaselwest');
-addRange([[9000,9700]],                         'Fluvius Enet',     'Fluvius Enet');
+addRange([[9000,10000]],                        'Fluvius Imewo',    'Fluvius Imewo');  // coarse default 9xxx (Gent/Imewo); precieze zones overriden hieronder
 addRange([[2000,3000]],                         'Fluvius Antwerpen','Fluvius Antwerpen');
-addRange([[1500,2000],[3000,3500]],             'Fluvius Brabant',  'Fluvius Brabant');
+// v15.15.5: Vlaams-Brabant splitst in twee tariefzones (postcode-afhankelijk):
+//   1500–2000 = Halle-Vilvoorde-zone · 3000–3500 = Zenne-Dijle-zone (Leuven).
+addRange([[1500,2000]],                         'Fluvius Halle-Vilvoorde', 'Fluvius Brabant');
+addRange([[3000,3500]],                         'Fluvius Leuven',          'Fluvius Brabant');
 addRange([[3500,3900],[3900,4000]],             'Fluvius Limburg',  'Fluvius Limburg');
 addRange([[1000,1300]],                         'Sibelga',          'Sibelga');
 addRange([[1300,1500]],                         'IECBW',            'IECBW');
@@ -251,6 +264,19 @@ addRange([[4000,5000]],                         'RESA',             'RESA');
 addRange([[5000,6000],[6000,7000],[7000,8000]], 'ORES',             'ORES');
 for (const pc of [2800,2801,2811,2812,2820,2830])
   POSTCODE_GRD[String(pc)] = { grd: 'Fluvius Mechelen', dnb: 'Fluvius Mechelen' };
+
+// v15.15.5: Oost-Vlaanderen (9xxx) splitst in DRIE tariefzones — Imewo (Gent,
+// Meetjesland, Waasland-noord), Midden-Vl. (Waasland-kern, Dendermonde, Aalst,
+// Ninove, Zottegem) en West (Vlaamse Ardennen: Oudenaarde, Ronse). Exacte
+// postcode→zone uit Fluvius Open Data 2025. Overridet de coarse 9xxx-default.
+const OVL_9XXX = {
+  'Imewo': ['9000','9030','9031','9032','9040','9041','9042','9050','9051','9052','9060','9070','9080','9090','9160','9180','9185','9230','9240','9260','9270','9290','9340','9520','9521','9800','9810','9820','9830','9831','9840','9850','9860','9880','9881','9900','9910','9920','9921','9930','9931','9932','9940','9950','9960','9961','9968','9970','9971','9980','9981','9982','9988','9990','9991','9992'],
+  'Midden-Vl.': ['9100','9111','9112','9120','9130','9140','9150','9170','9190','9200','9220','9250','9255','9280','9300','9308','9310','9320','9400','9401','9402','9403','9404','9406','9420','9450','9451','9470','9472','9473','9500','9506','9550','9551','9552','9570','9571','9572','9620','9660','9661'],
+  'West': ['9600','9630','9636','9667','9680','9681','9688','9690','9700','9750','9770','9771','9772','9790','9870','9890'],
+};
+for (const [zone, pcs] of Object.entries(OVL_9XXX))
+  for (const pc of pcs)
+    POSTCODE_GRD[pc] = { grd: 'Fluvius ' + zone, dnb: 'Fluvius Oost-Vlaanderen' };
 
 const TARIEVEN_MAP = {};  // wordt gevuld vanuit data/tarieven.json
 const TARIEVEN_LS = {
@@ -444,6 +470,48 @@ if (TARIEVEN_RAW) {
   } else {
     Object.assign(TARIEVEN_MAP, TARIEVEN_RAW);
   }
+}
+
+// v15.15.5: tariefkaart-selectie per netbeheerder + spanning (LS/MS).
+// data/tarieven.json is gekeyd op "<zone>|<spanning>" (bv. "West|MS").
+// De postcode-GRD-namen ("Fluvius Antwerpen/Brabant/Enet/Gaselwest/Mechelen…")
+// matchen niet 1-op-1 met de tariefzones → deze alias-tabel vertaalt ze.
+// ⚠ TE BEVESTIGEN door Johan: de gemarkeerde (?) mappings zijn een best-guess.
+const GRD_NAAR_ZONE = {
+  'Fluvius Antwerpen':       'Antwerpen',
+  'Fluvius Limburg':         'Limburg',
+  'Fluvius West':            'West',
+  'Fluvius Gaselwest':       'West',          // bevestigd (Johan)
+  'Fluvius Mechelen':        'Zenne-Dijle',   // bevestigd (Johan) — 2800/2820/2830…
+  'Fluvius Halle-Vilvoorde': 'Halle-Vilv.',   // Brabant 1500–2000
+  'Fluvius Leuven':          'Zenne-Dijle',   // Brabant 3000–3500
+  'Fluvius Imewo':           'Imewo',         // Oost-Vl. (Gent e.o.) — per postcode
+  'Fluvius Midden-Vl.':      'Midden-Vl.',    // Oost-Vl. (Dendermonde/Aalst) — per postcode
+  'ORES':    'ORES',   'RESA': 'RESA',   'Sibelga': 'Sibelga',
+  'IECBW':   'ORES',   // bevestigd (Johan) — Waals-Brabant
+};
+function _kiesTarieven(grd, spanning) {
+  const sp = (spanning === 'MS' || spanning === 'LS') ? spanning : 'LS';
+  const zone = GRD_NAAR_ZONE[grd] || (grd || '').replace(/^Fluvius\s+/, '');
+  let kaart = TARIEVEN_MAP[`${zone}|${sp}`]
+           || TARIEVEN_MAP[`West|${sp}`]   // fallback: representatieve zone, juiste spanning
+           || TARIEVEN_LS;                 // laatste redmiddel
+  if (!TARIEVEN_MAP[`${zone}|${sp}`]) {
+    console.warn(`[tarieven] geen exacte kaart voor grd="${grd}" (zone="${zone}"), spanning="${sp}" — fallback gebruikt`);
+  }
+  // v15.15.5: de json-kaart heeft losse accijns_schijf*-velden; simulator.py
+  // verwacht 'accijnzen_staffel' = [[grens_mwh, tarief], …]. Bouw die af zodat
+  // de kaart-accijns correct doorstroomt (en /api/regio-tarieven niet crasht).
+  if (kaart && kaart.accijns_schijf1_3mwh !== undefined && !kaart.accijnzen_staffel) {
+    kaart = { ...kaart, accijnzen_staffel: [
+      [3,       kaart.accijns_schijf1_3mwh],
+      [20,      kaart.accijns_schijf2_20mwh],
+      [50,      kaart.accijns_schijf3_50mwh],
+      [1000,    kaart.accijns_schijf4_1000mwh],
+      [9999999, kaart.accijns_schijf5_inf],
+    ] };
+  }
+  return kaart;
 }
 
 // Profielen laden uit data/profielen-lijst.json
@@ -958,8 +1026,7 @@ app.get('/api/gemeenten-lijst', (req, res) => {
 });
 
 app.get('/api/regio-tarieven', (req, res) => {
-  const grdKey = req.query.grd || 'Fluvius West';
-  const t = TARIEVEN_MAP[grdKey] || TARIEVEN_LS;
+  const t = _kiesTarieven(req.query.grd || 'Fluvius West', req.query.spanning || 'LS');
   res.json({ grd:req.query.grd, spanning:req.query.spanning, tarieven:{
     distributie: t.proportioneel_eur_mwh,
     capaciteit:  t.maandpiek_eur_kw_jaar,
@@ -1591,6 +1658,24 @@ function _variantUi(ui, variant) {
   return v;
 }
 
+// v15.15.4: pas de config aan voor één van de twee opstellingen bij ontoereikend
+// toegangsvermogen. 'verhogen' = toegangsvermogen optrekken tot benodigd niveau;
+// 'batterij' = geadviseerde batterij (uit simulator.py capaciteit), aansluiting blijft.
+function _opstellingUi(ui, opstelling, cap) {
+  const v = JSON.parse(JSON.stringify(ui || {}));
+  if (opstelling === 'verhogen') {
+    v.aansluiting_kva = cap.benodigd_toegangsvermogen_kw;
+    v.aansluitingKva = cap.benodigd_toegangsvermogen_kw;
+  } else { // 'batterij'
+    v.batterijId = 'CUSTOM';
+    v.batterijCustom = {
+      naam: 'Advies-batterij', kw: cap.advies_batterij_kw, kwh: cap.advies_batterij_kwh,
+      dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
+    };
+  }
+  return v;
+}
+
 app.post('/api/nominatie-sim-3', async (req, res) => {
   const input = req.body;
   if (!input || typeof input !== 'object')
@@ -1608,50 +1693,58 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
 
   const startTime = Date.now();
   try {
-    // Flex-detectie: zonder batterij ÉN zonder PV is er geen stuurbare asset,
-    // dus onbalans-sturing levert niets reëels op. Variant 3 wordt dan gelijk
-    // aan variant 2 (meerwaarde onbalans = 0). Zonder deze gate toont de sim een
-    // schijn-winst die louter het verschil forfaitair-vs-passthrough is (bij
-    // afwezigheid van flex is de passthrough-onbalans immers 0 in het model).
+    const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+    const _kpi = (v, onbalansNvt) => {
+      const kg = _sub(v.geen), ks = _sub(v.sturing), ko = _sub(v.onbalans);
+      return { kost_geen_excl_btw: kg, kost_sturing_excl_btw: ks, kost_onbalans_excl_btw: ko,
+        meerwaarde_sturing_excl_btw: kg - ks, meerwaarde_onbalans_excl_btw: ks - ko,
+        onbalans_niet_van_toepassing: !!onbalansNvt };
+    };
+    // Flex-detectie (zie ook onbalans-gate): zonder batterij én PV geen stuurbare asset.
     const _heeftPv = Number(input.pv_kwp || input.pvKwp || 0) > 0;
     let _heeftBatt = false;
-    if (input.batterijId === 'CUSTOM') {
-      const _c = input.batterijCustom || {};
-      _heeftBatt = Number(_c.kwh) > 0 && Number(_c.kw) > 0;
-    } else {
-      _heeftBatt = !!(input.batterijId);
-    }
+    if (input.batterijId === 'CUSTOM') { const _c = input.batterijCustom || {}; _heeftBatt = Number(_c.kwh) > 0 && Number(_c.kw) > 0; }
+    else { _heeftBatt = !!(input.batterijId); }
     const heeftFlex = _heeftPv || _heeftBatt;
+    const heeftLaadplein = Array.isArray(input.laadpleinen) && input.laadpleinen.length > 0;
 
-    const keys = ['geen', 'sturing', 'onbalans'];
-    const varianten = {};
-    // Sequentieel: vermijdt geheugenpieken van 3 parallelle LP-processen.
-    for (const k of keys) {
-      if (k === 'onbalans' && !heeftFlex) {
-        // Geen flex → variant 3 = variant 2 (hergebruik, geen extra sim-run).
-        varianten.onbalans = varianten.sturing;
-        continue;
-      }
-      const simInput = buildSimInput(_variantUi(input, k));
-      varianten[k] = await _runSimulatorOnce(simInput);
+    // Probe: één 'geen'-run op de originele config → capaciteits-oordeel (uit simulator.py).
+    const probe = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'geen')));
+    const cap = (probe.laadplein && probe.laadplein.capaciteit) || { voldoende: true };
+
+    // ── Geen laadplein OF aansluiting voldoende → normale 3-sturingen (probe = 'geen') ──
+    if (!heeftLaadplein || cap.voldoende) {
+      const varianten = { geen: probe };
+      varianten.sturing = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing')));
+      varianten.onbalans = heeftFlex
+        ? await _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans')))
+        : varianten.sturing;
+      const kpi_sturing = _kpi(varianten, !heeftFlex);
+      console.log(`[sim-3] enkel — klaar in ${Date.now() - startTime}ms`);
+      return res.json({ ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap,
+        _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.4', heeftFlex } });
     }
-    const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
-    const kg = _sub(varianten.geen), ks = _sub(varianten.sturing), ko = _sub(varianten.onbalans);
-    const kpi_sturing = {
-      kost_geen_excl_btw:      kg,
-      kost_sturing_excl_btw:   ks,
-      kost_onbalans_excl_btw:  ko,
-      meerwaarde_sturing_excl_btw:  kg - ks,   // >0 = besparing door sturing t.o.v. geen sturing
-      meerwaarde_onbalans_excl_btw: ks - ko,   // >0 = extra besparing door onbalans t.o.v. sturing
-      onbalans_niet_van_toepassing: !heeftFlex, // geen flex → onbalans-KPI = 0 (n.v.t.)
-    };
-    console.log(`[sim-3] klaar in ${Date.now() - startTime}ms — geen=${kg.toFixed(0)} sturing=${ks.toFixed(0)} onbalans=${ko.toFixed(0)}${heeftFlex ? '' : ' (geen flex → onbalans n.v.t.)'}`);
-    return res.json({
-      ok: true,
-      varianten,
-      kpi_sturing,
-      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.3', varianten: keys, heeftFlex },
+
+    // ── Aansluiting ontoereikend voor de laadvraag → 2 opstellingen × 3 sturingen ──
+    // Opstelling 1 = toegangsvermogen verhogen; opstelling 2 = geadviseerde batterij.
+    const opstellingen = {};
+    for (const opst of ['verhogen', 'batterij']) {
+      const cfg = _opstellingUi(input, opst, cap);
+      const v = {};
+      v.geen     = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
+      v.sturing  = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+      v.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans')));
+      opstellingen[opst] = { varianten: v, kpi_sturing: _kpi(v, false) };
+    }
+    // Batterij bespaart t.o.v. aansluiting-verhogen, per sturing (op subtotaal_excl_btw).
+    const vergelijking = {};
+    ['geen', 'sturing', 'onbalans'].forEach(s => {
+      vergelijking['besparing_batterij_' + s + '_excl_btw'] =
+        _sub(opstellingen.verhogen.varianten[s]) - _sub(opstellingen.batterij.varianten[s]);
     });
+    console.log(`[sim-3] twee opstellingen — ${Date.now() - startTime}ms (tekort ${cap.tekort_mwh} MWh; verhoging ${cap.verhoging_kw} kW OF batterij ${cap.advies_batterij_kw}kW/${cap.advies_batterij_kwh}kWh)`);
+    return res.json({ ok: true, modus: 'twee_opstellingen', capaciteit: cap, opstellingen, vergelijking,
+      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.4' } });
   } catch (e) {
     console.error('[sim-3] fout:', e.message);
     return res.status(500).json({ error: 'Simulatie-3 gefaald: ' + e.message });
@@ -1824,6 +1917,10 @@ function buildSimInput(ui) {
                         Math.max(1, Math.min(aanslKw, Math.ceil(profielpiekKw * 1.20)));
   console.log(`[sim] profielpiek=${profielpiekKw.toFixed(1)} kW → max_afname_kw_zacht=${zachtAfnameKw} kW (aanslKw=${aanslKw} hard)`);
 
+  // v15.15.5: kies de tariefkaart één keer (grd + spanning) en hergebruik in
+  // netbeheer + aansluiting (overschrijdingstarief).
+  const _kaart = _kiesTarieven(grd, spanning);
+
   return {
     profiel_kwartier: profielKwartier,
     jaarverbruik_mwh: jaarverbruik,
@@ -1852,7 +1949,7 @@ function buildSimInput(ui) {
       // LP een penalty krijgt voor BSP-laden boven natuurlijke profielpiek.
       max_afname_kw_zacht:  zachtAfnameKw,   max_afname_kw_hard:  aanslKw,
       max_injectie_kw_zacht: maxInjectieKw,  max_injectie_kw_hard: maxInjectieKw,
-      tarief_overschrijding_afname_eur_per_kw_jaar: TARIEVEN_LS.overschrijding_toegangsvermogen_eur_kw_jaar,
+      tarief_overschrijding_afname_eur_per_kw_jaar: _kaart.overschrijding_toegangsvermogen_eur_kw_jaar,
       tarief_overschrijding_injectie_eur_per_kw_jaar: 1.0,
     },
     contract: {
@@ -1872,7 +1969,7 @@ function buildSimInput(ui) {
       injectie_toegelaten: true,
       jaarverbruik_mwh: jaarverbruik,
     },
-    netbeheer: { grd, spanning, tarieven: TARIEVEN_LS },
+    netbeheer: { grd, spanning, tarieven: _kaart },
     forecast:  { sigma_da:0, sigma_imb:0, sigma_volume_verbruik_pct:0, sigma_volume_pv_pct:0 },
     markt: {
       // v15.11 sessie 4: gesliceerde arrays die exact mappen op simPeriode.
@@ -1894,6 +1991,9 @@ function buildSimInput(ui) {
     // v15.15.3: 3-sturingen variant 1 — batterij enkel zelfconsumptie +
     // piekshaving, geen arbitrage (simulator.py v1.7.1 leest deze vlag).
     geen_arbitrage: !!ui.geen_arbitrage,
+    // v15.15.4: laadpleinen (flexibele EV-laadvraag). simulator.py v1.8 leest
+    // deze lijst; normalisatie + laadpunt-kW gebeurt daar. Zonder lijst = inert.
+    laadpleinen: Array.isArray(ui.laadpleinen) ? ui.laadpleinen : [],
   };
 }
 
