@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.8.7 (bug-fix: BSP-nominatie begrensd op fysieke aansluiting)
+# Wijziging v1.8.7 vs v1.8.6: KRITIEKE FIX. In de feasibility-terugval kreeg de
+#   DAM-nominatie (nom_afn/nom_inj) de big-M (1e9) mee én werd het spec_budget
+#   verwijderd → de BSP-papierhandel werd onbegrensd en produceerde absurde
+#   facturen (miljarden €) voor sturing 3 (onbalans). Nu: nominatie ALTIJD
+#   begrensd op de fysieke aansluiting (max_afname/injectie_hard), en de
+#   feasibility-solve houdt een ruim spec_budget aan i.p.v. het te verwijderen.
 # Versie:        v1.8.6 (maandpiek op volle gerealiseerde piek bij overschrijding)
 # Wijziging v1.8.6 vs v1.8.5: de MAANDPIEK (capaciteitstarief) wordt op de
 #   VOLLEDIGE gerealiseerde piek gerekend (niet gecapt op contract) → een
@@ -1488,16 +1495,22 @@ def lp_dispatch_month_bsp(
         else:
             pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, 0) for t in range(H)]
 
-        # Nominatie met fysieke richting-constraint per kwartier
+        # Nominatie met fysieke richting-constraint per kwartier.
+        # v1.8.7 (bug-fix): de DAM-nominatie is een papierpositie begrensd door de
+        # FYSIEKE aansluiting — NOOIT de big-M van de feasibility-modus. Anders kon
+        # de BSP-papierhandel in feasibility-modus (spec_budget verwijderd + nom-
+        # bound 1e9) onbegrensd 'winst' genereren → absurde factuur (miljarden).
+        _nom_afn_ub = max_afname_hard
+        _nom_inj_ub = max_injectie_hard
         nom_afn = []
         nom_inj = []
         for t in range(H):
             if forecast_afn[t] > 0:
-                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, _gin_ub))
+                nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, _nom_afn_ub))
                 nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, 0))
             else:
                 nom_afn.append(pulp.LpVariable(f'nafn_{t}', 0, 0))
-                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, _gout_ub))
+                nom_inj.append(pulp.LpVariable(f'ninj_{t}', 0, _nom_inj_ub))
 
         spec_dev_pos = [pulp.LpVariable(f'sd_p_{t}', 0) for t in range(H)]
         spec_dev_neg = [pulp.LpVariable(f'sd_n_{t}', 0) for t in range(H)]
@@ -1620,7 +1633,10 @@ def lp_dispatch_month_bsp(
                     f"Maand-BSP-LP niveau 2 nog steeds non-optimal ({status_str}) — "
                     f"terugval op HAALBAAR dispatch (feasibility-modus, fysieke caps zacht)"
                 )
-                status_str, r = _build_and_solve_month(-1.0, 'n3', feasibility_only=True)
+                # v1.8.7: feasibility-solve houdt een (ruim) spec_budget aan i.p.v.
+                # het volledig te verwijderen — zo blijft de BSP-papierhandel
+                # begrensd, ook wanneer de fysieke caps gesoftend zijn.
+                status_str, r = _build_and_solve_month(10.0, 'n3', feasibility_only=True)
                 retry_level = 3
                 if status_str != 'Optimal':
                     # Zou niet mogen gebeuren (big-M maakt het altijd haalbaar).
