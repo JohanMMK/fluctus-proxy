@@ -1,6 +1,17 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.8.9 (overnacht/wrap-around-laadvensters)
+# Wijziging v1.8.9 vs v1.8.8: laadvensters die middernacht overschrijden (v_eind
+#   <= v_start, bv. 18→8u) worden nu correct ondersteund i.p.v. afgekapt. De
+#   laadsessie loopt van v_start op dag D tot v_eind op dag D+1 (avonddeel +
+#   ochtenddeel). Belangrijk voor depots die 's nachts laden — de nodige batterij
+#   of aansluitingsverhoging valt dan fors kleiner uit.
+# Versie:        v1.8.8 (batterij-dimensionering op slim laden, variant 2)
+# Wijziging v1.8.8 vs v1.8.7: _laadplein_capaciteit dimensioneert de geadviseerde
+#   batterij (kW + kWh) nu op SLIM laden (shift_spot = variant 2) i.p.v. op dom
+#   laden (onmiddellijk). Zo matcht de batterij hoe hij in de standaardsturing
+#   echt draait en vermijden we een dimensioneer-mismatch.
 # Versie:        v1.8.7 (bug-fix: BSP-nominatie begrensd op fysieke aansluiting)
 # Wijziging v1.8.7 vs v1.8.6: KRITIEKE FIX. In de feasibility-terugval kreeg de
 #   DAM-nominatie (nom_afn/nom_inj) de big-M (1e9) mee én werd het spec_budget
@@ -562,8 +573,10 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
             dpw = 5
         v_start = float(p.get('venster_start', 8) or 0)
         v_eind  = float(p.get('venster_eind', 18) or 24)
-        if v_eind <= v_start:
-            v_eind = 24.0  # overnacht-venster nog niet ondersteund → hele dag
+        # v1.8.9: overnacht-/wrap-around-venster (v_eind <= v_start, bv. 18→8u)
+        # wordt nu ondersteund. De sessie loopt van v_start op dag D tot v_eind
+        # op dag D+1. venster_uren telt beide stukken samen.
+        _wrap = v_eind <= v_start
         cap = 0.0
         for lp in (p.get('laadpunten') or []):
             cap += float(lp.get('aantal', 0) or 0) * _LAADPUNT_KW.get(lp.get('type'), 0.0)
@@ -573,7 +586,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
         dag_kwh = jaar_kwh / laaddagen_jaar if laaddagen_jaar > 0 else 0.0
         # Als geen laadpunten opgegeven: default cap zodat de dagenergie in het
         # venster past (spreiding), zodat de sim niet vastloopt.
-        venster_uren = max(0.25, v_eind - v_start)
+        venster_uren = max(0.25, ((24.0 - v_start) + v_eind) if _wrap else (v_eind - v_start))
         if cap <= 0 and dag_kwh > 0:
             cap = dag_kwh / venster_uren
         op_dagen = _n_laaddagen(dpw)
@@ -581,7 +594,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
         rec = {
             'naam': p.get('naam', 'laadplein'), 'aantal': aantal,
             'jaar_kwh': jaar_kwh, 'dag_kwh': dag_kwh, 'cap_kw': cap,
-            'v_start': v_start, 'v_eind': v_eind, 'dpw': dpw,
+            'v_start': v_start, 'v_eind': v_eind, 'wrap': _wrap, 'dpw': dpw,
             'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
         }
         out.append(rec)
@@ -608,6 +621,7 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     venster onder de aansluiting (drijft de dimensionering van verhoging/batterij).
     Modi: 'onmiddellijk' (variant 1, chronologisch vullen), 'shift_spot' (PV-zelfconsumptie
     dan goedkoopste spot), 'shift_onbalans' (idem maar prijs = min(spot, onbalans))."""
+    import datetime as _dt
     N = len(sim_timestamps)
     ev = [0.0] * N
     dt_h = 0.25
@@ -615,6 +629,9 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     per_dag = {}
     for i, ts in enumerate(sim_timestamps):
         per_dag.setdefault(ts.date(), []).append(i)
+
+    def _uur(i):
+        return sim_timestamps[i].hour + sim_timestamps[i].minute / 60.0
 
     def _headroom_kw(i):
         # Vrije ruimte onder de aansluiting (+ batterijbuffer), na wat al toegewezen is.
@@ -624,11 +641,26 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
         if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
             continue
         cap, vs, ve, dpw = rec['cap_kw'], rec['v_start'], rec['v_eind'], rec['dpw']
+        wrap = rec.get('wrap', False)
         for dag, idxs in per_dag.items():
             if not _is_laaddag(sim_timestamps[idxs[0]], dpw):
                 continue
-            venster = [i for i in idxs
-                       if vs <= (sim_timestamps[i].hour + sim_timestamps[i].minute / 60.0) < ve]
+            if not wrap:
+                # Gewoon dagvenster: vs <= uur < ve op dezelfde dag.
+                venster = [i for i in idxs if vs <= _uur(i) < ve]
+            else:
+                # v1.8.9 overnacht/wrap-around: sessie start op dag D vanaf vs en
+                # loopt door tot ve op dag D+1. Avonddeel (dag D, uur >= vs) +
+                # ochtenddeel (dag D+1, uur < ve), chronologisch gesorteerd.
+                _dnext = dag + _dt.timedelta(days=1)
+                if _dnext not in per_dag:
+                    # Incomplete rand-sessie aan het einde van de periode (geen
+                    # ochtend erna) → overslaan, anders drijft die afgekapte sessie
+                    # de dimensionering kunstmatig op.
+                    continue
+                venster = [i for i in idxs if _uur(i) >= vs]
+                venster += [i for i in per_dag[_dnext] if _uur(i) < ve]
+                venster.sort()
             if not venster:
                 continue
             if modus == 'onmiddellijk':
@@ -667,9 +699,15 @@ def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: 
     if not lp_prep['pleinen'] or lp_prep['totaal_periode_mwh'] <= 0:
         return leeg
 
+    # v1.8.8: dimensioneer op SLIM laden (shift_spot = variant 2), i.p.v. op dom
+    # laden. Zo matcht de geadviseerde batterij hoe hij in de standaardsturing
+    # (variant 2) echt draait, en vermijden we een mismatch die anders de
+    # feasibility-terugval uitlokt.
+    _DIM_MODUS = 'shift_spot'
+
     def _tekort(P, batt):
         _, t = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
-                             'onmiddellijk', connection_kw=P, battery_kw=batt)
+                             _DIM_MODUS, connection_kw=P, battery_kw=batt)
         return t
 
     short0 = _tekort(toegangsvermogen, 0.0)
@@ -695,16 +733,21 @@ def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: 
         else:
             lo = mid
     advies_kw = hi
-    # Batterij-kWh = energie op de zwaarste dag boven het toegangsvermogen (met DoD-marge).
+    # Batterij-kWh = zwaarste boven-aansluiting-energie in een ROLLEND 24u-venster
+    # (met DoD-marge). v1.8.9: rollend i.p.v. per kalenderdag, zodat een overnacht-
+    # sessie (avond + ochtend over middernacht) niet gesplitst en onderschat wordt.
     evb, _ = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
-                           'onmiddellijk', connection_kw=toegangsvermogen, battery_kw=advies_kw)
-    per_dag = {}
-    for i, ts in enumerate(sim_timestamps):
-        per_dag.setdefault(ts.date(), []).append(i)
+                           _DIM_MODUS, connection_kw=toegangsvermogen, battery_kw=advies_kw)
+    _boven = [max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen) * 0.25
+              for i in range(len(sim_timestamps))]
+    _W = 96  # 24u = 96 kwartieren
     max_dag_kwh = 0.0
-    for dag, idxs in per_dag.items():
-        e = sum(max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen) * 0.25 for i in idxs)
-        max_dag_kwh = max(max_dag_kwh, e)
+    _run = sum(_boven[:_W])
+    max_dag_kwh = _run
+    for i in range(_W, len(_boven)):
+        _run += _boven[i] - _boven[i - _W]
+        if _run > max_dag_kwh:
+            max_dag_kwh = _run
     return {
         'voldoende': False, 'tekort_mwh': round(short0 / 1000.0, 3),
         'huidig_toegangsvermogen_kw': round(toegangsvermogen, 1),
