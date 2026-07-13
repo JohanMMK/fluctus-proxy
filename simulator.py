@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.8.10 (2-uurs batterij-dimensionering + auto-verhoging aansluiting)
+# Wijziging v1.8.10 vs v1.8.9: (1) batterij gedimensioneerd als STANDAARD 2-uurs
+#   component: kW = max(dagenergie/2, minimaal-vermogen), kWh = 2×kW. (2) Als de
+#   MANUEEL gekozen batterij het laadplein niet aankan (variant 2/3), wordt het
+#   toegangsvermogen automatisch verhoogd tot het haalbaar is i.p.v. dagen te
+#   verliezen; de verhoging staat in output.laadplein.toegangsvermogen_verhoogd_kw.
 # Versie:        v1.8.9 (overnacht/wrap-around-laadvensters)
 # Wijziging v1.8.9 vs v1.8.8: laadvensters die middernacht overschrijden (v_eind
 #   <= v_start, bv. 18→8u) worden nu correct ondersteund i.p.v. afgekapt. De
@@ -732,29 +738,38 @@ def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: 
             hi = mid
         else:
             lo = mid
-    advies_kw = hi
+    _p_min = hi   # minimaal batterijVERMOGEN voor haalbaarheid (piek boven aansluiting)
     # Batterij-kWh = zwaarste boven-aansluiting-energie in een ROLLEND 24u-venster
     # (met DoD-marge). v1.8.9: rollend i.p.v. per kalenderdag, zodat een overnacht-
     # sessie (avond + ochtend over middernacht) niet gesplitst en onderschat wordt.
     evb, _ = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
-                           _DIM_MODUS, connection_kw=toegangsvermogen, battery_kw=advies_kw)
+                           _DIM_MODUS, connection_kw=toegangsvermogen, battery_kw=_p_min)
     _boven = [max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen) * 0.25
               for i in range(len(sim_timestamps))]
     _W = 96  # 24u = 96 kwartieren
-    max_dag_kwh = 0.0
     _run = sum(_boven[:_W])
     max_dag_kwh = _run
     for i in range(_W, len(_boven)):
         _run += _boven[i] - _boven[i - _W]
         if _run > max_dag_kwh:
             max_dag_kwh = _run
+    _e_cap = max_dag_kwh / 0.90   # nodige capaciteit uit dagenergie (1 cyclus, DoD-marge)
+    # v1.8.10 — 2-UURS BATTERIJ (Johan): standaardcomponenten. Capaciteit = dagenergie,
+    # vermogen = capaciteit / 2. Het laadpunt-/haalbaarheids-minimumvermogen (_p_min)
+    # is de vloer: ligt dat hoger dan capaciteit/2, dan groeit de batterij mee
+    # (kWh = 2 × kW) zodat het een geldige 2u-batterij blijft.
+    _bat_kw = max(_e_cap / 2.0, _p_min)
+    _bat_kwh = 2.0 * _bat_kw
     return {
         'voldoende': False, 'tekort_mwh': round(short0 / 1000.0, 3),
         'huidig_toegangsvermogen_kw': round(toegangsvermogen, 1),
         'benodigd_toegangsvermogen_kw': round(verhoogd_P, 1),
         'verhoging_kw': round(verhoogd_P - toegangsvermogen, 1),
-        'advies_batterij_kw': round(advies_kw, 1),
-        'advies_batterij_kwh': round(max_dag_kwh / 0.90, 1),
+        'advies_batterij_kw': round(_bat_kw, 1),
+        'advies_batterij_kwh': round(_bat_kwh, 1),
+        # diagnostiek: energie-gedreven capaciteit + vermogen-vloer apart
+        'dagenergie_boven_aansluiting_kwh': round(_e_cap, 1),
+        'min_vermogen_kw': round(_p_min, 1),
     }
 
 
@@ -2481,6 +2496,7 @@ def run_simulation(inp: dict) -> dict:
     _ev_load = [0.0] * N
     _ev_mwh = 0.0
     _lp_cap = None
+    _conn_verhoogd_kw = 0.0   # v1.8.10: auto-verhoging aansluiting bij te kleine batterij
     _conn_hard = inp['aansluiting'].get('max_afname_kw_hard', 1e12)
     if _lp_prep['pleinen']:
         # Capaciteits-check + dimensionering (t.o.v. het HUIDIGE toegangsvermogen, zonder batterij):
@@ -2504,6 +2520,37 @@ def run_simulation(inp: dict) -> dict:
         _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                              pv_kw, consumption_kw, _ev_modus,
                                              connection_kw=_ev_conn, battery_kw=_batt_kw)
+        # v1.8.10: MANUELE BATTERIJ ONTOEREIKEND (variant 2/3) → verhoog het
+        # toegangsvermogen tot de laadvraag haalbaar wordt, i.p.v. dagen te
+        # verliezen. (Variant 1 laadt ongetemperd op 1e12 → geen tekort, geen raise.)
+        _conn_verhoogd_kw = 0.0
+        if (not inp.get('geen_arbitrage', False)) and _ev_tekort > 1e-6 and _ev_conn < 1e11:
+            _lo = _ev_conn
+            _hi = _ev_conn + _lp_prep['tot_cap_kw'] + (max(consumption_kw) if consumption_kw else 0.0) + 1.0
+            for _ in range(28):
+                _mid = (_lo + _hi) / 2.0
+                _, _tk = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
+                                       pv_kw, consumption_kw, _ev_modus,
+                                       connection_kw=_mid, battery_kw=_batt_kw)
+                if _tk <= 1e-6:
+                    _hi = _mid
+                else:
+                    _lo = _mid
+            _conn_verhoogd_kw = round(_hi - _ev_conn, 1)
+            _ev_conn = _hi
+            _conn_hard = _hi
+            # Downstream (dispatch + factuur) gebruikt de verhoogde aansluiting.
+            inp['aansluiting']['max_afname_kw_hard'] = _hi
+            if inp['aansluiting'].get('max_afname_kw_zacht', 0) < _hi:
+                inp['aansluiting']['max_afname_kw_zacht'] = _hi
+            _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
+                                                 pv_kw, consumption_kw, _ev_modus,
+                                                 connection_kw=_ev_conn, battery_kw=_batt_kw)
+            _w = (f"Manuele batterij ontoereikend voor de laadvraag → toegangsvermogen "
+                  f"verhoogd met ~{_conn_verhoogd_kw:.0f} kW (naar {_hi:.0f} kW) zodat alles "
+                  f"laadt. Overweeg een grotere batterij om die verhoging te vermijden.")
+            _edge_case_waarschuwing = (_edge_case_waarschuwing + ' ' + _w) if _edge_case_waarschuwing else _w
+            log.warning(_w)
         _ev_mwh = sum(_ev_load) * 0.25 / 1000.0
         consumption_kw = [consumption_kw[i] + _ev_load[i] for i in range(N)]
         log.info(
@@ -3054,6 +3101,9 @@ def run_simulation(inp: dict) -> dict:
             'totaal_laadvermogen_kw': round(_lp_prep['tot_cap_kw'], 1),
             'ondergrens_batterij_kw': round(_lp_prep['tot_cap_kw'], 1),
             'piek_ev_kw': round(max(_ev_load) if _ev_load else 0.0, 1),
+            # v1.8.10: automatische aansluitingsverhoging omdat de (manuele) batterij
+            # ontoereikend was (0 = geen verhoging toegepast).
+            'toegangsvermogen_verhoogd_kw': _conn_verhoogd_kw,
             # v1.8: capaciteits-check + dimensionering (opstelling 1 = verhoging, opstelling 2 = batterij).
             'capaciteit': _lp_cap,
         },
