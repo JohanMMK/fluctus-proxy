@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.8.11 (per-kwartier-profielen in output voor financieel rapport)
+# Wijziging v1.8.11 vs v1.8.10: output.profielen met per-kwartier arrays
+#   (vermogen_aansluiting_kw, spot_prijs_eur_mwh, kost_eur_mwh) t.b.v. de heatmaps.
 # Versie:        v1.8.10 (2-uurs batterij-dimensionering + auto-verhoging aansluiting)
 # Wijziging v1.8.10 vs v1.8.9: (1) batterij gedimensioneerd als STANDAARD 2-uurs
 #   component: kW = max(dagenergie/2, minimaal-vermogen), kWh = 2×kW. (2) Als de
@@ -3109,6 +3112,24 @@ def run_simulation(inp: dict) -> dict:
         },
         'maandstaten': maandstaten,
         'soc_reeks': soc_all[:N],  # cap to N
+        # v1.8.11: per-kwartier-arrays voor het financieel rapport (heatmaps).
+        # Compact afgerond. vermogen>0 = afname, <0 = injectie. kost = all-in €/MWh
+        # (afname: spot+markup+belastingen ; injectie: −(spot−markdown), = inkomst).
+        'profielen': (lambda _mk=(inp['contract'].get('markup_eur_mwh',0) or 0),
+                             _md=(inp['contract'].get('markdown_eur_mwh',0) or 0),
+                             _bel=((inp['contract'].get('gsc_eur_mwh',0) or 0)
+                                   +(inp['contract'].get('wkk_eur_mwh',0) or 0)
+                                   +(inp['contract'].get('vergroening_eur_per_mwh',0) or 0)): {
+            'n': N,
+            'van': sim_timestamps[0].isoformat() if N else None,
+            'vermogen_aansluiting_kw': [round(grid_in_all[i] - grid_out_all[i], 1) for i in range(N)],
+            'spot_prijs_eur_mwh': [round(spot_actual[i], 1) for i in range(N)],
+            'kost_eur_mwh': [
+                round((spot_actual[i] + _mk + _bel) if (grid_in_all[i] - grid_out_all[i]) >= 0
+                      else -(spot_actual[i] - _md), 1)
+                for i in range(N)
+            ],
+        })(),
         'piekoverschrijdingen': {
             'aantal_zacht': aantal_overschr_zacht,
             'aantal_hard': aantal_overschr_hard,
