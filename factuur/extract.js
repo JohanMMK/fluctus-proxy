@@ -281,7 +281,7 @@ Geef ALLEEN het JSON object terug, zonder enige andere tekst eromheen.`;
 }
 
 // ─── Anthropic API call ──────────────────────────────────────────────────────
-async function callAnthropic({ apiKey, model, files, timeoutMs = 30000 }) {
+async function callAnthropic({ apiKey, model, files, timeoutMs = 120000 }) {
   const contentBlocks = files.map(f => {
     if (f.mediaType === 'application/pdf') {
       return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: f.base64 } };
