@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.15.6 (SHA-conflict-retry bij scenario-commit → geen 409 meer)
+// Wijziging v15.15.6 vs v15.15.5: _scenariosGithubWrite hertest bij HTTP 409/422
+//   ("is at X but expected Y") met een VERSE blob-sha (_scenariosGithubSha,
+//   cache-buster) en retry't de PUT max 3× met backoff. Loste de intermittente
+//   "GitHub-commit faalde: HTTP 409"-fout op bij snel opeenvolgende scenario-saves.
 // Versie:        v15.15.5 (tariefkaart-selectie per netbeheerder + spanning)
 // Wijziging v15.15.5 vs v15.15.4: buildSimInput koos ALTIJD TARIEVEN_LS →
 //   MS-klanten kregen LS-tarieven (toegangsvermogen = 0). Nu selecteert
@@ -585,17 +590,44 @@ async function _scenariosGithubRead(filepath) {
   return { data: JSON.parse(content), sha };
 }
 
+// v15.15.6: haal ENKEL de huidige blob-sha op (verse read, cache-buster) — voor
+// de conflict-retry in _scenariosGithubWrite. Returnt undefined bij 404 (create).
+async function _scenariosGithubSha(filepath) {
+  const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${filepath}?ref=main&_=${Date.now()}`;
+  const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+  if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+  const r = await fetch(apiUrl, { headers, cache: 'no-store' });
+  if (r.status === 404) return undefined;
+  if (!r.ok) throw new Error(`scenarios sha ${filepath}: HTTP ${r.status}`);
+  const j = await r.json();
+  return j.sha;
+}
+
 async function _scenariosGithubWrite(filepath, data, sha) {
   const url = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${filepath}`;
   const content = Buffer.from(JSON.stringify(data, null, 2)).toString('base64');
   const headers = { 'User-Agent': 'fluctus-proxy', 'Content-Type': 'application/json' };
   if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
-  const body = {
-    message: `auto: scenario ${filepath.replace(SCENARIOS_PATH_PREFIX + '/', '').replace('.json', '')} (${new Date().toISOString().slice(0,10)})`,
-    content,
+  const _put = (useSha) => {
+    const body = {
+      message: `auto: scenario ${filepath.replace(SCENARIOS_PATH_PREFIX + '/', '').replace('.json', '')} (${new Date().toISOString().slice(0,10)})`,
+      content,
+    };
+    if (useSha) body.sha = useSha;
+    return fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
   };
-  if (sha) body.sha = sha;
-  const r = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(body) });
+  // v15.15.6: SHA-conflict-retry. Een 409/422 "is at X but expected Y" betekent dat
+  // de meegegeven sha verouderd is (bv. twee snelle commits op hetzelfde bestand).
+  // We halen dan de VERSE sha op en proberen de PUT opnieuw (max 3×, met backoff).
+  let r = await _put(sha);
+  let poging = 0;
+  while ((r.status === 409 || r.status === 422) && poging < 3) {
+    poging++;
+    let verseSha;
+    try { verseSha = await _scenariosGithubSha(filepath); } catch (_) { /* laat r ongewijzigd */ }
+    await new Promise((res) => setTimeout(res, 300 * poging));
+    r = await _put(verseSha);
+  }
   if (!r.ok) {
     const t = await r.text();
     throw new Error(`scenarios write ${filepath}: HTTP ${r.status} ${t.slice(0,200)}`);
