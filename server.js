@@ -1,6 +1,15 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.15.7 (gecontracteerd toegangsvermogen ≠ fysiek aansluitvermogen)
+// Wijziging v15.15.7 vs v15.15.6: buildSimInput geeft nu aansluiting.toegangsvermogen_kw
+//   door (facturatiebasis Groep B/D, uit de factuur; ui.toegangsvermogen_kw), LOS van
+//   max_afname_kw_hard (fysiek aansluitvermogen = dispatch-cap). Vroeger factureerde de
+//   sim het toegangsvermogen op het fysieke aansluitvermogen → een klant met 100 kVA
+//   aansluiting maar 35 kW gecontracteerd kreeg te hoge netkosten in de 'betere' factuur,
+//   terwijl die t.o.v. de bestaande factuur (zelfde verbruik) gelijk horen te zijn. Bij
+//   de 'verhogen'-opstelling wordt toegangsvermogen_kw mee opgetrokken (nieuwe basis).
+//   Zonder factuurwaarde → terugval op aanslKw (ongewijzigd gedrag).
 // Versie:        v15.15.6 (SHA-conflict-retry bij scenario-commit → geen 409 meer)
 // Wijziging v15.15.6 vs v15.15.5: _scenariosGithubWrite hertest bij HTTP 409/422
 //   ("is at X but expected Y") met een VERSE blob-sha (_scenariosGithubSha,
@@ -1698,6 +1707,9 @@ function _opstellingUi(ui, opstelling, cap) {
   if (opstelling === 'verhogen') {
     v.aansluiting_kva = cap.benodigd_toegangsvermogen_kw;
     v.aansluitingKva = cap.benodigd_toegangsvermogen_kw;
+    // v15.15.7: bij verhogen wordt óók het gecontracteerde toegangsvermogen opgetrokken
+    // → dat is de nieuwe facturatiebasis (anders bleef de sunk 35 kW staan).
+    v.toegangsvermogen_kw = cap.benodigd_toegangsvermogen_kw;
   } else { // 'batterij'
     v.batterijId = 'CUSTOM';
     v.batterijCustom = {
@@ -1821,6 +1833,13 @@ function buildSimInput(ui) {
 
   const pvKwp    = ui.pv_kwp || ui.pvKwp || 0;
   const aanslKw  = ui.aansluiting_kva || ui.aansluitingKva || 80;
+  // v15.15.7: GECONTRACTEERD toegangsvermogen (uit de klantfactuur) is de
+  // facturatiebasis voor Groep B/D — LOS van het fysieke aansluitvermogen (aanslKw,
+  // = dispatch-hard-cap). Vroeger factureerde simulator.py het toegangsvermogen op
+  // aanslKw, waardoor een klant met bv. 100 kVA aansluiting maar 35 kW gecontracteerd
+  // toegangsvermogen te hoge netkosten kreeg in de 'betere' factuur. Zonder factuur-
+  // waarde (ui.toegangsvermogen_kw) valt het terug op aanslKw → ongewijzigd gedrag.
+  const toegangsKw = Number(ui.toegangsvermogen_kw || ui.toegangsvermogenKw || 0) || aanslKw;
   const stacked  = batt.kwh > 0;
   const bspActief    = !!(ui.bsp && ui.bsp.actief);
   const curtailActief = !!(ui.pv_curtailment && ui.pv_curtailment.actief);
@@ -1979,6 +1998,9 @@ function buildSimInput(ui) {
       // tenzij UI expliciet maxInjectieKw zet.
       // v15.13.1: max_afname_kw_zacht = profielpiek × 1.20 (i.p.v. aanslKw) zodat
       // LP een penalty krijgt voor BSP-laden boven natuurlijke profielpiek.
+      // v15.15.7: gecontracteerd toegangsvermogen = facturatiebasis (sunk), los van
+      // het fysieke aansluitvermogen (max_afname_kw_hard = dispatch-cap).
+      toegangsvermogen_kw:  toegangsKw,
       max_afname_kw_zacht:  zachtAfnameKw,   max_afname_kw_hard:  aanslKw,
       max_injectie_kw_zacht: maxInjectieKw,  max_injectie_kw_hard: maxInjectieKw,
       tarief_overschrijding_afname_eur_per_kw_jaar: _kaart.overschrijding_toegangsvermogen_eur_kw_jaar,
