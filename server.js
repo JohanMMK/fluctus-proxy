@@ -1,7 +1,14 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.17.0 (factuuranalyse-blob in Storage — heropend rapport = identiek)
+// Versie:        v15.18.0 (LS/MS-schakeling per opstelling + config in respons)
+// Wijziging v15.18.0 vs v15.17.0: _opstellingUi zet opstelling 1 ('verhogen') op de
+//   MS-tariefkaart zodra het benodigde toegangsvermogen boven 100 kVA gaat — LS bestaat
+//   daarboven niet. Voorheen rekende een verzwaring naar bv. 250 kW nog op LS-tarieven
+//   en viel opstelling 1 dus veel te goedkoop uit. Opstelling 2 (batterij) blijft op de
+//   spanning uit stap 9, want die vermijdt de verzwaring juist. Elke opstelling geeft nu
+//   ook config{spanning, spanning_omgezet, aansluiting_kva, toegangsvermogen_kw, batterij}
+//   terug zodat de UI kan tonen dát er twee verschillende tariefkaarten vergeleken worden.
 // Wijziging v15.17.0 vs v15.16.0: POST/GET /api/factuuranalyse bewaren en halen de
 //   VOLLEDIGE factuuranalyse (incl. de 3 profielen-arrays, ~700 KB) als JSON-object op
 //   uit de private bucket. In het scenario komt enkel het pad. Zo is een heropend
@@ -1867,6 +1874,13 @@ function _variantUi(ui, variant) {
 // v15.15.4: pas de config aan voor één van de twee opstellingen bij ontoereikend
 // toegangsvermogen. 'verhogen' = toegangsvermogen optrekken tot benodigd niveau;
 // 'batterij' = geadviseerde batterij (uit simulator.py capaciteit), aansluiting blijft.
+// v15.18: LS/MS-drempel. Boven 100 kVA is een LS-aansluiting niet meer mogelijk —
+// de klant gaat dan naar middenspanning, met een heel andere tariefkaart (MS heeft
+// toegangsvermogen- en piektermen die LS niet kent). Zonder deze schakeling zou
+// opstelling 1 een verzwaring naar bv. 250 kW nog steeds op LS-tarieven rekenen en
+// dus veel te goedkoop uitvallen — precies de vergelijking die we willen maken.
+const LS_MAX_KVA = 100;
+
 function _opstellingUi(ui, opstelling, cap) {
   const v = JSON.parse(JSON.stringify(ui || {}));
   if (opstelling === 'verhogen') {
@@ -1875,6 +1889,15 @@ function _opstellingUi(ui, opstelling, cap) {
     // v15.15.7: bij verhogen wordt óók het gecontracteerde toegangsvermogen opgetrokken
     // → dat is de nieuwe facturatiebasis (anders bleef de sunk 35 kW staan).
     v.toegangsvermogen_kw = cap.benodigd_toegangsvermogen_kw;
+    // v15.18: moet de aansluiting boven de LS-grens, dan rekent opstelling 1 op MS.
+    // Opstelling 2 (batterij) blijft op de spanning zoals in stap 9 gedefinieerd —
+    // die vermijdt de verzwaring net.
+    if (cap.benodigd_toegangsvermogen_kw > LS_MAX_KVA && v.spanning !== 'MS') {
+      v._spanning_origineel = v.spanning || 'LS';
+      v.spanning = 'MS';
+      v._spanning_omgezet = true;
+      console.log(`[sim-3] opstelling 'verhogen': ${cap.benodigd_toegangsvermogen_kw} kVA > ${LS_MAX_KVA} → tariefkaart MS i.p.v. ${v._spanning_origineel}`);
+    }
   } else { // 'batterij'
     v.batterijId = 'CUSTOM';
     v.batterijCustom = {
@@ -1943,7 +1966,20 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
       v.geen     = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
       v.sturing  = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
       v.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans')));
-      opstellingen[opst] = { varianten: v, kpi_sturing: _kpi(v, false) };
+      // v15.18: geef de gebruikte configuratie mee terug — vooral de spanning, want
+      // opstelling 1 kan naar MS zijn omgezet (>100 kVA). Zonder dit ziet de verkoper
+      // niet dat hij twee verschillende tariefkaarten vergelijkt.
+      opstellingen[opst] = {
+        varianten: v, kpi_sturing: _kpi(v, false),
+        config: {
+          spanning: cfg.spanning || input.spanning || 'LS',
+          spanning_omgezet: !!cfg._spanning_omgezet,
+          spanning_origineel: cfg._spanning_origineel || null,
+          aansluiting_kva: cfg.aansluiting_kva || input.aansluiting_kva || null,
+          toegangsvermogen_kw: cfg.toegangsvermogen_kw || null,
+          batterij: cfg.batterijCustom || null,
+        },
+      };
     }
     // Batterij bespaart t.o.v. aansluiting-verhogen, per sturing (op subtotaal_excl_btw).
     const vergelijking = {};
