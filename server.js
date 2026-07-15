@@ -1,7 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.16.0 (factuur-opslag in Supabase Storage + signed-URL endpoint)
+// Versie:        v15.17.0 (factuuranalyse-blob in Storage — heropend rapport = identiek)
+// Wijziging v15.17.0 vs v15.16.0: POST/GET /api/factuuranalyse bewaren en halen de
+//   VOLLEDIGE factuuranalyse (incl. de 3 profielen-arrays, ~700 KB) als JSON-object op
+//   uit de private bucket. In het scenario komt enkel het pad. Zo is een heropend
+//   onderhandelingsmarge-rapport identiek aan het origineel (zelfde marge, zelfde
+//   heatmaps) i.p.v. herberekend — geen drift. Auth-vereist; max 8 MB.
 // Wijziging v15.16.0 vs v15.15.8: de geüploade factuur wordt na een geslaagde scan
 //   bewaard in de PRIVATE Supabase-bucket (env FACTUREN_BUCKET, default 'facturen');
 //   de verwijzing komt in baseCase.factuur_bestanden[]. Nieuw endpoint
@@ -642,6 +647,17 @@ async function _factuurUpload(base64, mediaType, pad) {
   });
   if (!r.ok) throw new Error(`storage upload ${pad}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
   return pad;
+}
+
+// v15.17: object terug ophalen (server-side, met service-key). Gebruikt voor de
+// bewaarde factuuranalyse-JSON, zodat een heropend rapport IDENTIEK is aan het
+// origineel — geen herberekening, dus geen drift in de cijfers.
+async function _factuurDownload(pad) {
+  if (!SUPABASE_OK) throw new Error('Supabase niet geconfigureerd');
+  const url = `${SUPABASE_URL}/storage/v1/object/${FACTUREN_BUCKET}/${pad}`;
+  const r = await fetch(url, { headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` } });
+  if (!r.ok) throw new Error(`storage download ${pad}: HTTP ${r.status}`);
+  return r.text();
 }
 
 // Kortlevende signed URL (default 10 min) — de bucket blijft privaat.
@@ -1575,6 +1591,47 @@ app.get('/api/factuur-bestand', async (req, res) => {
     return res.json({ url, verloopt_over_sec: 600 });
   } catch (e) {
     console.error('[factuur-bestand] fout:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.17: factuuranalyse bewaren/ophalen (bytes in Storage, ref in scenario) ──
+// De volledige factuuranalyse — INCLUSIEF de drie profielen-arrays (3 × 35.040
+// waarden, ~700 KB) — gaat als één JSON-object naar de private bucket. In het
+// scenario komt alleen het pad. Zo is een heropend onderhandelingsmarge-rapport
+// IDENTIEK aan het origineel: zelfde marge, zelfde heatmaps, geen herberekening
+// en dus geen drift. In GitHub zou dit onaanvaardbaar zijn (repo-bloat + AVG).
+app.post('/api/factuuranalyse', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const b = req.body || {};
+    if (!b.data || typeof b.data !== 'object') return res.status(400).json({ error: 'data (object) verplicht' });
+    const veilig = (s, fb) => String(s || fb).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60);
+    const pad = `${veilig(b.klant, 'onbekend')}/analyse-${veilig(b.stempel, String(Date.now()))}.json`;
+    const json = JSON.stringify(b.data);
+    if (json.length > 8 * 1024 * 1024) return res.status(413).json({ error: 'Analyse te groot (>8 MB)' });
+    await _factuurUpload(Buffer.from(json, 'utf8').toString('base64'), 'application/json', pad);
+    console.log(`[factuuranalyse] bewaard: ${FACTUREN_BUCKET}/${pad} (${(json.length/1024).toFixed(0)} KB)`);
+    return res.json({ ok: true, bucket: FACTUREN_BUCKET, pad, bytes: json.length });
+  } catch (e) {
+    console.error('[factuuranalyse] bewaren faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+app.get('/api/factuuranalyse', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const pad = String(req.query.pad || '');
+    if (!pad || pad.includes('..')) return res.status(400).json({ error: 'Ongeldig pad' });
+    const txt = await _factuurDownload(pad);
+    return res.type('application/json').send(txt);
+  } catch (e) {
+    console.error('[factuuranalyse] ophalen faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
