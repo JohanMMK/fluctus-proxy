@@ -1,6 +1,16 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.16.0 (factuur-opslag in Supabase Storage + signed-URL endpoint)
+// Wijziging v15.16.0 vs v15.15.8: de geüploade factuur wordt na een geslaagde scan
+//   bewaard in de PRIVATE Supabase-bucket (env FACTUREN_BUCKET, default 'facturen');
+//   de verwijzing komt in baseCase.factuur_bestanden[]. Nieuw endpoint
+//   GET /api/factuur-bestand?pad=... geeft een kortlevende signed URL (10 min) terug,
+//   auth-vereist. BEWUST niet in de GitHub-scenario-repo: git-historiek is onuitwisbaar
+//   (AVG) en elke auto-save zou megabytes committen. Opslag is best-effort: een fout
+//   laat de extractie nooit mislukken.
+// Wijziging v15.15.8 vs v15.15.7: de 504-foutmelding bij /api/factuur-extract vermeldt
+//   niet langer een harde "30s" (de timeout in factuur/extract.js is verhoogd naar 120s).
 // Versie:        v15.15.7 (gecontracteerd toegangsvermogen ≠ fysiek aansluitvermogen)
 // Wijziging v15.15.7 vs v15.15.6: buildSimInput geeft nu aansluiting.toegangsvermogen_kw
 //   door (facturatiebasis Groep B/D, uit de factuur; ui.toegangsvermogen_kw), LOS van
@@ -597,6 +607,56 @@ async function _scenariosGithubRead(filepath) {
   if (!rawResp.ok) throw new Error(`scenarios raw read ${filepath}: HTTP ${rawResp.status}`);
   const content = await rawResp.text();
   return { data: JSON.parse(content), sha };
+}
+
+// ─── v15.16: FACTUUR-OPSLAG in Supabase Storage ──────────────────────────────
+// De geüploade factuur wordt bewaard zodat ze later naast de analyse getoond en
+// als bijlage gemaild kan worden. BEWUST NIET in de GitHub-scenario-repo:
+//   - git-historiek is onuitwisbaar → een AVG-verwijderverzoek is onmogelijk te
+//     honoreren zonder history rewrite;
+//   - elke auto-save zou megabytes base64 committen (repo-bloat).
+// De bucket 'facturen' is PRIVAAT. Alleen de service-role-key (server-side) mag
+// schrijven/lezen; de browser krijgt enkel een kortlevende signed URL.
+const FACTUREN_BUCKET = process.env.FACTUREN_BUCKET || 'facturen';
+
+function _factuurPad(meta, mediaType) {
+  const ext = mediaType === 'application/pdf' ? 'pdf'
+            : (mediaType || '').startsWith('image/') ? (mediaType.split('/')[1] || 'bin') : 'bin';
+  const veilig = (s, fb) => String(s || fb).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60);
+  const klant = veilig(meta.klantBtw || meta.klantNaam, 'onbekend');
+  const nr    = veilig(meta.factuurNummer, 'factuur');
+  return `${klant}/${nr}-${Date.now()}.${ext}`;
+}
+
+async function _factuurUpload(base64, mediaType, pad) {
+  if (!SUPABASE_OK) throw new Error('Supabase niet geconfigureerd');
+  const url = `${SUPABASE_URL}/storage/v1/object/${FACTUREN_BUCKET}/${pad}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`,
+      'Content-Type': mediaType || 'application/octet-stream',
+      'x-upsert': 'true',
+    },
+    body: Buffer.from(base64, 'base64'),
+  });
+  if (!r.ok) throw new Error(`storage upload ${pad}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+  return pad;
+}
+
+// Kortlevende signed URL (default 10 min) — de bucket blijft privaat.
+async function _factuurSignedUrl(pad, expiresIn = 600) {
+  if (!SUPABASE_OK) throw new Error('Supabase niet geconfigureerd');
+  const url = `${SUPABASE_URL}/storage/v1/object/sign/${FACTUREN_BUCKET}/${pad}`;
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresIn }),
+  });
+  if (!r.ok) throw new Error(`storage sign ${pad}: HTTP ${r.status} ${(await r.text()).slice(0, 200)}`);
+  const j = await r.json();
+  if (!j.signedURL) throw new Error('storage sign: geen signedURL in antwoord');
+  return `${SUPABASE_URL}/storage/v1${j.signedURL}`;
 }
 
 // v15.15.6: haal ENKEL de huidige blob-sha op (verse read, cache-buster) — voor
@@ -1456,13 +1516,41 @@ app.post('/api/factuur-extract', async (req, res) => {
     });
 
     console.log(`[factuur-extract] OK in ${Date.now()-startTime}ms — model=${result._meta.model}, tokens=${result._meta.input_tokens||'?'}/${result._meta.output_tokens||'?'}`);
+
+    // v15.16: bewaar de originele factuur in Supabase Storage (privaat) zodat ze
+    // naast de analyse getoond en later als bijlage gemaild kan worden.
+    // De verwijzing hoort IN result.baseCase — de wizard doet STATE.baseCase = r.baseCase,
+    // dus alles wat op het top-level staat zou verloren gaan.
+    // BEST-EFFORT: een opslagfout mag een geslaagde extractie nooit laten mislukken.
+    const _bc = result.baseCase || (result.baseCase = {});
+    _bc.factuur_bestanden = [];
+    if (SUPABASE_OK) {
+      for (const f of files) {
+        try {
+          const pad = _factuurPad(_bc, f.mediaType);   // leest klantBtw/factuurNummer uit baseCase
+          await _factuurUpload(f.base64, f.mediaType, pad);
+          _bc.factuur_bestanden.push({
+            bucket: FACTUREN_BUCKET, pad,
+            naam: f.fileName || f.naam || null,
+            mediaType: f.mediaType,
+            bytes: Math.floor(f.base64.length * 0.75),
+          });
+          console.log(`[factuur-extract] factuur bewaard: ${FACTUREN_BUCKET}/${pad}`);
+        } catch (e) {
+          console.warn(`[factuur-extract] opslag factuur faalde (niet-blokkerend): ${e.message}`);
+        }
+      }
+    } else {
+      console.warn('[factuur-extract] Supabase niet geconfigureerd — factuur niet bewaard');
+    }
+
     res.json(result);
   } catch (e) {
     console.error('[factuur-extract] FOUT:', e.message);
     if (/HTTP 4|niet-ondersteund/i.test(e.message)) {
       res.status(422).json({ error: e.message });
     } else if (/timeout|abort/i.test(e.message)) {
-      res.status(504).json({ error: 'Anthropic API timeout (>30s) — probeer opnieuw' });
+      res.status(504).json({ error: 'Factuur-extractie duurde te lang — probeer opnieuw (of upload een kleinere/duidelijkere scan).' });
     } else {
       res.status(500).json({ error: e.message });
     }
@@ -1471,6 +1559,26 @@ app.post('/api/factuur-extract', async (req, res) => {
 
 
 // ─── FACTUUR-STAFFEL ──────────────────────────────────────────────────────────
+// ─── v15.16: GET /api/factuur-bestand?pad=... ────────────────────────────────
+// Geeft een KORTLEVENDE signed URL (10 min) terug voor een bewaarde factuur.
+// De bucket blijft privaat: de browser krijgt nooit de service-key, en de URL
+// verloopt. Vereist een ingelogde gebruiker — een factuur bevat klantgegevens
+// (naam, BTW, adres, EAN, verbruik) en mag niet vrij opvraagbaar zijn.
+app.get('/api/factuur-bestand', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const pad = String(req.query.pad || '');
+    if (!pad || pad.includes('..')) return res.status(400).json({ error: 'Ongeldig pad' });
+    const url = await _factuurSignedUrl(pad, 600);
+    return res.json({ url, verloopt_over_sec: 600 });
+  } catch (e) {
+    console.error('[factuur-bestand] fout:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 // POST /api/factuur-staffel-bepalen
 // Body: { profielNaam, afnameKwh, periodeVan, periodeTot, [staffel] }
 // Response (zie project_jaarverbruik.js):
