@@ -4,7 +4,7 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4.3 (juli 2026)
+ * Versie: 1.4.4 (juli 2026)
  *
  * Wijziging v1.4.1 → v1.4.3 (BUG: capaciteit-dubbeltelling — foute onderhandelingsmarge):
  *   ROOT CAUSE: prompt en frontend hanteerden TEGENSTRIJDIGE contracten. De prompt zei
@@ -174,6 +174,35 @@ INJECTIE EN PV:
 
 pvKwpAanwezig is STRIKT een GETAL (kWp piekvermogen) of null. NOOIT een string.
 
+FACTUURREGELS — DE BASIS VAN ALLES (v1.4.4, ZEER BELANGRIJK):
+Neem in "_factuurRegels" ELKE detailregel over uit de kostentabel van de factuur —
+dus élke lijn met een bedrag, van de eerste energie-regel tot de laatste heffing.
+Sla GEEN enkele regel over, ook niet de kleine (dataservice, vaste vergoeding, …).
+Per regel:
+  - omschrijving   = de tekst zoals ze op de factuur staat
+  - aantal         = het getal in de kolom "Aantal" (bv. 9536 bij "9.536 kWh",
+                     30 bij "30 dagen", 98 bij "98,00 kVA x 30 dagen")
+  - eenheid        = "kWh" | "dagen" | "kVA" | "kW" | null
+  - eenheidsprijs  = het getal in de kolom "Eenheidsprijs" (bv. 0.11622)
+  - bedrag_excl    = het bedrag in de kolom "excl. BTW" (bv. 1108.31)
+  - groep          = "energie" (leverancierskosten), "distributie" (nettarieven
+                     netbeheerder) of "heffing" (accijnzen/overheidstoeslagen)
+  - is_capaciteit  = true voor toegangsvermogen / maandpiek / overschrijding /
+                     capaciteitstarief; anders false. (Deze regels zitten in de
+                     groep "distributie".)
+Staat er geen aantal of eenheidsprijs bij een regel: zet die op null, maar vul
+bedrag_excl ALTIJD in.
+
+CONTROLEER JEZELF VÓÓR JE ANTWOORDT (dit is verplicht):
+  1. Per regel met aantal én eenheidsprijs: aantal × eenheidsprijs ≈ bedrag_excl.
+     Klopt dat niet, dan heb je die regel verkeerd gelezen — herlees ze.
+  2. De som van alle bedrag_excl ≈ het factuurtotaal excl. BTW dat onderaan de
+     kostentabel staat. Wijkt dat af, dan mis je regels of las je er één fout.
+  3. De groepstotalen hieronder MOETEN gelijk zijn aan de som van de regels per
+     groep: totaalEnergieExclBtw = som van de "energie"-regels, enzovoort.
+Los een afwijking op door te herlezen — NOOIT door een getal te schatten of aan
+te passen zodat het toevallig klopt.
+
 TOTAALBEDRAGEN — DRIE GROEPEN DIE ELKAAR NIET OVERLAPPEN (v1.4.3):
 Er zijn PRECIES DRIE optelbare groepen: energie + distributie + heffingen.
 Samen zijn ze de totale kost. Tel NOOIT een vierde groep erbij op.
@@ -271,6 +300,17 @@ JSON SCHEMA (output):
   "totaalInclBtw": number,
   "totaalTeBetalenInclBtw": number of null,
   "voorschottenInclBtw": number of null,
+  "_factuurRegels": [
+    {
+      "omschrijving": string,
+      "aantal": number of null,
+      "eenheid": string of null,
+      "eenheidsprijs": number of null,
+      "bedrag_excl": number,
+      "groep": "energie" | "distributie" | "heffing",
+      "is_capaciteit": boolean
+    }
+  ],
   "leverancier": string,
   "leverancierTariefformule": string,
   "klantnummerLeverancier": string of null,
@@ -670,8 +710,67 @@ function consistentieCheck(parsed) {
   return result;
 }
 
+// ─── v1.4.4: rekenkundige validatie van de factuurregels ─────────────────────
+// Layout-ONAFHANKELIJK: deze check herkent geen kopjes of secties, ze rekent enkel.
+// Daarom werkt ze bij elke leverancier, ongeacht hoe de factuur is ingedeeld.
+//   1. per regel: aantal × eenheidsprijs ≈ bedrag_excl
+//   2. som van alle regels = de bruto periodekost (ground truth, onafhankelijk van
+//      welk "totaal" het model onderaan koos — netto saldo, voorschotten, enz.)
+// Een misread is zo geen "ander getal" maar een GEBROKEN VERGELIJKING, en we weten
+// meteen wélke regel fout is.
+function regelsCheck(parsed) {
+  const R = Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [];
+  const out = { aanwezig: R.length > 0, aantal_regels: R.length, foute_regels: [], ok: false };
+  if (!R.length) { out.reden = 'geen _factuurRegels geleverd'; return out; }
+
+  let som = 0;
+  const g = { energie: 0, distributie: 0, heffing: 0 };
+  let capaciteit = 0;
+  R.forEach((r, i) => {
+    const b = parseFloat(r && r.bedrag_excl);
+    if (!isFinite(b)) {
+      out.foute_regels.push({ i, omschrijving: (r && r.omschrijving) || '?', reden: 'bedrag_excl ontbreekt of is geen getal' });
+      return;
+    }
+    som += b;
+    if (g[r.groep] !== undefined) g[r.groep] += b;
+    if (r.is_capaciteit === true) capaciteit += b;
+    const a = parseFloat(r.aantal), p = parseFloat(r.eenheidsprijs);
+    if (isFinite(a) && isFinite(p)) {
+      const verwacht = a * p;
+      const tol = Math.max(0.02, Math.abs(b) * 0.01);   // 1 cent-ruis + 1% marge
+      if (Math.abs(verwacht - b) > tol) {
+        out.foute_regels.push({
+          i, omschrijving: r.omschrijving, aantal: a, eenheidsprijs: p, bedrag: b,
+          verwacht: Math.round(verwacht * 100) / 100,
+          reden: 'aantal × eenheidsprijs ≠ bedrag_excl'
+        });
+      }
+    }
+  });
+
+  out.som_regels        = Math.round(som * 100) / 100;
+  out.groep_energie     = Math.round(g.energie * 100) / 100;
+  out.groep_distributie = Math.round(g.distributie * 100) / 100;
+  out.groep_heffing     = Math.round(g.heffing * 100) / 100;
+  out.capaciteit_regels = Math.round(capaciteit * 100) / 100;
+
+  const tot = parseFloat(parsed.totaalExclBtw) || 0;
+  out.totaal_gelezen    = tot;
+  out.delta_som_totaal  = Math.round((out.som_regels - tot) * 100) / 100;
+  // Informatief: bij een afrekening WIJKT dit legitiem af (model las het netto saldo).
+  // De regels blijven dan correct; enkel het gelezen totaal is de verkeerde kandidaat.
+  out.som_matcht_totaal = tot > 0.01 && Math.abs(out.delta_som_totaal) / tot < 0.01;
+
+  // 'ok' hangt ENKEL af van de rekenkundige integriteit van de regels zelf —
+  // NIET van het gelezen totaal (dat mag bij een afrekening afwijken).
+  out.ok = out.foute_regels.length === 0 && out.som_regels > 0;
+  if (!out.ok && !out.reden) out.reden = `${out.foute_regels.length} regel(s) rekenen niet op`;
+  return out;
+}
+
 // ─── Hoofdfunctie ────────────────────────────────────────────────────────────
-async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
+async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY niet beschikbaar');
   if (!Array.isArray(files) || files.length === 0) throw new Error('Geen bestanden meegegeven');
   if (!postcodes || typeof postcodes !== 'object') throw new Error('postcodes lookup niet beschikbaar');
@@ -680,22 +779,49 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
   const usedModel = model || process.env.FACTUUR_MODEL || 'claude-sonnet-4-5';
   const t0 = Date.now();
 
-  // Stap 1: AI-extractie met retry
-  let aiResult, parsed, lastError;
+  // Stap 1: AI-extractie met GEVALIDEERDE retry (v1.4.4).
+  // Vroeger werd enkel opnieuw geprobeerd bij een crash/timeout; een fout-maar-
+  // geldig-ogend antwoord werd gewoon aanvaard. Nu: genereren → VERIFIËREN → pas
+  // aanvaarden als de regels rekenkundig kloppen. Het model haalt dezelfde factuur
+  // soms wél en soms niet correct (variantie), dus een geverifieerde herkansing lost
+  // dat op. Systematische misreads blijven falen — die eindigen met een eerlijke
+  // vlag i.p.v. een stil verkeerd cijfer.
+  let aiResult, parsed, lastError, regels = null;
+  let besteParsed = null, besteRegels = null;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       aiResult = await callAnthropic({ apiKey, model: usedModel, files });
-      parsed = parseJsonResponse(aiResult.rawText);
-      break;
+      const kandidaat = parseJsonResponse(aiResult.rawText);
+      const rc = regelsCheck(kandidaat);
+      if (rc.ok) { parsed = kandidaat; regels = rc; if (attempt > 0) console.log(`[extract] poging ${attempt + 1} geslaagd na gefaalde regelcontrole`); break; }
+      if (!besteParsed) { besteParsed = kandidaat; besteRegels = rc; }
+      lastError = new Error(`regelcontrole faalde: ${rc.reden || rc.foute_regels.length + ' foute regel(s)'}`);
+      console.warn(`[extract] poging ${attempt + 1}/${retries + 1}: ${lastError.message} — opnieuw proberen`);
     } catch (e) {
       lastError = e;
-      if (attempt === retries) throw new Error(`Extractie mislukt na ${retries + 1} pogingen: ${e.message}`);
+      console.warn(`[extract] poging ${attempt + 1}/${retries + 1} mislukt: ${e.message}`);
+    }
+  }
+  if (!parsed) {
+    if (besteParsed) {
+      parsed = besteParsed; regels = besteRegels;
+      console.warn('[extract] geen enkele poging doorstond de regelcontrole — beste poging gebruikt, scan wordt geflagd als onbetrouwbaar');
+    } else {
+      throw new Error(`Extractie mislukt na ${retries + 1} pogingen: ${lastError ? lastError.message : 'onbekende fout'}`);
     }
   }
 
   // Stap 2: server-side validatie en aanrijking
   const _uncertain = Array.isArray(parsed._uncertain) ? [...parsed._uncertain] : [];
   const _provider_flags = Array.isArray(parsed._provider_flags) ? [...parsed._provider_flags] : [];
+
+  // v1.4.4: eerlijk vlaggen wanneer geen enkele poging de regelcontrole doorstond.
+  // De cijfers worden dan wél teruggegeven (beter dan niets), maar duidelijk gemarkeerd
+  // als onbetrouwbaar — de wizard toont daarop een waarschuwing i.p.v. stil door te gaan.
+  if (regels && !regels.ok) {
+    if (!_provider_flags.includes('regelcontrole_gefaald')) _provider_flags.push('regelcontrole_gefaald');
+    if (!_uncertain.includes('totaalExclBtw')) _uncertain.push('totaalExclBtw');
+  }
 
   // 2a. DNB lookup
   const lookupAdres = parsed.leveringsadres || parsed.klantAdres || '';
@@ -813,7 +939,13 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
   // marge dus € 246 te groot. consistentieCheck zet sum_bruto zelf gelijk aan e+d+h+c
   // in het uitzonderlijke geval dat een leverancier capaciteit náást distributie zet
   // (status CAPACITEIT_APART), dus hier volstaat sum_bruto altijd.
-  const somComponenten = consistentie.sum_bruto;                  // e+d+h (capaciteit = subset)
+  // v1.4.4: de SOM VAN DE REGELS is de sterkste bron van waarheid — ze is rekenkundig
+  // geverifieerd (aantal × prijs = bedrag) en volledig onafhankelijk van welk "totaal"
+  // het model onderaan de factuur koos. Enkel als de regels ontbreken/niet kloppen
+  // vallen we terug op de groepssom e+d+h.
+  const somComponenten = (regels && regels.ok && regels.som_regels > 0)
+    ? regels.som_regels
+    : consistentie.sum_bruto;                                     // e+d+h (capaciteit = subset)
   const voorschotIncl = parseFloat(parsed.voorschottenInclBtw) || 0;
   const heeftVoorschotIndicatie = voorschotIncl > 0 ||
     factuurType === 'regularisatie' ||
@@ -920,6 +1052,10 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
       tariefKey_gebruikt: dnbTariefKey
     },
     _consistentie: consistentie,
+    // v1.4.4: rekencontrole op de factuurregels — de frontend kan hiermee de regels
+    // tonen ter verificatie en exact aanwijzen wélke regel niet opgaat.
+    _regelcontrole: regels,
+    _factuurRegels: Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [],
     _factuur_leeftijd: leeftijd,
     _tariefjaar_match: {
       ...tariefjaarMatch,
