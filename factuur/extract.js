@@ -4,7 +4,28 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4 (juli 2026)
+ * Versie: 1.4.3 (juli 2026)
+ *
+ * Wijziging v1.4.1 → v1.4.3 (BUG: capaciteit-dubbeltelling — foute onderhandelingsmarge):
+ *   ROOT CAUSE: prompt en frontend hanteerden TEGENSTRIJDIGE contracten. De prompt zei
+ *   "distributie = nettarieven EXCL capaciteit" (→ totaal = e+d+c+h), terwijl de
+ *   frontend de capaciteit ván de distributie aftrekt (→ capaciteit ⊆ distributie,
+ *   totaal = e+d+h). Het model volgde de frontend-logica (distributie = volledig
+ *   groepstotaal B), waarna de voorschot-correctie herstelde naar sum_componenten
+ *   (= e+d+h+c) en de capaciteit dus DUBBEL telde. Op een Elindus-afrekening (model las
+ *   het netto saldo € 941,64 i.p.v. de bruto kost) gaf dat € 3.599,94 i.p.v. het echte
+ *   € 3.354,69 → onderhandelingsmarge € 246 te groot (€ 786 i.p.v. € 540).
+ *   FIX: één eenduidig contract — DRIE optelbare groepen (energie + distributie +
+ *   heffingen); capaciteit is expliciet een SUBSET van distributie en wordt NOOIT
+ *   opgeteld. Prompt herschreven, met zelfcontrole vóór antwoord. consistentieCheck
+ *   rekent op sum_bruto (e+d+h) en geeft sum_bruto / delta_bruto_eur / delta_pct_bruto /
+ *   capaciteit_subset_ok terug. Nieuwe statussen: CAPACITEIT_APART (leverancier zet
+ *   capaciteit tóch náást distributie → som gecorrigeerd) en AFWIJKING wanneer
+ *   capaciteit > distributie (fysiek onmogelijk → scan afgekeurd).
+ *   De voorschot-correctie gebruikt nu altijd sum_bruto.
+ *
+ * Wijziging v1.4 → v1.4.1: Anthropic-call timeout 30s → 120s (HTTP 504 bij
+ *   trage/meerpagina-PDF's opgelost).
  *
  * Wijzigingen v1.3 → v1.4 (sessie 9b — parser-uitbreiding voor CRM/deal-flow):
  *   1. Klantidentiteit: klantnummerLeverancier, contactpersoon, contractEinddatum.
@@ -153,20 +174,29 @@ INJECTIE EN PV:
 
 pvKwpAanwezig is STRIKT een GETAL (kWp piekvermogen) of null. NOOIT een string.
 
-TOTAALBEDRAGEN — VERMIJD DUBBELTELLING:
-- totaalEnergieExclBtw = ALLEEN energie-leverancier kosten (commodity, markup,
-  groene stroom, vergroening, vaste kost). NIET distributiekosten,
-  NIET heffingen, NIET capaciteit.
-- totaalDistributieExclBtw = nettarieven (proportioneel, transport, databeheer)
-  excl capaciteitstarief.
-- totaalCapaciteitExclBtw = bruto capaciteitstarief regels (vóór maximum-
-  tarief correctie). Som van alle "Capaciteitstarief" regels zonder de "-Maximumtarief"
-  correctie eraf te trekken.
-- totaalHeffingenExclBtw = bijdragen, accijnzen, energiefonds, federale bijdragen.
-- totaalExclBtw = de TOTALE KOST (excl BTW) van de verbruiksperiode: de som van
-  energie + distributie + capaciteit + heffingen zoals de factuur die optelt,
-  VÓÓR aftrek van reeds betaalde voorschotten. Dit is NIET het "netto te betalen"
-  saldo.
+TOTAALBEDRAGEN — DRIE GROEPEN DIE ELKAAR NIET OVERLAPPEN (v1.4.3):
+Er zijn PRECIES DRIE optelbare groepen: energie + distributie + heffingen.
+Samen zijn ze de totale kost. Tel NOOIT een vierde groep erbij op.
+- totaalEnergieExclBtw = ALLEEN kosten van de energieleverancier (commodity,
+  markup, groene stroom/WKK-certificaten, vergroening, garantie van oorsprong,
+  vaste vergoeding leverancier). NIET nettarieven, NIET heffingen.
+- totaalDistributieExclBtw = ALLE nettarieven van de netbeheerder samen,
+  INCLUSIEF het capaciteitstarief. Dus: databeheer/dataservice + proportioneel +
+  transport + toegangsvermogen + maandpiek + overschrijding + overige nettarieven.
+  Neem hier het VOLLEDIGE groepstotaal van de nettarieven-sectie.
+- totaalCapaciteitExclBtw = het DEEL van totaalDistributieExclBtw dat capaciteit
+  is (toegangsvermogen + maandpiek + overschrijding + capaciteitstarief).
+  LET OP: dit is een SUBSET van totaalDistributieExclBtw, GEEN aparte groep.
+  Het mag dus NOOIT bij de som worden opgeteld. Er geldt altijd:
+  totaalCapaciteitExclBtw <= totaalDistributieExclBtw.
+- totaalHeffingenExclBtw = bijdragen, accijnzen, energiefonds, federale/Vlaamse
+  heffingen (de "toeslagen/overheden"-sectie).
+- totaalExclBtw = de TOTALE KOST (excl BTW) van de verbruiksperiode, VÓÓR aftrek
+  van reeds betaalde voorschotten. Dit is NIET het "netto te betalen" saldo.
+  Er MOET gelden: totaalExclBtw ≈ energie + distributie + heffingen.
+  Controleer dit zelf vóór je antwoordt: tel de drie groepen op en vergelijk met
+  het factuurtotaal dat je las. Wijken ze af, herlees dan de factuur en corrigeer,
+  in plaats van een schatting te geven.
 - totaalInclBtw = diezelfde TOTALE KOST maar inclusief BTW (eveneens vóór aftrek
   van voorschotten).
 
@@ -282,6 +312,9 @@ Geef ALLEEN het JSON object terug, zonder enige andere tekst eromheen.`;
 
 // ─── Anthropic API call ──────────────────────────────────────────────────────
 async function callAnthropic({ apiKey, model, files, timeoutMs = 120000 }) {
+  // v1.4.1: timeout 30s → 120s. Sonnet-4-5 die een PDF van meerdere pagina's leest
+  // (max_tokens 8000, multi-EAN + tariefkaart + CRM) haalde regelmatig >30s → HTTP 504.
+  // Railway kapt de request niet af binnen 120s, dus dit is de veilige bovengrens.
   const contentBlocks = files.map(f => {
     if (f.mediaType === 'application/pdf') {
       return { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: f.base64 } };
@@ -589,27 +622,50 @@ function consistentieCheck(parsed) {
   const delta = som - totaal;
   const deltaPct = totaal > 0.01 ? Math.abs(delta) / totaal : 0;
 
+  // v1.4.2: BRUTO periode-kost zonder capaciteit-dubbeltelling. Het capaciteitstarief
+  // is (bij vrijwel elke leverancier) een SUBSET van de distributiekosten, geen extra
+  // groep. Het bij e+d+h optellen telt het twee keer — dat produceerde bv. € 3.599,94
+  // i.p.v. € 3.354,69 zodra de voorschot-correctie deze som als totaal overnam.
+  const somZonderCap = e + d + h;
+  const deltaZonderCap = somZonderCap - totaal;
+
   const result = {
-    sum_componenten: Math.round(som * 100) / 100,
+    sum_componenten: Math.round(som * 100) / 100,          // e+d+h+c (legacy, kan c dubbel tellen)
+    sum_bruto: Math.round(somZonderCap * 100) / 100,       // e+d+h — capaciteit als subset
     totaal_factuur: totaal,
     delta_eur: Math.round(delta * 100) / 100,
-    delta_pct: Math.round(deltaPct * 1000) / 10
+    delta_pct: Math.round(deltaPct * 1000) / 10,
+    delta_bruto_eur: Math.round(deltaZonderCap * 100) / 100
   };
 
-  if (totaal === 0 && som === 0) {
+  // v1.4.3: het CONTRACT is nu eenduidig — er zijn drie optelbare groepen
+  // (energie + distributie + heffingen) en capaciteit is een SUBSET van distributie.
+  // De sumcheck rekent dus op sum_bruto (e+d+h). Zit de capaciteit uitzonderlijk toch
+  // NIET in de distributie, dan valt e+d+h+c samen met het totaal — dat detecteren we
+  // apart (CAPACITEIT_APART) i.p.v. het stil dubbel te tellen.
+  const deltaBrutoPct = totaal > 0.01 ? Math.abs(deltaZonderCap) / totaal : 0;
+  result.delta_pct_bruto = Math.round(deltaBrutoPct * 1000) / 10;
+  result.capaciteit_subset_ok = (c <= d + Math.max(0.5, d * 0.01));
+
+  if (totaal === 0 && somZonderCap === 0) {
     result.status = 'leeg_geen_check';
     result.opmerking = 'Geen bedragen — sumcheck overgeslagen.';
     return result;
   }
-  if (deltaPct < 0.01) {
+  if (deltaBrutoPct < 0.01) {
     result.status = 'OK';
-    result.opmerking = `Som componenten ≈ totaalExclBtw (${result.delta_pct}% afwijking).`;
-  } else if (Math.abs(delta - c) < Math.max(0.5, c * 0.01)) {
-    result.status = 'CAPACITEIT_DUBBEL';
-    result.opmerking = `Som componenten = totaalExclBtw + capaciteitstarief — capaciteit zit waarschijnlijk al in distributie of energie verwerkt.`;
+    result.opmerking = `Energie+distributie+heffingen ≈ totaalExclBtw (${result.delta_pct_bruto}% afwijking). Capaciteit is subset van distributie.`;
+  } else if (deltaPct < 0.01) {
+    // e+d+h+c klopt wél → deze leverancier rapporteert capaciteit náást distributie.
+    result.status = 'CAPACITEIT_APART';
+    result.opmerking = `Capaciteit blijkt GEEN subset van distributie bij deze leverancier: e+d+h+c ≈ totaal. Som gecorrigeerd.`;
+    result.sum_bruto = result.sum_componenten;
+  } else if (!result.capaciteit_subset_ok) {
+    result.status = 'AFWIJKING';
+    result.opmerking = `Capaciteit (€${c}) > distributie (€${d}) — dat kan niet: capaciteit hoort een subset van de nettarieven te zijn. Scan onbetrouwbaar.`;
   } else {
     result.status = 'AFWIJKING';
-    result.opmerking = `Som componenten wijkt €${result.delta_eur} (${result.delta_pct}%) af van totaal — mogelijk dubbeltelling, voorschotten of correcties.`;
+    result.opmerking = `Som e+d+h wijkt €${result.delta_bruto_eur} af van het gelezen totaal (€${totaal}) — mogelijk voorschotten, of een component/totaal verkeerd gelezen.`;
   }
   return result;
 }
@@ -750,7 +806,14 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 1 }) {
     ? parseFloat(parsed.totaalInclBtw) : null;
   let voorschotCorrectie = null;
 
-  const somComponenten = consistentie.sum_componenten;            // e+d+h+c
+  // v1.4.3 FIX: altijd de BRUTO som = energie + distributie + heffingen (capaciteit is
+  // een subset van distributie, geen aparte groep). Voorheen stond hier sum_componenten
+  // (= e+d+h+c), wat de capaciteit dubbel telde: de "gecorrigeerde" totale kost werd
+  // stelselmatig te hoog (€ 3.599,94 i.p.v. het echte € 3.354,69) en de onderhandelings-
+  // marge dus € 246 te groot. consistentieCheck zet sum_bruto zelf gelijk aan e+d+h+c
+  // in het uitzonderlijke geval dat een leverancier capaciteit náást distributie zet
+  // (status CAPACITEIT_APART), dus hier volstaat sum_bruto altijd.
+  const somComponenten = consistentie.sum_bruto;                  // e+d+h (capaciteit = subset)
   const voorschotIncl = parseFloat(parsed.voorschottenInclBtw) || 0;
   const heeftVoorschotIndicatie = voorschotIncl > 0 ||
     factuurType === 'regularisatie' ||
