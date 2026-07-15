@@ -1,7 +1,15 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.18.0 (LS/MS-schakeling per opstelling + config in respons)
+// Versie:        v15.19.0 (iteratieve, dispatch-gevalideerde dimensionering per opstelling)
+// Wijziging v15.19.0 vs v15.18.0: _dimensioneerTotHaalbaar groeit de bepalende maat van
+//   ELKE opstelling tot de LP-dispatch 0 verloren dagen meldt (max 4 iteraties, +30%/stap).
+//   Opstelling 1 wordt beoordeeld ZONDER sturing (dat is het basisscenario), opstelling 2
+//   MET sturing 2 (zo wordt de batterij ingezet). Voorheen kwamen beide maten uit vuistregels
+//   op gemiddelden, terwijl de dispatch per kwartier rekent — resultaat: 260/365 verloren
+//   dagen, overschrijdingskosten, en een vergelijking tussen twee falende opstellingen.
+//   Bij groeien wordt de LS/MS-grens opnieuw getoetst. Lukt het niet binnen 4 iteraties, dan
+//   komt dat eerlijk terug in opstellingen[x].dimensionering.haalbaar = false.
 // Wijziging v15.18.0 vs v15.17.0: _opstellingUi zet opstelling 1 ('verhogen') op de
 //   MS-tariefkaart zodra het benodigde toegangsvermogen boven 100 kVA gaat — LS bestaat
 //   daarboven niet. Voorheen rekende een verzwaring naar bv. 250 kW nog op LS-tarieven
@@ -1881,6 +1889,97 @@ function _variantUi(ui, variant) {
 // dus veel te goedkoop uitvallen — precies de vergelijking die we willen maken.
 const LS_MAX_KVA = 100;
 
+// ─── v15.19: iteratieve, DISPATCH-GEVALIDEERDE dimensionering ────────────────
+// Leest het aantal verloren dagen uit de sim-output. Dat is de enige harde bron:
+// de LP-dispatch heeft dan écht geprobeerd te laden en het niet gekregen.
+function _verlorenDagen(sim) {
+  const d = (sim && sim.lp_diagnostics) || {};
+  const vd = d.verloren_dagen;
+  if (Array.isArray(vd)) return vd.length;
+  return (typeof vd === 'number') ? vd : 0;
+}
+function _totaalDagen(sim) {
+  const d = (sim && sim.lp_diagnostics) || {};
+  return d.totaal_dagen || 365;
+}
+const DIM_MAX_ITER  = 4;      // cap: elke iteratie is een volle sim-run (~20-30s)
+const DIM_GROEI     = 1.30;   // 30% per stap — grof, maar convergeert snel genoeg
+const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succes-stap
+// Maat uitlezen/zetten per opstelling — zo blijft de zoeklus opstelling-agnostisch.
+function _dimMaat(cfg, opst) {
+  return (opst === 'verhogen') ? (cfg.aansluiting_kva || 0)
+                               : ((cfg.batterijCustom && cfg.batterijCustom.kwh) || 0);
+}
+function _dimZet(cfg, opst, maat) {
+  if (opst === 'verhogen') {
+    const n = Math.ceil(maat / 5) * 5;
+    cfg.aansluiting_kva = n; cfg.aansluitingKva = n; cfg.toegangsvermogen_kw = n;
+    // v15.18: de LS/MS-grens opnieuw toetsen — groeien kan hem alsnog overschrijden.
+    if (n > LS_MAX_KVA && cfg.spanning !== 'MS') {
+      cfg._spanning_origineel = cfg.spanning || 'LS';
+      cfg.spanning = 'MS'; cfg._spanning_omgezet = true;
+    }
+    return n;
+  }
+  const kwh = Math.ceil(maat / 10) * 10;
+  cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, { kwh, kw: Math.round(kwh / 2) });
+  return kwh;
+}
+function _dimEenheid(opst) { return (opst === 'verhogen') ? 'kVA' : 'kWh'; }
+
+// Groeit de bepalende parameter tot de dispatch 0 verloren dagen meldt.
+//  - 'verhogen': het toegangsvermogen (opstelling 1 wordt beoordeeld ZONDER sturing,
+//                want dát is het basisscenario: verzwaren en verder niets slims doen)
+//  - 'batterij': de batterijcapaciteit (beoordeeld MET sturing 2, want zo wordt ze ingezet)
+async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
+  const variant = (opstelling === 'verhogen') ? 'geen' : 'sturing';
+  const eenh = _dimEenheid(opstelling);
+  let cfg = JSON.parse(JSON.stringify(cfg0));
+  let resultaat = null, stappen = [], runs = 0;
+  let laatsteFaal = null;              // grootste maat die NIET volstond
+  let okMaat = null, okCfg = null, okRes = null;
+
+  // ── Fase 1: grof groeien tot het past ──
+  for (let i = 0; i <= DIM_MAX_ITER; i++) {
+    resultaat = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, variant))); runs++;
+    const verloren = _verlorenDagen(resultaat);
+    const maat = _dimMaat(cfg, opstelling);
+    stappen.push({ fase: 'groei', maat, eenheid: eenh, verloren_dagen: verloren });
+    console.log(`[dim] ${opstelling} groei ${i}: ${maat} ${eenh} → ${verloren} verloren dagen`);
+    if (verloren === 0) { okMaat = maat; okCfg = JSON.parse(JSON.stringify(cfg)); okRes = resultaat; break; }
+    laatsteFaal = maat;
+    if (i === DIM_MAX_ITER) {
+      console.warn(`[dim] ${opstelling}: NIET haalbaar na ${DIM_MAX_ITER} groeistappen (${verloren} verloren dagen)`);
+      return { cfg, resultaat, variant, haalbaar: false, iteraties: runs, stappen,
+               verloren_dagen: verloren, totaal_dagen: _totaalDagen(resultaat) };
+    }
+    _dimZet(cfg, opstelling, maat * DIM_GROEI);
+  }
+
+  // ── Fase 2: binair verfijnen tussen de laatste faal en het eerste succes ──
+  // Zonder dit weet je enkel dat (bv.) 490 kWh werkt en 370 niet — je koopt dan tot
+  // 30% te veel batterij. Elke stap is een sim-run, dus streng gecapt.
+  if (laatsteFaal !== null && okMaat !== null) {
+    let lo = laatsteFaal, hi = okMaat;
+    for (let j = 0; j < DIM_FIJN_ITER; j++) {
+      const mid = _dimZet(JSON.parse(JSON.stringify(cfg)), opstelling, (lo + hi) / 2);
+      if (mid <= lo || mid >= hi) break;          // geen ruimte meer binnen de afronding
+      const probe = JSON.parse(JSON.stringify(okCfg));
+      _dimZet(probe, opstelling, mid);
+      const r = await _runSimulatorOnce(buildSimInput(_variantUi(probe, variant))); runs++;
+      const verloren = _verlorenDagen(r);
+      stappen.push({ fase: 'verfijn', maat: mid, eenheid: eenh, verloren_dagen: verloren });
+      console.log(`[dim] ${opstelling} verfijn ${j}: ${mid} ${eenh} → ${verloren} verloren dagen`);
+      if (verloren === 0) { hi = mid; okMaat = mid; okCfg = probe; okRes = r; }
+      else { lo = mid; }
+    }
+  }
+  console.log(`[dim] ${opstelling}: haalbaar bij ${okMaat} ${eenh} na ${runs} run(s)`);
+  return { cfg: okCfg || cfg, resultaat: okRes || resultaat, variant, haalbaar: true,
+           iteraties: runs, stappen, gekozen_maat: okMaat, eenheid: eenh,
+           start_maat: (stappen[0] || {}).maat };
+}
+
 function _opstellingUi(ui, opstelling, cap) {
   const v = JSON.parse(JSON.stringify(ui || {}));
   if (opstelling === 'verhogen') {
@@ -1961,10 +2060,20 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
     // Opstelling 1 = toegangsvermogen verhogen; opstelling 2 = geadviseerde batterij.
     const opstellingen = {};
     for (const opst of ['verhogen', 'batterij']) {
-      const cfg = _opstellingUi(input, opst, cap);
+      let cfg = _opstellingUi(input, opst, cap);
+      // v15.19: ITERATIEVE DIMENSIONERING — voor BEIDE opstellingen.
+      // De maten die _laadplein_capaciteit aanlevert (verhoging_kw, advies_batterij_*)
+      // zijn vuistregels die op gemiddelden rekenen. De LP-dispatch rekent per kwartier
+      // met het echte profiel, de laadpuntlimieten en de SoC — en vindt dan geregeld dat
+      // het NIET past (bv. 260/365 dagen verloren). Een vergelijking tussen twee
+      // opstellingen die allebei laadvraag laten liggen is waardeloos, en een opstelling
+      // die faalt betaalt overschrijding → haar business case lijkt onterecht slecht.
+      // Daarom: groeien tot de dispatch zelf 0 verloren dagen meldt.
+      const dim = await _dimensioneerTotHaalbaar(cfg, opst, cap);
+      cfg = dim.cfg;
       const v = {};
-      v.geen     = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
-      v.sturing  = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+      v.geen     = dim.variant === 'geen'    ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
+      v.sturing  = dim.variant === 'sturing' ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
       v.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans')));
       // v15.18: geef de gebruikte configuratie mee terug — vooral de spanning, want
       // opstelling 1 kan naar MS zijn omgezet (>100 kVA). Zonder dit ziet de verkoper
@@ -1978,6 +2087,13 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
           aansluiting_kva: cfg.aansluiting_kva || input.aansluiting_kva || null,
           toegangsvermogen_kw: cfg.toegangsvermogen_kw || null,
           batterij: cfg.batterijCustom || null,
+        },
+        // v15.19: bewijs dat deze opstelling de laadvraag écht aankan (of niet).
+        dimensionering: {
+          haalbaar: dim.haalbaar, iteraties: dim.iteraties, beoordeeld_op: dim.variant,
+          stappen: dim.stappen, start_maat: dim.start_maat || null,
+          gekozen_maat: dim.gekozen_maat || null, eenheid: dim.eenheid || null,
+          verloren_dagen: dim.verloren_dagen || 0, totaal_dagen: dim.totaal_dagen || null,
         },
       };
     }
