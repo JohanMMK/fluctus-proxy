@@ -4,7 +4,7 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4.4 (juli 2026)
+ * Versie: 1.4.5 (juli 2026)
  *
  * Wijziging v1.4.1 → v1.4.3 (BUG: capaciteit-dubbeltelling — foute onderhandelingsmarge):
  *   ROOT CAUSE: prompt en frontend hanteerden TEGENSTRIJDIGE contracten. De prompt zei
@@ -183,7 +183,15 @@ Per regel:
   - aantal         = het getal in de kolom "Aantal" (bv. 9536 bij "9.536 kWh",
                      30 bij "30 dagen", 98 bij "98,00 kVA x 30 dagen")
   - eenheid        = "kWh" | "dagen" | "kVA" | "kW" | null
-  - eenheidsprijs  = het getal in de kolom "Eenheidsprijs" (bv. 0.11622)
+  - eenheidsprijs  = het GETAL in de kolom "Eenheidsprijs" (bv. 0.11622 of 35.18)
+  - prijs_eenheid  = de EENHEID die daar áchter staat, LETTERLIJK. Dit is cruciaal:
+                     "EUR/kWh" | "EUR/kVA/jaar" | "EUR/kW/jaar" | "EUR/jaar" | ...
+                     Bij "35,18 €/kVA/jaar" → prijs_eenheid = "EUR/kVA/jaar".
+                     Bij "0,11622 €/kWh"    → prijs_eenheid = "EUR/kWh".
+  - periode_dagen  = het AANTAL DAGEN dat de regel dekt, als dat vermeld staat.
+                     Bij "98,00 kVA x 30 dagen" → aantal = 98, eenheid = "kVA",
+                     periode_dagen = 30. Bij "30 dagen" als aantal → periode_dagen = 30.
+                     Staat er geen dagental → null.
   - bedrag_excl    = het bedrag in de kolom "excl. BTW" (bv. 1108.31)
   - groep          = "energie" (leverancierskosten), "distributie" (nettarieven
                      netbeheerder) of "heffing" (accijnzen/overheidstoeslagen)
@@ -194,8 +202,18 @@ Staat er geen aantal of eenheidsprijs bij een regel: zet die op null, maar vul
 bedrag_excl ALTIJD in.
 
 CONTROLEER JEZELF VÓÓR JE ANTWOORDT (dit is verplicht):
-  1. Per regel met aantal én eenheidsprijs: aantal × eenheidsprijs ≈ bedrag_excl.
-     Klopt dat niet, dan heb je die regel verkeerd gelezen — herlees ze.
+  1. Per regel met aantal én eenheidsprijs moet de rekensom kloppen. LET OP: dat
+     hangt af van prijs_eenheid — veel netkosten staan als JAARTARIEF en worden
+     pro rata over de factuurperiode gerekend:
+       - prijs per kWh   → bedrag = aantal × eenheidsprijs
+         bv. 9.536 kWh × 0,11622 €/kWh = € 1.108,31
+       - prijs per JAAR met een aantal in kVA/kW én periode_dagen
+                         → bedrag = aantal × eenheidsprijs × periode_dagen / 365
+         bv. 98 kVA × 35,18 €/kVA/jaar × 30/365 = € 283,36
+       - prijs per JAAR met het aantal in DAGEN
+                         → bedrag = eenheidsprijs × aantal / 365
+         bv. 30 dagen × 35,00 €/jaar = € 2,88
+     Klopt de som niet, dan heb je die regel verkeerd gelezen — herlees ze.
   2. De som van alle bedrag_excl ≈ het factuurtotaal excl. BTW dat onderaan de
      kostentabel staat. Wijkt dat af, dan mis je regels of las je er één fout.
   3. De groepstotalen hieronder MOETEN gelijk zijn aan de som van de regels per
@@ -306,6 +324,8 @@ JSON SCHEMA (output):
       "aantal": number of null,
       "eenheid": string of null,
       "eenheidsprijs": number of null,
+      "prijs_eenheid": string of null,
+      "periode_dagen": number of null,
       "bedrag_excl": number,
       "groep": "energie" | "distributie" | "heffing",
       "is_capaciteit": boolean
@@ -737,14 +757,36 @@ function regelsCheck(parsed) {
     if (r.is_capaciteit === true) capaciteit += b;
     const a = parseFloat(r.aantal), p = parseFloat(r.eenheidsprijs);
     if (isFinite(a) && isFinite(p)) {
-      const verwacht = a * p;
-      const tol = Math.max(0.02, Math.abs(b) * 0.01);   // 1 cent-ruis + 1% marge
-      if (Math.abs(verwacht - b) > tol) {
-        out.foute_regels.push({
-          i, omschrijving: r.omschrijving, aantal: a, eenheidsprijs: p, bedrag: b,
-          verwacht: Math.round(verwacht * 100) / 100,
-          reden: 'aantal × eenheidsprijs ≠ bedrag_excl'
-        });
+      // v1.4.5: EENHEID-BEWUSTE controle. Veel nettarieven staan als JAARTARIEF
+      // (€/kVA/jaar, €/kW/jaar, €/jaar) en worden pro rata over de factuurperiode
+      // gerekend. Een naïeve aantal × prijs gaf daar een VALS ALARM: 98 kVA × 35,18
+      // = € 3.448 terwijl de factuur (terecht) € 283,36 toont — dat is 30/365 ervan.
+      const pe = String(r.prijs_eenheid || '').toLowerCase();
+      const perJaar = /\/\s*jaar|\/\s*year|\/j\b/.test(pe);
+      const dagen = parseFloat(r.periode_dagen);
+      const eenh = String(r.eenheid || '').toLowerCase();
+      let verwacht, formule;
+      if (perJaar && eenh.indexOf('dag') === 0) {
+        verwacht = p * a / 365; formule = 'eenheidsprijs × dagen / 365';
+      } else if (perJaar && isFinite(dagen) && dagen > 0) {
+        verwacht = a * p * dagen / 365; formule = 'aantal × eenheidsprijs × dagen / 365';
+      } else if (perJaar) {
+        verwacht = null;   // jaartarief zonder dagental → niet controleerbaar, niet flaggen
+      } else {
+        verwacht = a * p; formule = 'aantal × eenheidsprijs';
+      }
+      if (verwacht !== null) {
+        const tol = Math.max(0.02, Math.abs(b) * 0.01);   // 1 cent-ruis + 1% marge
+        if (Math.abs(verwacht - b) > tol) {
+          out.foute_regels.push({
+            i, omschrijving: r.omschrijving, aantal: a, eenheidsprijs: p,
+            prijs_eenheid: r.prijs_eenheid || null, periode_dagen: isFinite(dagen) ? dagen : null,
+            bedrag: b, verwacht: Math.round(verwacht * 100) / 100,
+            reden: formule + ' ≠ bedrag_excl'
+          });
+        }
+      } else {
+        out.niet_controleerbaar = (out.niet_controleerbaar || 0) + 1;
       }
     }
   });
