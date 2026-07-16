@@ -1,7 +1,15 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.19.0 (iteratieve, dispatch-gevalideerde dimensionering per opstelling)
+// Versie:        v15.19.1 (haalbaarheidscriterium per opstelling — verloren_dagen volstond niet)
+// Wijziging v15.19.1 vs v15.19.0: het criterium "0 verloren dagen" was FOUT voor beide
+//   opstellingen. Opstelling 1 wordt ongestuurd beoordeeld; simulator.py bouwt de EV-last
+//   dan op een onbeperkte aansluiting (1e12) → nooit een tekort, nooit een verloren dag,
+//   de site betaalt gewoon overschrijding. De lus stopte dus bij iteratie 0 en liet een te
+//   kleine verzwaring staan. Opstelling 2 laat simulator.py ZELF de aansluiting verhogen
+//   als de batterij tekortschiet (toegangsvermogen_verhoogd_kw) — ook onzichtbaar in
+//   verloren_dagen. Nu: _opstellingHaalbaar toetst per opstelling op respectievelijk
+//   overschrijdingskost = 0 en geen geforceerde aansluitingsverhoging.
 // Wijziging v15.19.0 vs v15.18.0: _dimensioneerTotHaalbaar groeit de bepalende maat van
 //   ELKE opstelling tot de LP-dispatch 0 verloren dagen meldt (max 4 iteraties, +30%/stap).
 //   Opstelling 1 wordt beoordeeld ZONDER sturing (dat is het basisscenario), opstelling 2
@@ -1902,6 +1910,35 @@ function _totaalDagen(sim) {
   const d = (sim && sim.lp_diagnostics) || {};
   return d.totaal_dagen || 365;
 }
+
+// v15.19.1 — HAALBAARHEID per opstelling. 'verloren_dagen' alléén volstaat NIET:
+//   • Opstelling 1 wordt ongestuurd beoordeeld. simulator.py bouwt de EV-last dan op
+//     een onbeperkte aansluiting (1e12) → de energie komt er ALTIJD, er is nooit een
+//     tekort en nooit een verloren dag. De site overschrijdt simpelweg het contract en
+//     betaalt overschrijding. 'Verzwaren' betekent dus: groot genoeg dat dat NIET gebeurt
+//     → criterium = geen overschrijdingskost.
+//   • Opstelling 2 houdt de aansluiting en laat de batterij het opvangen. Schiet die
+//     tekort, dan verhoogt simulator.py ZELF de aansluiting (v1.8.10) en meldt dat via
+//     laadplein.toegangsvermogen_verhoogd_kw. Dat is het bewijs dat de batterij te klein
+//     is — de LP lost intussen probleemloos op.
+// Zonder deze check zou de lus bij iteratie 0 stoppen en een te kleine opstelling
+// doorrekenen: lage factuur, want er werd minder geladen of stilletjes verzwaard.
+function _opstellingHaalbaar(sim, opst) {
+  const verloren = _verlorenDagen(sim);
+  if (verloren > 0) return { ok: false, reden: `${verloren} verloren dagen (dispatch kon niet oplossen)` };
+  const lp = (sim && sim.laadplein) || {};
+  if (opst === 'verhogen') {
+    const jf = (sim && (sim.jaarfactuur || sim.factuur)) || {};
+    const gr = jf.groepen || {};
+    const B = gr.B_netgebruik_afname || gr.B || {};
+    const over = parseFloat(B.overschrijding_toegangsvermogen) || 0;
+    if (over > 1) return { ok: false, reden: `overschrijdingskost € ${Math.round(over)} — aansluiting nog te klein voor ongestuurd laden` };
+    return { ok: true };
+  }
+  const geforceerd = parseFloat(lp.toegangsvermogen_verhoogd_kw) || 0;
+  if (geforceerd > 0) return { ok: false, reden: `simulator moest de aansluiting met ${geforceerd} kW verhogen — batterij te klein` };
+  return { ok: true };
+}
 const DIM_MAX_ITER  = 4;      // cap: elke iteratie is een volle sim-run (~20-30s)
 const DIM_GROEI     = 1.30;   // 30% per stap — grof, maar convergeert snel genoeg
 const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succes-stap
@@ -1942,16 +1979,16 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
   // ── Fase 1: grof groeien tot het past ──
   for (let i = 0; i <= DIM_MAX_ITER; i++) {
     resultaat = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, variant))); runs++;
-    const verloren = _verlorenDagen(resultaat);
+    const h = _opstellingHaalbaar(resultaat, opstelling);
     const maat = _dimMaat(cfg, opstelling);
-    stappen.push({ fase: 'groei', maat, eenheid: eenh, verloren_dagen: verloren });
-    console.log(`[dim] ${opstelling} groei ${i}: ${maat} ${eenh} → ${verloren} verloren dagen`);
-    if (verloren === 0) { okMaat = maat; okCfg = JSON.parse(JSON.stringify(cfg)); okRes = resultaat; break; }
+    stappen.push({ fase: 'groei', maat, eenheid: eenh, ok: h.ok, reden: h.reden || null });
+    console.log(`[dim] ${opstelling} groei ${i}: ${maat} ${eenh} → ${h.ok ? 'OK' : h.reden}`);
+    if (h.ok) { okMaat = maat; okCfg = JSON.parse(JSON.stringify(cfg)); okRes = resultaat; break; }
     laatsteFaal = maat;
     if (i === DIM_MAX_ITER) {
-      console.warn(`[dim] ${opstelling}: NIET haalbaar na ${DIM_MAX_ITER} groeistappen (${verloren} verloren dagen)`);
+      console.warn(`[dim] ${opstelling}: NIET haalbaar na ${DIM_MAX_ITER} groeistappen (${h.reden})`);
       return { cfg, resultaat, variant, haalbaar: false, iteraties: runs, stappen,
-               verloren_dagen: verloren, totaal_dagen: _totaalDagen(resultaat) };
+               reden: h.reden, verloren_dagen: _verlorenDagen(resultaat), totaal_dagen: _totaalDagen(resultaat) };
     }
     _dimZet(cfg, opstelling, maat * DIM_GROEI);
   }
@@ -1967,10 +2004,10 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
       const probe = JSON.parse(JSON.stringify(okCfg));
       _dimZet(probe, opstelling, mid);
       const r = await _runSimulatorOnce(buildSimInput(_variantUi(probe, variant))); runs++;
-      const verloren = _verlorenDagen(r);
-      stappen.push({ fase: 'verfijn', maat: mid, eenheid: eenh, verloren_dagen: verloren });
-      console.log(`[dim] ${opstelling} verfijn ${j}: ${mid} ${eenh} → ${verloren} verloren dagen`);
-      if (verloren === 0) { hi = mid; okMaat = mid; okCfg = probe; okRes = r; }
+      const h2 = _opstellingHaalbaar(r, opstelling);
+      stappen.push({ fase: 'verfijn', maat: mid, eenheid: eenh, ok: h2.ok, reden: h2.reden || null });
+      console.log(`[dim] ${opstelling} verfijn ${j}: ${mid} ${eenh} → ${h2.ok ? 'OK' : h2.reden}`);
+      if (h2.ok) { hi = mid; okMaat = mid; okCfg = probe; okRes = r; }
       else { lo = mid; }
     }
   }
