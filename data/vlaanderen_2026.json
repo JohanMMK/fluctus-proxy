@@ -1,0 +1,164 @@
+{
+ "_leesmij": [
+  "Geverifieerde Vlaamse tariefwaarden 2026, rechtstreeks uit de VREG-tarieflijsten.",
+  "Bron: https://assets.vlaamsenutsregulator.be/2025-11/<CODE>%20-%202026%20-%20ELEK.pdf",
+  "  CODE = FA FHV FI FK FL FMV FW FZD",
+  "Geldig van 01/01/2026 t.e.m. 31/12/2026.",
+  "",
+  "KOLOM-MAPPING (de enige plek waar dit fout kan gaan):",
+  "  MS = kolom '1-26 kV-net'                     -> index 3 in de rijen",
+  "  LS = 'laagspanningsnet met piekmeting'       -> sectie 1.2, en index 5 in de",
+  "                                                  8-waarden-rijen (ODV, toeslagen)",
+  "",
+  "DUBBEL GEVERIFIEERD: deze waarden zijn twee keer onafhankelijk uit de PDF's",
+  "gehaald (twee verschillende extracties) en kwamen 14/14 exact overeen voor",
+  "Antwerpen. De kolom-mapping is extra bevestigd op Kempen en Midden-Vl., waar",
+  "index 1 en index 3 verschillende waarden hebben (Kempen ODV 0,0039994 vs",
+  "0,0040283) — een verkeerde mapping was daar meteen zichtbaar geweest.",
+  "",
+  "NIET in dit bestand (komen uit build_tarieven.py, VLAAMSE_HEFFINGEN):",
+  "  energiefonds, accijnzen, soldes, transport_* (= 0 in Vlaanderen)",
+  "",
+  "JAARLIJKS: dit bestand is een BOOTSTRAP. Bij de update voor 2027 draai je",
+  "  python3 build_tarieven.py --pdf-dir ./tariefkaarten/2027 --jaar 2027",
+  "en dan wordt dit bestand niet gebruikt."
+ ],
+ "_tariefjaar": 2026,
+ "_geverifieerd_op": "2026-07-16",
+
+ "Antwerpen|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FA%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 33.6582672, "maandpiek_eur_kw_jaar": 54.3035736,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 50.4873996, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.8921, "surcharges_eur_mwh": 0.2446, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 50.26
+ },
+ "Antwerpen|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FA%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 49.4036563,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 23.4492,
+  "odv_eur_mwh": 25.4845, "surcharges_eur_mwh": 1.569, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 123.51, "_aandeel_transmissie_pct": 26.80
+ },
+
+ "Halle-Vilv.|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FHV%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 37.1110092, "maandpiek_eur_kw_jaar": 60.1395192,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 55.6665144, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.8645, "surcharges_eur_mwh": 0.2753, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 51.30
+ },
+ "Halle-Vilv.|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FHV%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 56.0428955,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 27.0335,
+  "odv_eur_mwh": 24.4354, "surcharges_eur_mwh": 1.7081, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 140.11, "_aandeel_transmissie_pct": 26.51
+ },
+
+ "Imewo|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FI%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 36.105918, "maandpiek_eur_kw_jaar": 54.2288988,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 54.1588776, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.7033, "surcharges_eur_mwh": 0.2193, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 55.59
+ },
+ "Imewo|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FI%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 54.2009816,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 25.9311,
+  "odv_eur_mwh": 24.9198, "surcharges_eur_mwh": 1.4355, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 135.50, "_aandeel_transmissie_pct": 27.22
+ },
+
+ "Kempen|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FK%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 31.567734, "maandpiek_eur_kw_jaar": 46.8630636,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 47.3516016, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 4.0283, "surcharges_eur_mwh": 0.1922, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 50.35
+ },
+ "Kempen|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FK%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 56.2069857,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 26.3561,
+  "odv_eur_mwh": 31.9098, "surcharges_eur_mwh": 1.5179, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 140.52, "_aandeel_transmissie_pct": 28.53
+ },
+
+ "Limburg|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FL%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 30.4061988, "maandpiek_eur_kw_jaar": 48.912096,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 45.6092976, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.9405, "surcharges_eur_mwh": 0.6492, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 55.47
+ },
+ "Limburg|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FL%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 49.0469384,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 23.2082,
+  "odv_eur_mwh": 26.6707, "surcharges_eur_mwh": 4.3906, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 122.62, "_aandeel_transmissie_pct": 32.73
+ },
+
+ "Midden-Vl.|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FMV%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 35.1788388, "maandpiek_eur_kw_jaar": 50.4530592,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 52.7682588, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.587, "surcharges_eur_mwh": 0.2011, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 53.64
+ },
+ "Midden-Vl.|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FMV%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 50.1239818,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 24.8638,
+  "odv_eur_mwh": 23.6385, "surcharges_eur_mwh": 1.3038, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 125.31, "_aandeel_transmissie_pct": 28.58
+ },
+
+ "West|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FW%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 41.6436, "maandpiek_eur_kw_jaar": 59.7614052,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 62.4654, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 4.0025, "surcharges_eur_mwh": 0.2219, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 53.90
+ },
+ "West|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FW%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 57.0995726,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 28.0823,
+  "odv_eur_mwh": 33.2887, "surcharges_eur_mwh": 1.8227, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 142.75, "_aandeel_transmissie_pct": 25.32
+ },
+
+ "Zenne-Dijle|MS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FZD%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 40.6844988, "maandpiek_eur_kw_jaar": 59.85696,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 61.0267488, "proportioneel_eur_mwh": 0.0,
+  "odv_eur_mwh": 3.9196, "surcharges_eur_mwh": 0.3058, "databeheer_eur_jaar": 57.65,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 150.8082,
+  "_aandeel_transmissie_pct": 50.55
+ },
+ "Zenne-Dijle|LS": {
+  "_bron": "https://assets.vlaamsenutsregulator.be/2025-11/FZD%20-%202026%20-%20ELEK.pdf",
+  "toegangsvermogen_eur_kw_jaar": 0.0, "maandpiek_eur_kw_jaar": 56.1228635,
+  "overschrijding_toegangsvermogen_eur_kw_jaar": 0.0, "proportioneel_eur_mwh": 27.1123,
+  "odv_eur_mwh": 26.2323, "surcharges_eur_mwh": 2.0475, "databeheer_eur_jaar": 17.85,
+  "reactief_eur_mvarh": 13.4149, "maximumtarief_eur_mwh": 327.6168,
+  "_minimale_bijdrage_eur_jaar": 140.31, "_aandeel_transmissie_pct": 27.10
+ }
+}
