@@ -1,7 +1,44 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.19.1 (haalbaarheidscriterium per opstelling — verloren_dagen volstond niet)
+// Versie:        v15.20.1 (adaptieve opstelling 3; krimpfase in de dimensionering)
+// Wijziging v15.20.1 vs v15.20.0:
+//   1. ADAPTIEVE DERDE OPSTELLING. 'ms_batterij' was altijd opstelling 3, maar staat de
+//      site AL op MS dan is dat een exacte kopie van opstelling 2 (zelfde batterij,
+//      zelfde aansluiting, zelfde kaart, geen cabine): vijf sim-runs om hetzelfde getal
+//      twee keer te tonen, en een "keuze" die geen keuze is. Nu: al op MS -> 'mix'.
+//      Opstelling 1 en 2 zijn de twee UITERSTEN (alles-aansluiting vs alles-batterij);
+//      het optimum ligt bijna altijd in het binnengebied, want kWh is duur (350 EUR) en
+//      kVA goedkoop (100 EUR). _dimensioneerMix doorloopt drie mengverhoudingen, zoekt
+//      per punt de kleinst werkende batterij, en kiest op TOTALE eigendomskost
+//      (investering + factuur x horizon). De constanten komen uit de frontend
+//      (input._investering) zodat ze op een plek staan; ontbreken ze, dan valt de keuze
+//      terug op het middelste punt MET expliciete waarschuwing i.p.v. een vals optimum.
+//   2. KRIMPFASE. De zoeklus groeide alleen. Voor opstelling 2 klopt dat meestal (de
+//      vuistregel is te klein), maar bij een mix met ruimere aansluiting volstond de
+//      startbatterij vaak meteen — en die werd dan geaccepteerd terwijl de helft ook had
+//      gekund. Mix 67% kreeg zo 279 kWh waar 130 volstond: 149 kWh en ~52.000 EUR
+//      fantoom-capex, wat juist de kVA-rijke mixen onterecht afstrafte. Dat vertekende
+//      exact de vergelijking waarvoor de mix bestaat (TCO-spreiding 55.000 -> 10.000 EUR).
+//      Nu: slaagt de startmaat meteen, dan krimpen tot het NIET meer past, daarna binair
+//      verfijnen. Symmetrisch aan de groeifase.
+// Wijziging v15.20.0 vs v15.19.1:
+//   1. OPSTELLING 3 — 'ms_batterij'. Zelfde batterij en zelfde aansluiting als opstelling
+//      2, maar op de MS-tariefkaart. Reden: op LS is de distributie grotendeels
+//      VOLUMETRISCH (netgebruik 23-28 + ODV 24-33 EUR/MWh), op MS is dat nul en zit alles
+//      in EUR/kW. Een batterij vlakt vermogen af — de as waar MS zijn geld haalt — maar
+//      kan niets doen aan een tarief per MWh. Op LS wordt hij dus afgestraft op een as
+//      waar hij geen invloed op heeft. Kantelpunt (Fluvius West 2026): ~93 MWh/jaar; elk
+//      laadplein zit daarboven. Opstelling 2 en 3 verschillen ENKEL in de spanning, zodat
+//      vergelijking.tariefkaart_effect_* exact de LS/MS-keuze isoleert. De cabinekost
+//      (~90.000 EUR) hoort in de investeringsvergelijking, niet in de sim.
+//      Dimensionering, haalbaarheidscriterium en zoeklus zijn identiek aan opstelling 2.
+//   2. ASYNC + LIVE LOG. Drie opstellingen x tot 7 sim-runs loopt op tot enkele minuten:
+//      te lang voor een blokkerende POST (proxy kapt af) en de verkoper keek al die tijd
+//      naar een dood scherm. POST met _async:true geeft nu meteen een job_id terug en
+//      draait door in de achtergrond; GET /api/sim-voortgang/:id geeft status + logregels.
+//      Zonder _async blijft het synchrone pad exact zoals vroeger (geen breuk).
+// Wijziging v15.19.1 vs v15.19.0: het criterium "0 verloren dagen" was FOUT voor beide
 // Wijziging v15.19.1 vs v15.19.0: het criterium "0 verloren dagen" was FOUT voor beide
 //   opstellingen. Opstelling 1 wordt ongestuurd beoordeeld; simulator.py bouwt de EV-last
 //   dan op een onbeperkte aansluiting (1e12) → nooit een tekort, nooit een verloren dag,
@@ -1939,9 +1976,71 @@ function _opstellingHaalbaar(sim, opst) {
   if (geforceerd > 0) return { ok: false, reden: `simulator moest de aansluiting met ${geforceerd} kW verhogen — batterij te klein` };
   return { ok: true };
 }
+// ─── SIM-JOBS: voortgang van lange simulaties (v15.20) ───────────────────────
+// Met DRIE opstellingen x tot 7 sim-runs elk loopt /api/nominatie-sim-3 op tot
+// enkele minuten. Dat is te lang voor een blokkerende POST (Railway/proxy kapt af)
+// en de verkoper zit al die tijd naar een dood scherm te kijken.
+// Daarom: POST met _async:true geeft direct een job_id terug en draait door in de
+// achtergrond; de UI pollt /api/sim-voortgang/:id en toont het log live.
+// Het synchrone pad blijft bestaan (geen _async) zodat oude clients niet breken.
+//
+// Bewust in-memory: een job leeft hooguit enkele minuten en een herstart van de
+// service is zeldzaam. Gaat een job toch verloren, dan krijgt de UI 404 en kan ze
+// gewoon opnieuw starten. Een DB erbij halen voor 5 minuten state is overkill.
+const SIM_JOBS = new Map();
+const JOB_TTL_MS = 15 * 60 * 1000;
+function _jobNieuw() {
+  for (const [k, v] of SIM_JOBS) if (Date.now() - v.gestart > JOB_TTL_MS) SIM_JOBS.delete(k);
+  const id = 'job_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+  const job = { id, status: 'bezig', log: [], resultaat: null, fout: null,
+                gestart: Date.now(), runs: 0, runs_verwacht: 0 };
+  SIM_JOBS.set(id, job);
+  return job;
+}
+// Eén logregel = één ding dat de verkoper snapt. Geen debug-spam: dit scherm is
+// verkoop-zichtbaar. `fase` stuurt het icoon in de UI.
+function _jlog(job, fase, tekst, extra) {
+  const r = Object.assign({ t: job ? Date.now() - job.gestart : 0, fase, tekst }, extra || {});
+  if (job) job.log.push(r);
+  console.log(`[sim-3] ${fase}: ${tekst}`);
+  return r;
+}
+const OPSTELLING_LABEL = {
+  verhogen:    'Opstelling 1 — toegangsvermogen verhogen',
+  batterij:    'Opstelling 2 — batterij, aansluiting blijft',
+  ms_batterij: 'Opstelling 3 — naar MS + batterij',
+  mix:         'Opstelling 3 — mix: deels verzwaren, kleinere batterij',
+};
+
+// v15.20.1 — WELKE DERDE OPSTELLING?
+// Opstelling 3 was eerst altijd 'naar MS + batterij'. Maar staat de site AL op MS,
+// dan is dat een exacte kopie van opstelling 2: zelfde batterij, zelfde aansluiting,
+// zelfde tariefkaart, geen cabine. Vijf sim-runs om hetzelfde getal twee keer te
+// tonen — en een "keuze" voorleggen die geen keuze is.
+//
+// Dan is er wél een zinvolle derde weg. Opstelling 1 en 2 zijn de twee UITERSTEN:
+// alles oplossen met de aansluiting, of alles met de batterij. Het optimum ligt
+// bijna altijd ertussen: een beetje verzwaren maakt de batterij fors kleiner, en
+// batterij-kWh is duur (350 EUR/kWh) terwijl kVA relatief goedkoop is (100 EUR/kVA).
+// Daarom: al op MS -> 'mix' (zoek de beste verhouding), nog op LS -> 'ms_batterij'
+// (de tariefkaart-vraag, die dan wél iets te kiezen geeft).
+function _derdeOpstelling(input) {
+  return ((input.spanning || 'LS') === 'MS') ? 'mix' : 'ms_batterij';
+}
+// Mengverhoudingen: aandeel van de VOLLEDIGE verzwaring uit opstelling 1.
+// Drie punten in het binnengebied — genoeg om de vorm van de afweging te zien,
+// zonder de looptijd te verdrievoudigen. Geen bewezen optimum, wel de beste van drie.
+const MIX_FRACTIES = [0.33, 0.50, 0.67];
+
 const DIM_MAX_ITER  = 4;      // cap: elke iteratie is een volle sim-run (~20-30s)
 const DIM_GROEI     = 1.30;   // 30% per stap — grof, maar convergeert snel genoeg
 const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succes-stap
+// v15.20: opstelling 3 (MS + batterij) gedraagt zich voor de zoeklus IDENTIEK aan
+// opstelling 2 — de bepalende maat is de batterij-kWh. Enige verschil is de
+// tariefkaart (MS i.p.v. LS), en die zit in de config, niet in de zoeklogica.
+function _isBatterijOpstelling(opst) {
+  return opst === 'batterij' || opst === 'ms_batterij' || opst === 'mix';
+}
 // Maat uitlezen/zetten per opstelling — zo blijft de zoeklus opstelling-agnostisch.
 function _dimMaat(cfg, opst) {
   return (opst === 'verhogen') ? (cfg.aansluiting_kva || 0)
@@ -1958,6 +2057,9 @@ function _dimZet(cfg, opst, maat) {
     }
     return n;
   }
+  // Batterij-opstellingen (2 en 3): de kWh is de bepalende maat. De spanning ligt
+  // al vast in cfg (LS voor opstelling 2, MS voor 3) en mag hier NIET wijzigen —
+  // anders meet de vergelijking tussen 2 en 3 niet langer alleen de tariefkaart.
   const kwh = Math.ceil(maat / 10) * 10;
   cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, { kwh, kw: Math.round(kwh / 2) });
   return kwh;
@@ -1968,7 +2070,7 @@ function _dimEenheid(opst) { return (opst === 'verhogen') ? 'kVA' : 'kWh'; }
 //  - 'verhogen': het toegangsvermogen (opstelling 1 wordt beoordeeld ZONDER sturing,
 //                want dát is het basisscenario: verzwaren en verder niets slims doen)
 //  - 'batterij': de batterijcapaciteit (beoordeeld MET sturing 2, want zo wordt ze ingezet)
-async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
+async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap, job) {
   const variant = (opstelling === 'verhogen') ? 'geen' : 'sturing';
   const eenh = _dimEenheid(opstelling);
   let cfg = JSON.parse(JSON.stringify(cfg0));
@@ -1976,21 +2078,79 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
   let laatsteFaal = null;              // grootste maat die NIET volstond
   let okMaat = null, okCfg = null, okRes = null;
 
-  // ── Fase 1: grof groeien tot het past ──
-  for (let i = 0; i <= DIM_MAX_ITER; i++) {
+  // ── Fase 0: past de startmaat meteen? Dan KRIMPEN, niet groeien ──
+  // v15.20.1: de zoeklus groeide alleen. Voor opstelling 2 klopt dat meestal (de
+  // vuistregel is te klein), maar bij een mix met een ruimere aansluiting volstaat de
+  // startbatterij vaak meteen — en dan accepteerden we die, terwijl de helft ook had
+  // gekund. Dat maakte juist de mixen met veel kVA onterecht duur in de TCO, dus
+  // vertekende het exact de vergelijking waarvoor de mix bestaat.
+  {
+    const _m0 = _dimMaat(cfg, opstelling);
+    _jlog(job, 'run', `${OPSTELLING_LABEL[opstelling] || opstelling}: proefdraai op ${_m0} ${eenh}…`,
+          { opstelling, maat: _m0, eenheid: eenh });
+    const r0 = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, variant))); runs++;
+    if (job) job.runs = (job.runs || 0) + 1;
+    const h0 = _opstellingHaalbaar(r0, opstelling);
+    stappen.push({ fase: 'start', maat: _m0, eenheid: eenh, ok: h0.ok, reden: h0.reden || null });
+    if (h0.ok) {
+      _jlog(job, 'ok', `${_m0} ${eenh} volstaat meteen — kijken of het kleiner kan`,
+            { opstelling, maat: _m0, eenheid: eenh });
+      okMaat = _m0; okCfg = JSON.parse(JSON.stringify(cfg)); okRes = r0; resultaat = r0;
+      // Krimpen tot het NIET meer past; dat punt wordt de ondergrens van de verfijning.
+      let krimp = JSON.parse(JSON.stringify(cfg));
+      for (let k = 0; k < DIM_MAX_ITER; k++) {
+        const kleiner = _dimZet(krimp, opstelling, _dimMaat(krimp, opstelling) / DIM_GROEI);
+        if (kleiner <= 0 || kleiner >= okMaat) break;
+        _jlog(job, 'run', `Kan het met ${kleiner} ${eenh}?`, { opstelling, maat: kleiner, eenheid: eenh });
+        const rk = await _runSimulatorOnce(buildSimInput(_variantUi(krimp, variant))); runs++;
+        if (job) job.runs = (job.runs || 0) + 1;
+        const hk = _opstellingHaalbaar(rk, opstelling);
+        stappen.push({ fase: 'krimp', maat: kleiner, eenheid: eenh, ok: hk.ok, reden: hk.reden || null });
+        if (hk.ok) {
+          _jlog(job, 'ok', `Ja — ${kleiner} ${eenh} volstaat ook`, { opstelling, maat: kleiner, eenheid: eenh });
+          okMaat = kleiner; okCfg = JSON.parse(JSON.stringify(krimp)); okRes = rk; resultaat = rk;
+        } else {
+          _jlog(job, 'faal', `Nee — ${kleiner} ${eenh} is te krap`, { opstelling, maat: kleiner, eenheid: eenh });
+          laatsteFaal = kleiner; break;
+        }
+      }
+      // Door naar fase 2 (binair verfijnen tussen laatsteFaal en okMaat).
+      cfg = okCfg;
+    } else {
+      laatsteFaal = _m0;
+      _jlog(job, 'faal', `${_m0} ${eenh} volstaat niet: ${h0.reden}`, { opstelling, maat: _m0, eenheid: eenh });
+      const _nw = _dimZet(cfg, opstelling, _m0 * DIM_GROEI);
+      _jlog(job, 'groei', `Te klein — opschalen naar ${_nw} ${eenh} en opnieuw proberen`,
+            { opstelling, maat: _nw, eenheid: eenh });
+    }
+  }
+
+  // ── Fase 1: grof groeien tot het past (overgeslagen als fase 0 al slaagde) ──
+  for (let i = 0; okMaat === null && i <= DIM_MAX_ITER; i++) {
+    const _maat0 = _dimMaat(cfg, opstelling);
+    _jlog(job, 'run', `${OPSTELLING_LABEL[opstelling] || opstelling}: proefdraai op ${_maat0} ${eenh}…`,
+          { opstelling, maat: _maat0, eenheid: eenh });
     resultaat = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, variant))); runs++;
+    if (job) job.runs = (job.runs || 0) + 1;
     const h = _opstellingHaalbaar(resultaat, opstelling);
     const maat = _dimMaat(cfg, opstelling);
     stappen.push({ fase: 'groei', maat, eenheid: eenh, ok: h.ok, reden: h.reden || null });
-    console.log(`[dim] ${opstelling} groei ${i}: ${maat} ${eenh} → ${h.ok ? 'OK' : h.reden}`);
+    _jlog(job, h.ok ? 'ok' : 'faal',
+          h.ok ? `${maat} ${eenh} volstaat — alle laaddagen opgelost`
+               : `${maat} ${eenh} volstaat niet: ${h.reden}`,
+          { opstelling, maat, eenheid: eenh });
     if (h.ok) { okMaat = maat; okCfg = JSON.parse(JSON.stringify(cfg)); okRes = resultaat; break; }
     laatsteFaal = maat;
     if (i === DIM_MAX_ITER) {
-      console.warn(`[dim] ${opstelling}: NIET haalbaar na ${DIM_MAX_ITER} groeistappen (${h.reden})`);
+      _jlog(job, 'waarschuwing',
+            `${OPSTELLING_LABEL[opstelling] || opstelling}: niet haalbaar na ${DIM_MAX_ITER} groeistappen (${h.reden})`,
+            { opstelling });
       return { cfg, resultaat, variant, haalbaar: false, iteraties: runs, stappen,
                reden: h.reden, verloren_dagen: _verlorenDagen(resultaat), totaal_dagen: _totaalDagen(resultaat) };
     }
-    _dimZet(cfg, opstelling, maat * DIM_GROEI);
+    const _nw = _dimZet(cfg, opstelling, maat * DIM_GROEI);
+    _jlog(job, 'groei', `Te klein — opschalen naar ${_nw} ${eenh} en opnieuw proberen`,
+          { opstelling, maat: _nw, eenheid: eenh });
   }
 
   // ── Fase 2: binair verfijnen tussen de laatste faal en het eerste succes ──
@@ -2003,18 +2163,83 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap) {
       if (mid <= lo || mid >= hi) break;          // geen ruimte meer binnen de afronding
       const probe = JSON.parse(JSON.stringify(okCfg));
       _dimZet(probe, opstelling, mid);
+      _jlog(job, 'run', `Verfijnen: past ${mid} ${eenh} ook nog? (tussen ${lo} en ${hi})`,
+            { opstelling, maat: mid, eenheid: eenh });
       const r = await _runSimulatorOnce(buildSimInput(_variantUi(probe, variant))); runs++;
+      if (job) job.runs = (job.runs || 0) + 1;
       const h2 = _opstellingHaalbaar(r, opstelling);
       stappen.push({ fase: 'verfijn', maat: mid, eenheid: eenh, ok: h2.ok, reden: h2.reden || null });
-      console.log(`[dim] ${opstelling} verfijn ${j}: ${mid} ${eenh} → ${h2.ok ? 'OK' : h2.reden}`);
+      _jlog(job, h2.ok ? 'ok' : 'faal',
+            h2.ok ? `${mid} ${eenh} volstaat ook — dat scheelt ${hi - mid} ${eenh}`
+                  : `${mid} ${eenh} is net te krap`,
+            { opstelling, maat: mid, eenheid: eenh });
       if (h2.ok) { hi = mid; okMaat = mid; okCfg = probe; okRes = r; }
       else { lo = mid; }
     }
   }
-  console.log(`[dim] ${opstelling}: haalbaar bij ${okMaat} ${eenh} na ${runs} run(s)`);
+  _jlog(job, 'klaar', `${OPSTELLING_LABEL[opstelling] || opstelling}: gedimensioneerd op ${okMaat} ${eenh} (${runs} proefdraaien)`,
+        { opstelling, maat: okMaat, eenheid: eenh });
   return { cfg: okCfg || cfg, resultaat: okRes || resultaat, variant, haalbaar: true,
            iteraties: runs, stappen, gekozen_maat: okMaat, eenheid: eenh,
            start_maat: (stappen[0] || {}).maat };
+}
+
+// v15.20.1: doorloop de mengverhoudingen, dimensioneer per punt de batterij, en kies
+// op TOTALE EIGENDOMSKOST (investering + factuur x horizon). Kiezen op factuurkost
+// alleen zou altijd de grootste aansluiting winnen — die verlaagt de factuur maar
+// kost kapitaal. Kiezen op investering alleen zou altijd de kleinste winnen.
+async function _dimensioneerMix(input, cap, job) {
+  const inv = input._investering || null;
+  const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
+  const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+  const punten = [];
+  for (const f of MIX_FRACTIES) {
+    const cfg0 = _mixCfg(input, cap, f);
+    if (cfg0._mix_kva <= huidig) {                      // niets te verzwaren op dit punt
+      _jlog(job, 'groei', `Mengverhouding ${Math.round(f*100)}% valt samen met de huidige aansluiting — overgeslagen`);
+      continue;
+    }
+    _jlog(job, 'opstelling',
+          `Mix ${Math.round(f*100)}%: aansluiting ${cfg0._mix_kva} kVA — hoe klein mag de batterij dan?`,
+          { opstelling: 'mix', maat: cfg0._mix_kva, eenheid: 'kVA' });
+    const dim = await _dimensioneerTotHaalbaar(cfg0, 'mix', cap, job);
+    if (!dim.haalbaar) {
+      _jlog(job, 'faal', `Mix ${Math.round(f*100)}%: geen werkende batterijmaat gevonden — overgeslagen`);
+      continue;
+    }
+    const kwh = dim.gekozen_maat || 0;
+    const jaarkost = _sub(dim.resultaat);
+    const tco = inv ? _mixTco(cfg0._mix_kva, kwh, !!dim.cfg._spanning_omgezet, inv, jaarkost, huidig) : null;
+    punten.push({ fractie: f, kva: cfg0._mix_kva, kwh, jaarkost,
+                  capex: tco ? tco.capex : null, tco: tco ? tco.tco : null, dim, cfg: dim.cfg });
+    _jlog(job, 'resultaat',
+          `Mix ${Math.round(f*100)}%: ${cfg0._mix_kva} kVA + ${kwh} kWh batterij` +
+          (tco ? ` — investering € ${Math.round(tco.capex).toLocaleString('nl-BE')}, ` +
+                 `factuur € ${Math.round(jaarkost).toLocaleString('nl-BE')}/jaar` : ''),
+          { opstelling: 'mix', kva: cfg0._mix_kva, kwh });
+  }
+  if (!punten.length) return null;
+  // Zonder investeringsconstanten kunnen we niet eerlijk kiezen -> middelste punt,
+  // en dat zeggen we ook zo in het log i.p.v. een optimum te suggereren.
+  let beste;
+  if (punten.every(p => p.tco != null)) {
+    beste = punten.reduce((a, b) => (b.tco < a.tco ? b : a));
+    _jlog(job, 'ok',
+          `Beste mengverhouding: ${beste.kva} kVA + ${beste.kwh} kWh ` +
+          `(laagste totale kost over ${(input._investering.horizon_jaar||15)} jaar van ${punten.length} onderzochte verhoudingen)`,
+          { opstelling: 'mix' });
+  } else {
+    beste = punten[Math.floor(punten.length / 2)];
+    _jlog(job, 'waarschuwing',
+          'Geen investeringsconstanten meegegeven — middelste mengverhouding gekozen, niet de goedkoopste.',
+          { opstelling: 'mix' });
+  }
+  beste.alternatieven = punten.map(p => ({ fractie: p.fractie, kva: p.kva, kwh: p.kwh,
+                                           jaarkost: Math.round(p.jaarkost),
+                                           capex: p.capex != null ? Math.round(p.capex) : null,
+                                           tco: p.tco != null ? Math.round(p.tco) : null,
+                                           gekozen: p === beste }));
+  return beste;
 }
 
 function _opstellingUi(ui, opstelling, cap) {
@@ -2034,14 +2259,66 @@ function _opstellingUi(ui, opstelling, cap) {
       v._spanning_omgezet = true;
       console.log(`[sim-3] opstelling 'verhogen': ${cap.benodigd_toegangsvermogen_kw} kVA > ${LS_MAX_KVA} → tariefkaart MS i.p.v. ${v._spanning_origineel}`);
     }
-  } else { // 'batterij'
+  } else { // 'batterij' en 'ms_batterij'
     v.batterijId = 'CUSTOM';
     v.batterijCustom = {
       naam: 'Advies-batterij', kw: cap.advies_batterij_kw, kwh: cap.advies_batterij_kwh,
       dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
     };
+    // v15.20 — OPSTELLING 3: zelfde batterij, zelfde aansluiting, ANDERE tariefkaart.
+    //
+    // Waarom dit een eigen opstelling verdient: op LS is de distributie voor een
+    // groot deel VOLUMETRISCH (23-28 EUR/MWh netgebruik + 24-33 EUR/MWh ODV), op MS
+    // is dat nul en zit alles in EUR/kW. Een batterij vlakt vermogen af — precies de
+    // as waar MS zijn geld haalt — maar kan niets doen aan een tarief per MWh. Op LS
+    // wordt hij dus afgestraft op een as waar hij geen invloed op heeft.
+    // Kantelpunt (Fluvius West 2026): ~93 MWh/jaar. Elk laadplein zit daarboven.
+    //
+    // Bewust GELIJK gehouden aan opstelling 2 (aansluiting, dimensioneringslogica,
+    // haalbaarheidscriterium) zodat het verschil tussen 2 en 3 exact één variabele
+    // meet: de tariefkaart. De prijs staat er los van (cabine ~90.000 EUR) en hoort
+    // in de investeringsvergelijking, niet in de sim.
+    if (opstelling === 'ms_batterij') {
+      v._spanning_origineel = v.spanning || 'LS';
+      v.spanning = 'MS';
+      v._spanning_omgezet = (v._spanning_origineel !== 'MS');
+      v._cabine_nodig = v._spanning_omgezet;
+      if (v._spanning_omgezet)
+        console.log(`[sim-3] opstelling 'ms_batterij': tariefkaart MS i.p.v. ${v._spanning_origineel} (cabine vereist)`);
+    }
+    // v15.20.1 'mix': deels verzwaren EN een batterij. De aansluiting wordt hier
+    // gezet door _mixCfg() (per mengverhouding); dit is enkel de batterij-basis.
   }
   return v;
+}
+
+// v15.20.1: één mengpunt. `fractie` = aandeel van de volledige verzwaring uit
+// opstelling 1. De batterij wordt daarna door de gewone zoeklus gedimensioneerd,
+// dus de mix is per constructie ook haalbaar — net als 1 en 2.
+function _mixCfg(input, cap, fractie) {
+  const v = _opstellingUi(input, 'batterij', cap);
+  const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
+  const volledig = Number(cap.benodigd_toegangsvermogen_kw || 0) || huidig;
+  const kva = Math.ceil((huidig + Math.max(0, volledig - huidig) * fractie) / 5) * 5;
+  v.aansluiting_kva = kva; v.aansluitingKva = kva; v.toegangsvermogen_kw = kva;
+  v._mix_fractie = fractie; v._mix_kva = kva; v._mix_huidig_kva = huidig;
+  if (kva > LS_MAX_KVA && v.spanning !== 'MS') {
+    v._spanning_origineel = v.spanning || 'LS';
+    v.spanning = 'MS'; v._spanning_omgezet = true; v._cabine_nodig = true;
+  }
+  return v;
+}
+// Totale eigendomskost van één mix: de factuur + de geannualiseerde investering.
+// De investeringsconstanten komen UIT DE FRONTEND (input._investering) zodat ze op
+// één plek staan; zonder die constanten kunnen we niet kiezen en valt de mix terug
+// op de middelste fractie.
+function _mixTco(kva, kwh, cabine, inv, jaarkost, huidigKva) {
+  const jaren = Number(inv.horizon_jaar) || 15;
+  const capex = (Math.max(0, kva - huidigKva) * (Number(inv.eur_per_kva) || 0))
+              + (kwh * (Number(inv.eur_per_kwh) || 0))
+              + (cabine ? (Number(inv.cabine_eur) || 0) : 0);
+  const metKabel = capex * (1 + (Number(inv.kabel_pct) || 0));
+  return { capex: metKabel, jaarkost, tco: metKabel + jaarkost * jaren };
 }
 
 app.post('/api/nominatie-sim-3', async (req, res) => {
@@ -2059,8 +2336,47 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
   if (!fs.existsSync(simulatorPath))
     return res.status(500).json({ error:'simulator.py niet gevonden' });
 
-  const startTime = Date.now();
+  // v15.20: async-modus. De UI zet _async:true, krijgt meteen een job_id en pollt
+  // /api/sim-voortgang/:id. Zonder _async blijft alles exact zoals vroeger — oude
+  // clients en de retry-ladder merken niets.
+  if (input._async) {
+    const job = _jobNieuw();
+    res.json({ ok: true, async: true, job_id: job.id });
+    _draaiSim3(input, job)
+      .then(r => { job.resultaat = r; job.status = 'klaar';
+                   _jlog(job, 'klaar', 'Simulatie afgerond.'); })
+      .catch(e => { job.fout = e.message; job.status = 'fout';
+                    _jlog(job, 'fout', 'Simulatie gefaald: ' + e.message);
+                    console.error('[sim-3] async fout:', e.message); });
+    return;
+  }
   try {
+    const r = await _draaiSim3(input, null);
+    return res.json(r);
+  } catch (e) {
+    console.error('[sim-3] fout:', e.message);
+    return res.status(500).json({ error: 'Simulatie-3 gefaald: ' + e.message });
+  }
+});
+
+// v15.20: voortgang van een async job. De UI pollt dit elke ~1,5s en toont het log.
+// Geen auth, consistent met /api/nominatie-sim-3 zelf. Een job_id is niet te raden
+// en bevat geen klantdata — enkel maten en statusregels.
+app.get('/api/sim-voortgang/:id', (req, res) => {
+  const job = SIM_JOBS.get(req.params.id);
+  if (!job) return res.status(404).json({ error: 'job onbekend of verlopen' });
+  return res.json({
+    ok: true, status: job.status, log: job.log,
+    runs: job.runs || 0, runs_verwacht: job.runs_verwacht || 0,
+    elapsed_ms: Date.now() - job.gestart,
+    resultaat: job.status === 'klaar' ? job.resultaat : null,
+    fout: job.fout || null,
+  });
+});
+
+async function _draaiSim3(input, job) {
+  const startTime = Date.now();
+  {
     const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
     const _kpi = (v, onbalansNvt) => {
       const kg = _sub(v.geen), ks = _sub(v.sturing), ko = _sub(v.onbalans);
@@ -2088,15 +2404,77 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
         ? await _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans')))
         : varianten.sturing;
       const kpi_sturing = _kpi(varianten, !heeftFlex);
-      console.log(`[sim-3] enkel — klaar in ${Date.now() - startTime}ms`);
-      return res.json({ ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap,
-        _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.4', heeftFlex } });
+      _jlog(job, 'klaar', `Aansluiting volstaat — geen opstellingen nodig (${Math.round((Date.now()-startTime)/1000)}s)`);
+      return { ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap,
+        _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.20.0', heeftFlex } };
     }
 
-    // ── Aansluiting ontoereikend voor de laadvraag → 2 opstellingen × 3 sturingen ──
-    // Opstelling 1 = toegangsvermogen verhogen; opstelling 2 = geadviseerde batterij.
+    // ── Aansluiting ontoereikend voor de laadvraag → 3 opstellingen × 3 sturingen ──
+    // Opstelling 1 = toegangsvermogen verhogen (LS, of MS als het >100 kVA moet)
+    // Opstelling 2 = geadviseerde batterij, aansluiting blijft, tariefkaart blijft LS
+    // Opstelling 3 = zelfde batterij, maar tariefkaart MS (v15.20)
+    //
+    // v15.20 — waarom opstelling 3: op LS is de distributie grotendeels VOLUMETRISCH
+    // (netgebruik 23-28 + ODV 24-33 EUR/MWh), op MS is dat nul en zit alles in EUR/kW.
+    // Een batterij vlakt vermogen af maar kan niets aan een EUR/MWh-tarief doen; op LS
+    // wordt hij dus afgestraft op een as waar hij geen invloed op heeft. Kantelpunt
+    // (Fluvius West 2026): ~93 MWh/jaar — elk laadplein zit daar ruim boven.
+    // v15.20.1: de derde opstelling hangt af van waar de site vandaan komt.
+    //   nog op LS -> 'ms_batterij': is de MS-tariefkaart de cabine waard?
+    //   al op MS  -> 'mix': MS+batterij ZOU een exacte kopie van opstelling 2 zijn
+    //                (zelfde batterij, zelfde aansluiting, zelfde kaart, geen cabine).
+    //                Dan is de zinvolle derde weg het BINNENGEBIED tussen de twee
+    //                uitersten: deels verzwaren maakt de batterij fors kleiner, en
+    //                kWh is duur (350 EUR) terwijl kVA goedkoop is (100 EUR).
+    const derde = _derdeOpstelling(input);
+    const OPSTELLINGEN = ['verhogen', 'batterij', derde];
+    _jlog(job, 'start', `Aansluiting te klein: ${cap.tekort_mwh} MWh raakt niet geladen. ` +
+                        `Drie opstellingen doorrekenen…`, { tekort_mwh: cap.tekort_mwh });
+    if (derde === 'mix')
+      _jlog(job, 'start', 'De site staat al op middenspanning, dus "naar MS + batterij" zou ' +
+                          'identiek zijn aan opstelling 2. In plaats daarvan zoeken we de beste ' +
+                          'mix van verzwaren en batterij.');
+    if (job) job.runs_verwacht = (derde === 'mix' ? 22 : 15);
     const opstellingen = {};
-    for (const opst of ['verhogen', 'batterij']) {
+    for (const opst of OPSTELLINGEN) {
+      _jlog(job, 'opstelling', OPSTELLING_LABEL[opst], { opstelling: opst });
+      // ── mix: eigen zoeklus over de mengverhoudingen ──
+      if (opst === 'mix') {
+        const m = await _dimensioneerMix(input, cap, job);
+        if (!m) { _jlog(job, 'waarschuwing', 'Geen werkende mix gevonden — opstelling 3 overgeslagen.'); continue; }
+        const cfgM = m.cfg;
+        const vm = {};
+        _jlog(job, 'run', `${OPSTELLING_LABEL.mix}: de drie sturingen doorrekenen…`, { opstelling: 'mix' });
+        vm.geen     = await _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'geen')));
+        vm.sturing  = m.dim.resultaat;
+        vm.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'onbalans')));
+        if (job) job.runs = (job.runs || 0) + 2;
+        opstellingen.mix = {
+          varianten: vm, kpi_sturing: _kpi(vm, false),
+          config: {
+            spanning: cfgM.spanning || input.spanning || 'LS',
+            spanning_omgezet: !!cfgM._spanning_omgezet,
+            spanning_origineel: cfgM._spanning_origineel || null,
+            aansluiting_kva: m.kva, toegangsvermogen_kw: m.kva,
+            batterij: cfgM.batterijCustom || null,
+            cabine_nodig: !!cfgM._spanning_omgezet,
+            mix_fractie: m.fractie, mix_huidig_kva: cfgM._mix_huidig_kva || null,
+          },
+          dimensionering: {
+            haalbaar: true, iteraties: m.dim.iteraties, beoordeeld_op: 'sturing',
+            stappen: m.dim.stappen, start_maat: m.dim.start_maat || null,
+            gekozen_maat: m.kwh, eenheid: 'kWh', verloren_dagen: 0, totaal_dagen: null,
+          },
+          mix: { fractie: m.fractie, kva: m.kva, kwh: m.kwh,
+                 capex: m.capex != null ? Math.round(m.capex) : null,
+                 alternatieven: m.alternatieven },
+        };
+        _jlog(job, 'resultaat',
+              `${OPSTELLING_LABEL.mix}: € ${Math.round(_sub(vm.sturing)).toLocaleString('nl-BE')}/jaar ` +
+              `op sturing 2 (${m.kva} kVA + ${m.kwh} kWh)`,
+              { opstelling: 'mix', subtotaal: Math.round(_sub(vm.sturing)) });
+        continue;
+      }
       let cfg = _opstellingUi(input, opst, cap);
       // v15.19: ITERATIEVE DIMENSIONERING — voor BEIDE opstellingen.
       // De maten die _laadplein_capaciteit aanlevert (verhoging_kw, advies_batterij_*)
@@ -2106,12 +2484,14 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
       // opstellingen die allebei laadvraag laten liggen is waardeloos, en een opstelling
       // die faalt betaalt overschrijding → haar business case lijkt onterecht slecht.
       // Daarom: groeien tot de dispatch zelf 0 verloren dagen meldt.
-      const dim = await _dimensioneerTotHaalbaar(cfg, opst, cap);
+      const dim = await _dimensioneerTotHaalbaar(cfg, opst, cap, job);
       cfg = dim.cfg;
       const v = {};
+      _jlog(job, 'run', `${OPSTELLING_LABEL[opst]}: de drie sturingen doorrekenen…`, { opstelling: opst });
       v.geen     = dim.variant === 'geen'    ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
       v.sturing  = dim.variant === 'sturing' ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
       v.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans')));
+      if (job) job.runs = (job.runs || 0) + 2;
       // v15.18: geef de gebruikte configuratie mee terug — vooral de spanning, want
       // opstelling 1 kan naar MS zijn omgezet (>100 kVA). Zonder dit ziet de verkoper
       // niet dat hij twee verschillende tariefkaarten vergelijkt.
@@ -2124,6 +2504,9 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
           aansluiting_kva: cfg.aansluiting_kva || input.aansluiting_kva || null,
           toegangsvermogen_kw: cfg.toegangsvermogen_kw || null,
           batterij: cfg.batterijCustom || null,
+          // v15.20: een cabine is nodig zodra deze opstelling van LS naar MS gaat.
+          // Zowel opstelling 1 (>100 kVA) als opstelling 3 (bewuste keuze) kunnen dat.
+          cabine_nodig: !!cfg._spanning_omgezet,
         },
         // v15.19: bewijs dat deze opstelling de laadvraag écht aankan (of niet).
         dimensionering: {
@@ -2133,21 +2516,39 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
           verloren_dagen: dim.verloren_dagen || 0, totaal_dagen: dim.totaal_dagen || null,
         },
       };
+      _jlog(job, 'resultaat',
+            `${OPSTELLING_LABEL[opst]}: € ${Math.round(_sub(v.sturing)).toLocaleString('nl-BE')}/jaar ` +
+            `op sturing 2 (${cfg.spanning || 'LS'})`,
+            { opstelling: opst, subtotaal: Math.round(_sub(v.sturing)), spanning: cfg.spanning || 'LS' });
     }
-    // Batterij bespaart t.o.v. aansluiting-verhogen, per sturing (op subtotaal_excl_btw).
+    // Besparing t.o.v. opstelling 1 (verzwaren = het ijkpunt), per sturing.
+    // v15.20: modus heet nog 'twee_opstellingen' voor backwards-compat met de UI-check;
+    // het aantal opstellingen lees je uit Object.keys(opstellingen).
     const vergelijking = {};
     ['geen', 'sturing', 'onbalans'].forEach(s => {
       vergelijking['besparing_batterij_' + s + '_excl_btw'] =
         _sub(opstellingen.verhogen.varianten[s]) - _sub(opstellingen.batterij.varianten[s]);
+      if (opstellingen[derde]) {
+        vergelijking['besparing_' + derde + '_' + s + '_excl_btw'] =
+          _sub(opstellingen.verhogen.varianten[s]) - _sub(opstellingen[derde].varianten[s]);
+        // Bij 'ms_batterij' is dit het ZUIVERE tariefkaart-effect: opstelling 2 en 3
+        // zijn identiek op de spanning na, dus het verschil IS de LS/MS-keuze (los van
+        // de cabinekost). Bij 'mix' is het gewoon 3 t.o.v. 2 — daar verschilt óók de
+        // aansluiting, dus dat is géén zuiver effect en heet het anders.
+        vergelijking[(derde === 'ms_batterij' ? 'tariefkaart_effect_' : 'mix_vs_batterij_') + s + '_excl_btw'] =
+          _sub(opstellingen.batterij.varianten[s]) - _sub(opstellingen[derde].varianten[s]);
+      }
     });
-    console.log(`[sim-3] twee opstellingen — ${Date.now() - startTime}ms (tekort ${cap.tekort_mwh} MWh; verhoging ${cap.verhoging_kw} kW OF batterij ${cap.advies_batterij_kw}kW/${cap.advies_batterij_kwh}kWh)`);
-    return res.json({ ok: true, modus: 'twee_opstellingen', capaciteit: cap, opstellingen, vergelijking,
-      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.15.4' } });
-  } catch (e) {
-    console.error('[sim-3] fout:', e.message);
-    return res.status(500).json({ error: 'Simulatie-3 gefaald: ' + e.message });
+    _jlog(job, 'klaar',
+          `Drie opstellingen doorgerekend in ${Math.round((Date.now() - startTime) / 1000)}s ` +
+          `(${job ? job.runs : '?'} sim-runs).`);
+    console.log(`[sim-3] drie opstellingen — ${Date.now() - startTime}ms (tekort ${cap.tekort_mwh} MWh)`);
+    return { ok: true, modus: 'twee_opstellingen', capaciteit: cap, opstellingen, vergelijking,
+      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.20.1',
+               opstellingen: Object.keys(opstellingen), derde_opstelling: derde,
+               sim_runs: job ? job.runs : null } };
   }
-});
+}
 
 // ─── BUILD SIM INPUT ─────────────────────────────────────────────────────────
 function buildSimInput(ui) {
