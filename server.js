@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.20.3 (fix: _grdNaarZone bestond niet — regio-tarieven gaf 500)
+// Wijziging v15.20.3 vs v15.20.2: /api/regio-tarieven verwees naar _grdNaarZone(), een
+//   helper die niet bestaat. De ternary-guard (_grdNaarZone ? ... : null) beschermt daar
+//   NIET tegen: een niet-gedeclareerde identifier gooit een ReferenceError, geen
+//   undefined. Nu dezelfde zone-afleiding als _kiesTarieven: GRD_NAAR_ZONE[grd] met
+//   terugval op de naam zonder 'Fluvius '-prefix.
 // Versie:        v15.20.2 (regio-tarieven geeft een oordeel: welke tariefkaart draait er?)
 // Wijziging v15.20.2 vs v15.20.1: /api/regio-tarieven gaf losse getallen terug die je
 //   zelf moest duiden. Daardoor kon de proxy op de OUDE tarieven.json blijven draaien
@@ -1252,8 +1258,21 @@ app.get('/api/regio-tarieven', (req, res) => {
       oordeel = 'OK';
       uitleg = `Regio ${regio}: transportbehandeling klopt.`;
     }
+    // Een onbekende GRD valt in _kiesTarieven stil terug op de West-kaart. Dan een
+    // vrolijke "OK" teruggeven is misleidend: je beoordeelt een kaart die niet van
+    // deze klant is. Expliciet melden.
+    const zoneKey = (GRD_NAAR_ZONE[grd] || String(grd || '').replace(/^Fluvius\s+/, '')) + '|' + spanning;
+    const exact = !!(TARIEVEN_MAP && TARIEVEN_MAP[zoneKey]);
+    if (!exact && oordeel === 'OK') {
+      oordeel = 'FALLBACK';
+      uitleg = `Geen kaart voor "${zoneKey}" — teruggevallen op West|${spanning}. ` +
+               `Het oordeel gaat dus NIET over deze netbeheerder.`;
+    }
     return res.json({
-      grd, spanning, zone: _grdNaarZone ? _grdNaarZone(grd) : null,
+      // De zone-afleiding staat in _kiesTarieven; hier dezelfde regel, niet een
+      // verzonnen helper. (v15.20.2 verwees naar _grdNaarZone, dat niet bestaat.)
+      grd, spanning, zone: (GRD_NAAR_ZONE[grd] || String(grd || '').replace(/^Fluvius\s+/, '')),
+      exacte_kaart: exact,
       oordeel, uitleg,
       tariefjaar: t._tariefjaar || null,
       regio, bron: t._bron || null,
