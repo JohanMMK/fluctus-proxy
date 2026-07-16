@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.9.0 (per-laadplein kwartier-arrays voor het laadplein-hoofdstuk)
+# Wijziging v1.9.0 vs v1.8.11: _bouw_ev_load kan via de optionele out-parameter
+#   per_plein_out per laadplein bijhouden wat er effectief geladen werd (kW/kwartier)
+#   en hoeveel er tekortkwam. output.laadplein.pleinen[] bevat nu per plein: naam,
+#   aantal, cap_kw, gevraagd_mwh, geladen_mwh, tekort_mwh, piek_kw en load_kw[].
+#   Voedt het laadplein-hoofdstuk in het financieel rapport (overzicht + heatmap per
+#   plein). Bewust een out-parameter: _bouw_ev_load wordt op zes plaatsen aangeroepen
+#   (o.a. in de binaire dimensioneringszoektocht); zonder per_plein_out is het gedrag
+#   exact identiek aan v1.8.11.
 # Versie:        v1.8.11 (per-kwartier-profielen in output voor financieel rapport)
 # Wijziging v1.8.11 vs v1.8.10: output.profielen met per-kwartier arrays
 #   (vermogen_aansluiting_kw, spot_prijs_eur_mwh, kost_eur_mwh) t.b.v. de heatmaps.
@@ -622,14 +631,22 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
 
 def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                   pv_kw: list, base_cons_kw: list, modus: str,
-                  connection_kw: float = 1e12, battery_kw: float = 0.0):
+                  connection_kw: float = 1e12, battery_kw: float = 0.0,
+                  per_plein_out: list = None):
     """Bouw het EV-laadprofiel (kW/kwartier) voor alle laadpleinen samen, CONNECTION-AWARE:
     per kwartier laden we max = min(laadpunt-cap, vrije ruimte onder het toegangsvermogen
     (+ batterij-buffer)). We zetten dus nooit 'ineens alle vermogen' aan.
     Returnt (ev_load, tekort_kwh): tekort = dagenergie die NIET geladen raakte binnen het
     venster onder de aansluiting (drijft de dimensionering van verhoging/batterij).
     Modi: 'onmiddellijk' (variant 1, chronologisch vullen), 'shift_spot' (PV-zelfconsumptie
-    dan goedkoopste spot), 'shift_onbalans' (idem maar prijs = min(spot, onbalans))."""
+    dan goedkoopste spot), 'shift_onbalans' (idem maar prijs = min(spot, onbalans)).
+
+    v1.9: per_plein_out (optioneel) — geef een lijst mee en die wordt gevuld met één dict
+    per laadplein: {'naam', 'bestaand', 'cap_kw', 'dag_kwh', 'tekort_kwh', 'load_kw': [...]}.
+    Nodig voor het laadplein-hoofdstuk in het financieel rapport (heatmap per plein).
+    Bewust een out-parameter i.p.v. een extra returnwaarde: _bouw_ev_load wordt op zes
+    plaatsen aangeroepen (o.a. in de binaire dimensioneringszoektocht) en die mogen niet
+    breken. Zonder per_plein_out is het gedrag identiek."""
     import datetime as _dt
     N = len(sim_timestamps)
     ev = [0.0] * N
@@ -647,6 +664,14 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
         return max(0.0, connection_kw + battery_kw - base_cons_kw[i] - ev[i])
 
     for rec in lp_prep['pleinen']:
+        # v1.9: per-plein tracking (alleen wanneer de caller erom vraagt).
+        _pp = None
+        if per_plein_out is not None:
+            _pp = {'naam': rec.get('naam', 'laadplein'), 'bestaand': bool(rec.get('bestaand')),
+                   'cap_kw': rec.get('cap_kw', 0.0), 'dag_kwh': rec.get('dag_kwh', 0.0),
+                   'periode_kwh': rec.get('periode_kwh', 0.0), 'aantal': rec.get('aantal', 0),
+                   'tekort_kwh': 0.0, 'load_kw': [0.0] * N}
+            per_plein_out.append(_pp)
         if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
             continue
         cap, vs, ve, dpw = rec['cap_kw'], rec['v_start'], rec['v_eind'], rec['dpw']
@@ -688,9 +713,13 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 take = min(beschikbaar_kw * dt_h, resterend)
                 if take > 0:
                     ev[i] += take / dt_h
+                    if _pp is not None:
+                        _pp['load_kw'][i] += take / dt_h
                     resterend -= take
             if resterend > 1e-6:
                 tekort_kwh += resterend  # paste niet onder de aansluiting in dit venster
+                if _pp is not None:
+                    _pp['tekort_kwh'] += resterend
     return ev, tekort_kwh
 
 
@@ -2498,6 +2527,7 @@ def run_simulation(inp: dict) -> dict:
     # bsp actief → shift op onbalans; anders → shift op spot + PV-zelfconsumptie.
     _ev_load = [0.0] * N
     _ev_mwh = 0.0
+    _ev_per_plein = []   # v1.9: per-laadplein kwartier-arrays (financieel rapport)
     _lp_cap = None
     _conn_verhoogd_kw = 0.0   # v1.8.10: auto-verhoging aansluiting bij te kleine batterij
     _conn_hard = inp['aansluiting'].get('max_afname_kw_hard', 1e12)
@@ -2520,9 +2550,11 @@ def run_simulation(inp: dict) -> dict:
             _ev_modus = 'shift_onbalans' if inp.get('bsp', {}).get('actief', False) else 'shift_spot'
             _ev_conn = _conn_hard
             _batt_kw = inp['batterij'].get('kw', 0) or 0
+        _ev_per_plein = []
         _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                              pv_kw, consumption_kw, _ev_modus,
-                                             connection_kw=_ev_conn, battery_kw=_batt_kw)
+                                             connection_kw=_ev_conn, battery_kw=_batt_kw,
+                                             per_plein_out=_ev_per_plein)
         # v1.8.10: MANUELE BATTERIJ ONTOEREIKEND (variant 2/3) → verhoog het
         # toegangsvermogen tot de laadvraag haalbaar wordt, i.p.v. dagen te
         # verliezen. (Variant 1 laadt ongetemperd op 1e12 → geen tekort, geen raise.)
@@ -2546,9 +2578,11 @@ def run_simulation(inp: dict) -> dict:
             inp['aansluiting']['max_afname_kw_hard'] = _hi
             if inp['aansluiting'].get('max_afname_kw_zacht', 0) < _hi:
                 inp['aansluiting']['max_afname_kw_zacht'] = _hi
+            _ev_per_plein = []
             _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                                  pv_kw, consumption_kw, _ev_modus,
-                                                 connection_kw=_ev_conn, battery_kw=_batt_kw)
+                                                 connection_kw=_ev_conn, battery_kw=_batt_kw,
+                                                 per_plein_out=_ev_per_plein)
             _w = (f"Manuele batterij ontoereikend voor de laadvraag → toegangsvermogen "
                   f"verhoogd met ~{_conn_verhoogd_kw:.0f} kW (naar {_hi:.0f} kW) zodat alles "
                   f"laadt. Overweeg een grotere batterij om die verhoging te vermijden.")
@@ -3109,6 +3143,25 @@ def run_simulation(inp: dict) -> dict:
             'toegangsvermogen_verhoogd_kw': _conn_verhoogd_kw,
             # v1.8: capaciteits-check + dimensionering (opstelling 1 = verhoging, opstelling 2 = batterij).
             'capaciteit': _lp_cap,
+            # v1.9: PER LAADPLEIN — kerncijfers + de kwartier-array van wat er effectief
+            # geladen werd. Voedt het laadplein-hoofdstuk in het financieel rapport
+            # (overzicht + heatmap per plein). Afgerond op 0,1 kW om de payload klein te
+            # houden: ~35.040 waarden per plein.
+            'pleinen': [
+                {
+                    'naam': _p['naam'],
+                    'aantal': _p['aantal'],
+                    'bestaand': _p['bestaand'],
+                    'cap_kw': round(_p['cap_kw'], 1),
+                    'dag_kwh': round(_p['dag_kwh'], 1),
+                    'gevraagd_mwh': round(_p['periode_kwh'] / 1000.0, 3),
+                    'geladen_mwh': round(sum(_p['load_kw']) * 0.25 / 1000.0, 3),
+                    'tekort_mwh': round(_p['tekort_kwh'] / 1000.0, 3),
+                    'piek_kw': round(max(_p['load_kw']) if _p['load_kw'] else 0.0, 1),
+                    'load_kw': [round(_x, 1) for _x in _p['load_kw']],
+                }
+                for _p in _ev_per_plein
+            ],
         },
         'maandstaten': maandstaten,
         'soc_reeks': soc_all[:N],  # cap to N
