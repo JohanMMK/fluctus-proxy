@@ -1,7 +1,15 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.20.1 (adaptieve opstelling 3; krimpfase in de dimensionering)
+// Versie:        v15.20.2 (regio-tarieven geeft een oordeel: welke tariefkaart draait er?)
+// Wijziging v15.20.2 vs v15.20.1: /api/regio-tarieven gaf losse getallen terug die je
+//   zelf moest duiden. Daardoor kon de proxy op de OUDE tarieven.json blijven draaien
+//   zonder dat iemand het merkte — het kwam pas uit toen een klantcase een
+//   capaciteitskost van 33.292 EUR toonde op een LS-aansluiting van 100 kVA (plafond:
+//   5.012 EUR). Nu geeft de endpoint een expliciet oordeel (OK / OUDE_KAART / VERDACHT /
+//   GEEN_KAART) op basis van de regio-regel: Vlaanderen en Brussel horen transport_* = 0
+//   te hebben (VREG-kaart bevat de transmissiekosten al), Wallonie juist wel. Plus
+//   tariefjaar, bron en de kerncijfers. Bedoeld als jaarlijkse deploy-check in november.
 // Wijziging v15.20.1 vs v15.20.0:
 //   1. ADAPTIEVE DERDE OPSTELLING. 'ms_batterij' was altijd opstelling 3, maar staat de
 //      site AL op MS dan is dat een exacte kopie van opstelling 2 (zelfde batterij,
@@ -1202,14 +1210,70 @@ app.get('/api/gemeenten-lijst', (req, res) => {
   res.json({ gemeenten: GEMEENTEN_LIJST });
 });
 
+// v15.20.2: WELKE TARIEFKAART DRAAIT ER?
+// Deze endpoint bestond al maar gaf enkel losse getallen terug — je moest zelf weten
+// welke waarde 'goed' was. Daardoor draaide de proxy een tijd op de oude kaart zonder
+// dat het opviel; het kwam pas uit toen een klantcase een capaciteitskost van 33.292
+// EUR toonde op een LS-aansluiting van 100 kVA, waar het plafond 5.012 EUR is.
+// Nu geeft hij een expliciet oordeel i.p.v. cijfers die je zelf moet duiden.
+//
+// Nu geeft hij een expliciet oordeel. De diagnose leunt op één veld:
+// transport_maandpiek_eur_kw_mnd hoort in Vlaanderen/Brussel 0 te zijn (de VREG-kaart
+// bevat de transmissiekosten al). Staat er 21,77 dan draait de oude kolomverschuiving,
+// die op LS ~26.000 EUR/jaar fantoomkost aanrekende bij 100 kW.
 app.get('/api/regio-tarieven', (req, res) => {
-  const t = _kiesTarieven(req.query.grd || 'Fluvius West', req.query.spanning || 'LS');
-  res.json({ grd:req.query.grd, spanning:req.query.spanning, tarieven:{
-    distributie: t.proportioneel_eur_mwh,
-    capaciteit:  t.maandpiek_eur_kw_jaar,
-    transmissie: t.transport_systeembeheer_eur_mwh + t.transport_reserves_eur_mwh + t.transport_marktintegratie_eur_mwh,
-    federale_heffing: t.accijnzen_staffel[0][1],
-  }, raw:t });
+  try {
+    const grd = req.query.grd || 'Fluvius West';
+    const spanning = req.query.spanning || 'LS';
+    const t = _kiesTarieven(grd, spanning) || {};
+    const _n = v => Number(v) || 0;
+    const trKw  = _n(t.transport_maandpiek_eur_kw_mnd) * 12 + _n(t.transport_jaarpiek_eur_kw_jaar)
+                + _n(t.transport_beschikbaar_eur_kva_jaar);
+    const trMwh = _n(t.transport_systeembeheer_eur_mwh) + _n(t.transport_reserves_eur_mwh)
+                + _n(t.transport_marktintegratie_eur_mwh);
+    const regio = t._regio || null;
+    const verwachtNul = (regio === 'Vlaanderen' || regio === 'Brussel');
+    let oordeel, uitleg;
+    if (!TARIEVEN_MAP || !Object.keys(TARIEVEN_MAP).length) {
+      oordeel = 'GEEN_KAART';
+      uitleg = 'data/tarieven.json is niet geladen — de server draait op de ingebouwde fallback.';
+    } else if (regio == null) {
+      oordeel = 'OUDE_KAART';
+      uitleg = 'Geen _regio-veld: dit is een tarieven.json van vóór build_tarieven.py. ' +
+               'Genereer opnieuw met tools/tarieven/build_tarieven.py.';
+    } else if (verwachtNul && (trKw > 0.01 || trMwh > 0.01)) {
+      oordeel = 'OUDE_KAART';
+      uitleg = `Regio ${regio} heeft transport_* != 0 (${trKw.toFixed(2)} EUR/kW/jaar + ` +
+               `${trMwh.toFixed(2)} EUR/MWh). Daar zit de Elia-dubbeltelling nog in.`;
+    } else if (regio === 'Wallonie' && trKw === 0 && trMwh === 0) {
+      oordeel = 'VERDACHT';
+      uitleg = 'Wallonie hoort transport_* WEL te hebben (Elia wordt daar apart doorgerekend).';
+    } else {
+      oordeel = 'OK';
+      uitleg = `Regio ${regio}: transportbehandeling klopt.`;
+    }
+    return res.json({
+      grd, spanning, zone: _grdNaarZone ? _grdNaarZone(grd) : null,
+      oordeel, uitleg,
+      tariefjaar: t._tariefjaar || null,
+      regio, bron: t._bron || null,
+      gegenereerd: (TARIEVEN_MAP._meta && TARIEVEN_MAP._meta.gegenereerd_op) || null,
+      kerncijfers: {
+        netgebruik_eur_mwh: _n(t.proportioneel_eur_mwh),
+        odv_eur_mwh: _n(t.odv_eur_mwh),
+        toeslagen_eur_mwh: _n(t.surcharges_eur_mwh),
+        volumetrisch_totaal_eur_mwh: _n(t.proportioneel_eur_mwh) + _n(t.odv_eur_mwh) + _n(t.surcharges_eur_mwh),
+        maandpiek_eur_kw_jaar: _n(t.maandpiek_eur_kw_jaar),
+        toegangsvermogen_eur_kw_jaar: _n(t.toegangsvermogen_eur_kw_jaar),
+        transport_eur_kw_jaar: trKw,
+        transport_eur_mwh: trMwh,
+      },
+      raw: t,
+    });
+  } catch (e) {
+    console.error('[regio-tarieven] fout:', e.message);
+    return res.status(500).json({ error: 'regio-tarieven gefaald: ' + e.message });
+  }
 });
 
 app.get('/api/leveringscontract-staffel', (req, res) => {
