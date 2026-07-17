@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.23.0 (groeipad-sweep: POST /api/groeipad — batterij 1→N op vaste aansluiting)
+// Wijziging v15.23.0 vs v15.22.0: nieuwe endpoint /api/groeipad voor blok 10 van het
+//   resultaatscherm. Houdt de aansluiting vast op de optimale opstelling en draait de sim
+//   voor 1..N batterijen (120/260), met per stap het % geleverde laadenergie + of de sim de
+//   aansluiting zelf moest optrekken. ⚠ elke stap is een echte dispatch-run — VEREIST een
+//   live smoke-test; geen wijziging aan bestaande endpoints.
 // Versie:        v15.22.0 (batterij-sweep in fysieke eenheden 120 kW / 260 kWh)
 // Wijziging v15.22.0 vs v15.21.0: de batterij groeit voortaan in gehele eenheden van
 //   120 kW / 260 kWh (Johan §4.3) i.p.v. continu in kWh. _dimZet snapt de maat op een
@@ -2558,6 +2564,62 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
   } catch (e) {
     console.error('[sim-3] fout:', e.message);
     return res.status(500).json({ error: 'Simulatie-3 gefaald: ' + e.message });
+  }
+});
+
+// ─── v15.23.0 — GROEIPAD (blok 10) ──────────────────────────────────────────
+// Voor de optimale opstelling houden we de aansluiting VAST en zetten we vanaf 1 batterij
+// telkens één standaardeenheid (120 kW / 260 kWh) bij, tot het volgroeide aantal. Per stap:
+// hoeveel % van de gevraagde laadenergie geraakt geleverd? Dat geeft de klant een instap-pad
+// beginnend bij 1 batterij (overdracht §4 / spec Johan 17/07).
+//
+// ⚠ Elke stap is een echte dispatch-run. De sim kan de aansluiting nog zelf optrekken als de
+// batterij te klein is (laadplein.toegangsvermogen_verhoogd_kw>0); we geven dat mee terug zodat
+// de frontend ziet of een stap écht op de vaste aansluiting past. VEREIST een live smoke-test.
+app.post('/api/groeipad', async (req, res) => {
+  const input = req.body;
+  if (!input || typeof input !== 'object') return res.status(400).json({ error: 'body is verplicht' });
+  if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  const aansluitingKva = Number(input.aansluiting_kva || input.aansluitingKva || 0);
+  const maxBatt = Math.max(1, Math.min(20, Math.round(Number(input.max_batterijen || 0)) || 1));
+  if (!(aansluitingKva > 0)) return res.status(400).json({ error: 'aansluiting_kva (vast) is verplicht' });
+  try {
+    // Gevraagde laadenergie uit de input (Σ per plein), zodat we het % kunnen berekenen.
+    const pleinen = Array.isArray(input.laadpleinen) ? input.laadpleinen : [];
+    const gevraagdMwhTot = pleinen.reduce((s, p) =>
+      s + (Number(p.aantal) || 0) * (Number(p.km_per_jaar) || 0) * (Number(p.kwh_per_km) || 0) / 1000, 0);
+    const stappen = [];
+    for (let k = 1; k <= maxBatt; k++) {
+      const cfg = JSON.parse(JSON.stringify(input));
+      // Aansluiting VAST op de optimale opstelling; batterij = k eenheden.
+      cfg.aansluiting_kva = aansluitingKva; cfg.aansluitingKva = aansluitingKva;
+      cfg.toegangsvermogen_kw = aansluitingKva;
+      cfg.batterijId = 'CUSTOM';
+      cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
+        naam: 'Groeipad-batterij', kw: k * 120, kwh: k * 260, aantal_batterijen: k,
+        dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
+      });
+      const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+      const lp = (r && r.laadplein) || {};
+      const geladenMwh = Array.isArray(lp.pleinen)
+        ? lp.pleinen.reduce((s, p) => s + (Number(p.geladen_mwh) || 0), 0)
+        : (Number(lp.ev_last_mwh) || 0);
+      const pct = gevraagdMwhTot > 0 ? Math.min(100, Math.round(geladenMwh / gevraagdMwhTot * 1000) / 10) : null;
+      stappen.push({
+        aantal_batterijen: k, kw: k * 120, kwh: k * 260,
+        gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10,
+        geladen_mwh: Math.round(geladenMwh * 10) / 10,
+        geleverd_pct: pct,
+        aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
+        factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
+      });
+    }
+    return res.json({ ok: true, aansluiting_kva: aansluitingKva, max_batterijen: maxBatt,
+      gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10, stappen,
+      _meta: { server_version: '15.23.0' } });
+  } catch (e) {
+    console.error('[groeipad] fout:', e.message);
+    return res.status(500).json({ error: 'groeipad gefaald: ' + e.message });
   }
 });
 
