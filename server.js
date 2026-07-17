@@ -1,6 +1,17 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.25.0 (opstelling 3 = batterij-count-sweep, keuze op KPI2/rendement)
+// Wijziging v15.25.0 vs v15.24.0: _dimensioneerMix zoekt niet langer over verzwarings-fracties
+//   maar over BATTERIJ-AANTALLEN 1..N. Per k batterijen zoekt _mixZoekVerzwaring de minimale
+//   aansluiting die de volle laadvraag levert (sturing 2, GEEN onbalans). Keuze op hoogste
+//   KPI2 = (E_base+CREG − factuur)/capex_excl_cabine; E_base+CREG en het vaste capex-deel komen
+//   uit de frontend (_kpi_base_plus_creg / _kpi_capex_vast). Terugval op laagste factuur zonder
+//   die basis. ⚠ raakt de dispatch-zoeklus — VEREIST een live smoke-test.
+// Versie:        v15.24.0 (fix: opstelling 1 = puur verzwaren, batterij uit config gewist)
+// Wijziging v15.24.0 vs v15.23.0: _opstellingUi('verhogen') wiste de batterij uit de
+//   meegegeven config niet, waardoor opstelling 1 stiekem 'verzwaren + batterij' werd en een
+//   onterecht goed rendement kreeg. Nu batterijId='' en batterijCustom=null in de verhoog-tak.
 // Versie:        v15.23.0 (groeipad-sweep: POST /api/groeipad — batterij 1→N op vaste aansluiting)
 // Wijziging v15.23.0 vs v15.22.0: nieuwe endpoint /api/groeipad voor blok 10 van het
 //   resultaatscherm. Houdt de aansluiting vast op de optimale opstelling en draait de sim
@@ -2408,56 +2419,89 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap, job) {
 // op TOTALE EIGENDOMSKOST (investering + factuur x horizon). Kiezen op factuurkost
 // alleen zou altijd de grootste aansluiting winnen — die verlaagt de factuur maar
 // kost kapitaal. Kiezen op investering alleen zou altijd de kleinste winnen.
-async function _dimensioneerMix(input, cap, job) {
-  const inv = input._investering || null;
+// v15.25.0 — MIX = BATTERIJ-COUNT-SWEEP (Johan 17/07). Voor k = 1..N (N = batterijen van
+// opstelling 2) zetten we k batterijen vast en zoeken we de MINIMALE verzwaring die de
+// volledige laadvraag levert op STURING 2 (geen onbalans in de zoektocht). Per k berekenen we
+// KPI2 = (E_base + CREG − factuur) / capex_excl_cabine en kiezen de hoogste. Dat vindt exact
+// de "zo weinig mogelijk verzwaring + net genoeg batterij"-combinatie.
+// De onbalans-opbrengst (windfall) zit al in de onbalans-variant en wordt apart getoond —
+// niet in deze keuze.
+const _subJF = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+function _mixZetAansluiting(cfg, kva, huidig) {
+  cfg.aansluiting_kva = kva; cfg.aansluitingKva = kva; cfg.toegangsvermogen_kw = kva;
+  cfg._mix_kva = kva; cfg._mix_huidig_kva = huidig;
+  if (kva > LS_MAX_KVA && cfg.spanning !== 'MS') {
+    cfg._spanning_origineel = cfg.spanning || 'LS';
+    cfg.spanning = 'MS'; cfg._spanning_omgezet = true; cfg._cabine_nodig = true;
+  }
+}
+// Zoek voor k vaste batterijen de kleinste aansluiting die de laadvraag levert (sturing 2).
+// De sim vertelt zelf hoeveel ze de aansluiting moest optrekken (toegangsvermogen_verhoogd_kw)
+// als de batterij te klein is — dus we springen daar meteen heen i.p.v. blind te groeien.
+async function _mixZoekVerzwaring(input, cap, k, job) {
+  const cfg = _opstellingUi(input, 'batterij', cap);
+  cfg.batterijCustom = { naam: 'Mix-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH,
+                         aantal_batterijen: k, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
   const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
-  const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+  let kva = Math.max(5, Math.ceil(huidig / 5) * 5);
+  _mixZetAansluiting(cfg, kva, huidig);
+  let runs = 0;
+  let r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing'))); runs++;
+  if (job) job.runs = (job.runs || 0) + 1;
+  let h = _opstellingHaalbaar(r, 'batterij');
+  let iter = 0;
+  while (!h.ok && iter < DIM_MAX_ITER + 1) {
+    const geforceerd = Number((r.laadplein || {}).toegangsvermogen_verhoogd_kw) || 0;
+    const stap = Math.max(geforceerd, Math.ceil(kva * (DIM_GROEI - 1)));   // sprong: wat de sim vroeg, of +30%
+    kva = Math.ceil((kva + Math.max(stap, 5)) / 5) * 5;
+    _mixZetAansluiting(cfg, kva, huidig);
+    r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing'))); runs++;
+    if (job) job.runs = (job.runs || 0) + 1;
+    h = _opstellingHaalbaar(r, 'batterij');
+    iter++;
+  }
+  return { k, kva, kwh: k * BATT_UNIT_KWH, kw: k * BATT_UNIT_KW, resultaat: r, factuur: _subJF(r),
+           haalbaar: h.ok, cfg, runs, huidig };
+}
+async function _dimensioneerMix(input, cap, job) {
+  const N = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / BATT_UNIT_KWH));   // = batterijen van opstelling 2
+  const K = Number(input._kpi_base_plus_creg);        // E_base + CREG (jaarbasis) — uit de frontend
+  const capexVast = Number(input._kpi_capex_vast);    // laadpalen + PV + kabeltracé (excl cabine/batterij/verzwaring)
+  const eurKva = Number((input._investering || {}).eur_per_kva) || 0;
+  const eurKwh = Number((input._investering || {}).eur_per_kwh) || 0;
+  const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
   const punten = [];
-  for (const f of MIX_FRACTIES) {
-    const cfg0 = _mixCfg(input, cap, f);
-    if (cfg0._mix_kva <= huidig) {                      // niets te verzwaren op dit punt
-      _jlog(job, 'groei', `Mengverhouding ${Math.round(f*100)}% valt samen met de huidige aansluiting — overgeslagen`);
-      continue;
-    }
-    _jlog(job, 'opstelling',
-          `Mix ${Math.round(f*100)}%: aansluiting ${cfg0._mix_kva} kVA — hoe klein mag de batterij dan?`,
-          { opstelling: 'mix', maat: cfg0._mix_kva, eenheid: 'kVA' });
-    const dim = await _dimensioneerTotHaalbaar(cfg0, 'mix', cap, job);
-    if (!dim.haalbaar) {
-      _jlog(job, 'faal', `Mix ${Math.round(f*100)}%: geen werkende batterijmaat gevonden — overgeslagen`);
-      continue;
-    }
-    const kwh = dim.gekozen_maat || 0;
-    const jaarkost = _sub(dim.resultaat);
-    const tco = inv ? _mixTco(cfg0._mix_kva, kwh, !!dim.cfg._spanning_omgezet, inv, jaarkost, huidig) : null;
-    punten.push({ fractie: f, kva: cfg0._mix_kva, kwh, jaarkost,
-                  capex: tco ? tco.capex : null, tco: tco ? tco.tco : null, dim, cfg: dim.cfg });
+  for (let k = 1; k <= N; k++) {
+    _jlog(job, 'opstelling', `Mix: ${k} batterij${k>1?'en':''} — welke verzwaring is dan nodig?`,
+          { opstelling: 'mix', maat: k, eenheid: 'batt' });
+    const z = await _mixZoekVerzwaring(input, cap, k, job);
+    if (!z.haalbaar) { _jlog(job, 'faal', `Mix ${k} batt: geen werkende verzwaring gevonden — overgeslagen`); continue; }
+    const verzwaring = Math.max(0, z.kva - huidig);
+    const capex = (Number.isFinite(capexVast) ? capexVast : 0) + k * BATT_UNIT_KWH * eurKwh + verzwaring * eurKva;
+    const rendement = (Number.isFinite(K) && capex > 0) ? ((K - z.factuur) / capex * 100) : null;
+    punten.push({ k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, z });
     _jlog(job, 'resultaat',
-          `Mix ${Math.round(f*100)}%: ${cfg0._mix_kva} kVA + ${kwh} kWh batterij` +
-          (tco ? ` — investering € ${Math.round(tco.capex).toLocaleString('nl-BE')}, ` +
-                 `factuur € ${Math.round(jaarkost).toLocaleString('nl-BE')}/jaar` : ''),
-          { opstelling: 'mix', kva: cfg0._mix_kva, kwh });
+          `Mix ${k} batt + ${z.kva} kVA: factuur € ${Math.round(z.factuur).toLocaleString('nl-BE')}/jaar` +
+          (rendement != null ? `, rendement ${rendement.toFixed(1)}%` : ''),
+          { opstelling: 'mix', kva: z.kva, kwh: z.kwh });
   }
   if (!punten.length) return null;
-  // Zonder investeringsconstanten kunnen we niet eerlijk kiezen -> middelste punt,
-  // en dat zeggen we ook zo in het log i.p.v. een optimum te suggereren.
   let beste;
-  if (punten.every(p => p.tco != null)) {
-    beste = punten.reduce((a, b) => (b.tco < a.tco ? b : a));
-    _jlog(job, 'ok',
-          `Beste mengverhouding: ${beste.kva} kVA + ${beste.kwh} kWh ` +
-          `(laagste totale kost over ${(input._investering.horizon_jaar||15)} jaar van ${punten.length} onderzochte verhoudingen)`,
-          { opstelling: 'mix' });
+  if (punten.every(p => p.rendement != null)) {
+    beste = punten.reduce((a, b) => (b.rendement > a.rendement ? b : a));   // hoogste KPI2
+    _jlog(job, 'ok', `Beste mix: ${beste.k} batterij${beste.k>1?'en':''} + ${beste.kva} kVA ` +
+          `(hoogste rendement ${beste.rendement.toFixed(1)}% van ${punten.length} onderzochte)`, { opstelling: 'mix' });
   } else {
-    beste = punten[Math.floor(punten.length / 2)];
-    _jlog(job, 'waarschuwing',
-          'Geen investeringsconstanten meegegeven — middelste mengverhouding gekozen, niet de goedkoopste.',
-          { opstelling: 'mix' });
+    beste = punten.reduce((a, b) => (b.factuur < a.factuur ? b : a));       // terugval: laagste factuur
+    _jlog(job, 'waarschuwing', 'Geen KPI2-basis meegegeven — mix gekozen op laagste factuur i.p.v. rendement.', { opstelling: 'mix' });
   }
-  beste.alternatieven = punten.map(p => ({ fractie: p.fractie, kva: p.kva, kwh: p.kwh,
-                                           jaarkost: Math.round(p.jaarkost),
-                                           capex: p.capex != null ? Math.round(p.capex) : null,
-                                           tco: p.tco != null ? Math.round(p.tco) : null,
+  // Teruggeefvorm compatibel met de assemblage in _draaiSim3 (m.cfg, m.dim.resultaat, m.kva, …).
+  beste.cfg = beste.z.cfg;
+  beste.dim = { resultaat: beste.z.resultaat, iteraties: beste.z.runs, stappen: [], start_maat: null };
+  beste.fractie = null;
+  beste.alternatieven = punten.map(p => ({ aantal_batterijen: p.k, kva: p.kva, kwh: p.kwh,
+                                           jaarkost: Math.round(p.factuur), capex: Math.round(p.capex),
+                                           rendement: p.rendement != null ? Math.round(p.rendement * 10) / 10 : null,
                                            gekozen: p === beste }));
   return beste;
 }
@@ -2465,6 +2509,11 @@ async function _dimensioneerMix(input, cap, job) {
 function _opstellingUi(ui, opstelling, cap) {
   const v = JSON.parse(JSON.stringify(ui || {}));
   if (opstelling === 'verhogen') {
+    // v15.24.0 — FIX: opstelling 1 is PUUR verzwaren, ZONDER batterij. De input draagt de
+    // batterij uit stap 9 mee; die werd hier niet gewist, waardoor opstelling 1 stiekem
+    // "verzwaren + batterij" werd en zo een onterecht goed rendement toonde. Nu expliciet weg.
+    v.batterijId = '';
+    v.batterijCustom = null;
     v.aansluiting_kva = cap.benodigd_toegangsvermogen_kw;
     v.aansluitingKva = cap.benodigd_toegangsvermogen_kw;
     // v15.15.7: bij verhogen wordt óók het gecontracteerde toegangsvermogen opgetrokken
