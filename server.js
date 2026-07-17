@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.26.0 (mix-kandidaten dragen afname + netkosten-regel → groeipad = KPI-evolutie)
+// Wijziging v15.26.0 vs v15.25.0: elke mix-kandidaat (batterij-count-sweep) geeft nu ook
+//   afname_mwh (voor loadfactor/KPI3) en distributie_eur (netkosten×2-blootstelling) mee in
+//   alternatieven. De frontend toont daarmee het groeipad als een KPI1/2/3-evolutie over het
+//   aantal batterijen — zonder extra sim-runs. Geen wijziging aan de keuzelogica.
 // Versie:        v15.25.0 (opstelling 3 = batterij-count-sweep, keuze op KPI2/rendement)
 // Wijziging v15.25.0 vs v15.24.0: _dimensioneerMix zoekt niet langer over verzwarings-fracties
 //   maar over BATTERIJ-AANTALLEN 1..N. Per k batterijen zoekt _mixZoekVerzwaring de minimale
@@ -2427,6 +2432,12 @@ async function _dimensioneerTotHaalbaar(cfg0, opstelling, cap, job) {
 // De onbalans-opbrengst (windfall) zit al in de onbalans-variant en wordt apart getoond —
 // niet in deze keuze.
 const _subJF = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
+// Netkosten-regel = distributie + transport (groep B + C + D), zoals _frComp in de frontend.
+function _distributieJF(r) {
+  const gr = (r && r.jaarfactuur && r.jaarfactuur.groepen) || {};
+  const sub = g => (g && g._subtotaal != null) ? (Number(g._subtotaal) || 0) : 0;
+  return sub(gr.B_netgebruik_afname || gr.B) + sub(gr.C_netgebruik_injectie || gr.C) + sub(gr.D_transport || gr.D);
+}
 function _mixZetAansluiting(cfg, kva, huidig) {
   cfg.aansluiting_kva = kva; cfg.aansluitingKva = kva; cfg.toegangsvermogen_kw = kva;
   cfg._mix_kva = kva; cfg._mix_huidig_kva = huidig;
@@ -2467,6 +2478,7 @@ async function _dimensioneerMix(input, cap, job) {
   const N = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / BATT_UNIT_KWH));   // = batterijen van opstelling 2
   const K = Number(input._kpi_base_plus_creg);        // E_base + CREG (jaarbasis) — uit de frontend
   const capexVast = Number(input._kpi_capex_vast);    // laadpalen + PV + kabeltracé (excl cabine/batterij/verzwaring)
+  const annf = Number(input._kpi_annfactor) || 1;     // factuurperiode → jaar (K is jaarbasis, factuur periode)
   const eurKva = Number((input._investering || {}).eur_per_kva) || 0;
   const eurKwh = Number((input._investering || {}).eur_per_kwh) || 0;
   const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
@@ -2478,7 +2490,7 @@ async function _dimensioneerMix(input, cap, job) {
     if (!z.haalbaar) { _jlog(job, 'faal', `Mix ${k} batt: geen werkende verzwaring gevonden — overgeslagen`); continue; }
     const verzwaring = Math.max(0, z.kva - huidig);
     const capex = (Number.isFinite(capexVast) ? capexVast : 0) + k * BATT_UNIT_KWH * eurKwh + verzwaring * eurKva;
-    const rendement = (Number.isFinite(K) && capex > 0) ? ((K - z.factuur) / capex * 100) : null;
+    const rendement = (Number.isFinite(K) && capex > 0) ? ((K - z.factuur * annf) / capex * 100) : null;   // factuur naar jaarbasis
     punten.push({ k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, z });
     _jlog(job, 'resultaat',
           `Mix ${k} batt + ${z.kva} kVA: factuur € ${Math.round(z.factuur).toLocaleString('nl-BE')}/jaar` +
@@ -2499,9 +2511,14 @@ async function _dimensioneerMix(input, cap, job) {
   beste.cfg = beste.z.cfg;
   beste.dim = { resultaat: beste.z.resultaat, iteraties: beste.z.runs, stappen: [], start_maat: null };
   beste.fractie = null;
+  // v15.26.0: per kandidaat ook afname (voor loadfactor/KPI3) en de netkosten-regel
+  // (distributie+transport, voor de netkosten×2-blootstelling) meegeven, zodat de frontend
+  // het groeipad als KPI1/2/3-evolutie kan tonen zonder extra sim-runs.
   beste.alternatieven = punten.map(p => ({ aantal_batterijen: p.k, kva: p.kva, kwh: p.kwh,
                                            jaarkost: Math.round(p.factuur), capex: Math.round(p.capex),
                                            rendement: p.rendement != null ? Math.round(p.rendement * 10) / 10 : null,
+                                           afname_mwh: Math.round((((p.z.resultaat||{}).kpi||{}).totaal_afname_mwh||0) * 10) / 10,
+                                           distributie_eur: Math.round(_distributieJF(p.z.resultaat)),
                                            gekozen: p === beste }));
   return beste;
 }
