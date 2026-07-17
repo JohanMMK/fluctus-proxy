@@ -1,6 +1,31 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.22.0 (batterij-sweep in fysieke eenheden 120 kW / 260 kWh)
+// Wijziging v15.22.0 vs v15.21.0: de batterij groeit voortaan in gehele eenheden van
+//   120 kW / 260 kWh (Johan §4.3) i.p.v. continu in kWh. _dimZet snapt de maat op een
+//   geheel aantal eenheden (min. 1), _opstellingUi start de advies-batterij op hele
+//   eenheden, en batterijCustom draagt nu 'aantal_batterijen'. De zoeklus (groeien/
+//   krimpen/verfijnen) blijft ongewijzigd; ze quantiseert alleen. ⚠ De dispatch-uitkomst
+//   met deze discrete stappen op een echt kwartierprofiel is NIET in deze omgeving
+//   gedraaid — vereist één live smoke-test vóór productie (zie deploy-checklist).
+// Versie:        v15.21.0 (LS/MS-poort: GET /api/ls-ms-poort — arithmetiek, geen sim)
+// Wijziging v15.21.0 vs v15.20.4: de LS/MS-keuze is een POORT die je vooraf beslist
+//   (overdracht §4). Nieuwe endpoint /api/ls-ms-poort geeft, puur uit de tariefkaarten:
+//   netkosten LS vs MS/jaar bij (verbruik E, piek P), het kantelpunt E*=a·P+b, en de
+//   payback van de cabine (€108.000). Geen dispatch. Geverifieerd tegen de kantelpunt-tabel
+//   uit §4 (a/b/E* exact voor alle 8 Vlaamse zones; Δvast Midden-Vl. +2.224). Wallonië/Brussel
+//   worden als niet-gevalideerd gevlagd (gevalideerd:false, openstaand punt 54). Geen
+//   wijziging aan bestaande endpoints of de dispatch.
+// Versie:        v15.20.4 (opstelling 3 'ms_batterij' verwijderd — derde is altijd 'mix')
+// Wijziging v15.20.4 vs v15.20.3: de LS/MS-keuze is een POORT, geen scenario-as
+//   (overdracht §4 + §4bis.B). De vroegere 'ms_batterij'-opstelling zette LS-met-batterij
+//   tegen MS-met-batterij — precies de vergelijking die we niet willen. Verwijderd uit
+//   OPSTELLING_LABEL, _isBatterijOpstelling, _opstellingUi (de spanning='MS'-omzetting) en
+//   de vergelijking (tariefkaart_effect_* vervalt). _derdeOpstelling geeft nu altijd 'mix'
+//   — Johans batterij-sweep (binnengebied tussen verzwaren en volledige batterij), op de
+//   vooraf vastgelegde tariefkaart. 'mix' werkt identiek op LS en MS. Geen gedragswijziging
+//   voor opstelling 1 en 2, noch voor sites die al op MS stonden (daar was de derde al 'mix').
 // Versie:        v15.20.3 (fix: _grdNaarZone bestond niet — regio-tarieven gaf 500)
 // Wijziging v15.20.3 vs v15.20.2: /api/regio-tarieven verwees naar _grdNaarZone(), een
 //   helper die niet bestaat. De ternary-guard (_grdNaarZone ? ... : null) beschermt daar
@@ -1295,6 +1320,104 @@ app.get('/api/regio-tarieven', (req, res) => {
   }
 });
 
+// ─── v15.21.0 — DE LS/MS-POORT ──────────────────────────────────────────────
+// De LS/MS-keuze is een POORT die je één keer vooraf beslist (overdracht §4), geen
+// scenario-as. Puur arithmetiek: alle termen zijn bekend zodra het laadplein is
+// ingevuld — geen dispatch, milliseconde. We ADVISEREN niet hard, we tonen twee
+// getallen en de verkoper kiest:
+//   1. netkosten LS vs MS per jaar bij dit verbruik (E) en deze piek (P)
+//   2. payback van de cabine (€108.000 = €90.000 + 20% kabeltracé) op de jaarlijkse
+//      netkostenbesparing
+//
+//   MS goedkoper ⟺ E·(vol_LS − vol_MS) > P·(mp_MS + tv_MS − mp_LS) + Δvast
+//   vol   = proportioneel + odv + surcharges + soldes + accijns_basis   [€/MWh]
+//   mp/tv = maandpiek / toegangsvermogen                                [€/kW/jaar]
+//   Δvast = (databeheer_MS + energiefonds_MS) − (databeheer_LS + energiefonds_LS)
+//   Kantelpunt: E* = a·P + b  met a = (mp_MS+tv_MS−mp_LS)/(vol_LS−vol_MS), b = Δvast/(vol_LS−vol_MS)
+//
+// P = HUIDIG toegangsvermogen UIT DE FACTUUR (overdracht §4): het max-batterij-scenario
+// is per definitie "de aansluiting hoeft niet omhoog", dus het huidige vermogen ís het
+// ontwerpdoel — en daarmee de juiste conventie voor de poort.
+//
+// Geverifieerd tegen de kantelpunt-tabel uit §4: a/b/E* exact voor alle 8 Vlaamse zones,
+// Δvast Midden-Vl. = +2.224. Wallonië/Brussel: transport_* zit hier WEL in de netkost,
+// maar het kantelpunt is daar nooit factuur-gevalideerd (openstaand punt 54) → we vlaggen
+// het resultaat als niet-gevalideerd zodra regio ≠ Vlaanderen.
+const POORT_CABINE_EUR = 108000; // €90.000 cabine + 20% kabeltracé (§4 / naamgeving overdracht §6)
+function _poortVolMwh(k) {
+  return (Number(k.proportioneel_eur_mwh) || 0) + (Number(k.odv_eur_mwh) || 0)
+       + (Number(k.surcharges_eur_mwh) || 0) + (Number(k.soldes_eur_mwh) || 0)
+       + (Number(k.accijns_basis_eur_mwh) || 0);
+}
+// transport per kaart (Vlaanderen/Brussel = 0; Wallonië ingevuld) — zelfde afleiding als /api/regio-tarieven
+function _poortTransportKw(k) {
+  return (Number(k.transport_maandpiek_eur_kw_mnd) || 0) * 12 + (Number(k.transport_jaarpiek_eur_kw_jaar) || 0)
+       + (Number(k.transport_beschikbaar_eur_kva_jaar) || 0);
+}
+function _poortTransportMwh(k) {
+  return (Number(k.transport_systeembeheer_eur_mwh) || 0) + (Number(k.transport_reserves_eur_mwh) || 0)
+       + (Number(k.transport_marktintegratie_eur_mwh) || 0);
+}
+// Volledige netkost van één kaart bij (E MWh, P kW). Bevat NIET de commodity (die is
+// leveranciersafhankelijk en identiek voor LS/MS) — enkel netbeheer + heffingen die
+// tussen LS en MS verschillen. tv_LS = 0 in de data, dus toegangsvermogen telt alleen op MS.
+function _poortNetkost(k, E_mwh, P_kw) {
+  return _poortVolMwh(k) * E_mwh
+       + ((Number(k.maandpiek_eur_kw_jaar) || 0) + (Number(k.toegangsvermogen_eur_kw_jaar) || 0)) * P_kw
+       + _poortTransportKw(k) * P_kw + _poortTransportMwh(k) * E_mwh
+       + (Number(k.databeheer_eur_jaar) || 0) + (Number(k.energiefonds_eur_jaar) || 0);
+}
+function _lsMsPoort(grd, E_mwh, P_kw) {
+  const LS = _kiesTarieven(grd, 'LS') || {};
+  const MS = _kiesTarieven(grd, 'MS') || {};
+  const volLS = _poortVolMwh(LS), volMS = _poortVolMwh(MS);
+  const dVol = volLS - volMS;                                            // €/MWh, >0 (LS volumetrisch, MS niet)
+  const dCap = (Number(MS.maandpiek_eur_kw_jaar) || 0) + (Number(MS.toegangsvermogen_eur_kw_jaar) || 0)
+             - (Number(LS.maandpiek_eur_kw_jaar) || 0);                  // €/kW/jaar
+  const dVast = ((Number(MS.databeheer_eur_jaar) || 0) + (Number(MS.energiefonds_eur_jaar) || 0))
+              - ((Number(LS.databeheer_eur_jaar) || 0) + (Number(LS.energiefonds_eur_jaar) || 0));
+  const a = dVol !== 0 ? dCap / dVol : null;                             // E* = a·P + b
+  const b = dVol !== 0 ? dVast / dVol : null;
+  const Estar = (a != null) ? a * P_kw + b : null;                       // MWh/jaar waarboven MS goedkoper
+  const nkLS = _poortNetkost(LS, E_mwh, P_kw);
+  const nkMS = _poortNetkost(MS, E_mwh, P_kw);
+  const besparing = nkLS - nkMS;                                         // >0 → MS goedkoper op de factuur
+  const regio = LS._regio || MS._regio || null;
+  return {
+    grd, verbruik_mwh: E_mwh, piek_kw: P_kw, regio,
+    tariefjaar: LS._tariefjaar || MS._tariefjaar || null,
+    netkost_ls_eur_jaar: Math.round(nkLS),
+    netkost_ms_eur_jaar: Math.round(nkMS),
+    netkosten_besparing_ms_eur_jaar: Math.round(besparing),   // negatief = LS goedkoper
+    ms_goedkoper: besparing > 0,
+    kantelpunt_mwh: Estar != null ? Math.round(Estar * 10) / 10 : null,
+    boven_kantelpunt: (Estar != null) ? (E_mwh > Estar) : null,
+    helling_a: a != null ? Math.round(a * 1000) / 1000 : null,
+    intercept_b: b != null ? Math.round(b * 10) / 10 : null,
+    delta_vast_eur_jaar: Math.round(dVast),
+    cabine_eur: POORT_CABINE_EUR,
+    // payback cabine = investering / jaarlijkse netkostenbesparing (alleen zinvol als MS goedkoper)
+    cabine_payback_jaar: besparing > 0 ? Math.round(POORT_CABINE_EUR / besparing * 10) / 10 : null,
+    gevalideerd: regio === 'Vlaanderen',   // Wallonië/Brussel: kantelpunt nooit factuur-gevalideerd (openstaand 54)
+  };
+}
+// GET /api/ls-ms-poort?grd=Fluvius%20West&verbruik_mwh=384&piek_kw=100
+// E = bestaand jaarverbruik + laadplein-energie; P = huidig toegangsvermogen uit de factuur.
+app.get('/api/ls-ms-poort', (req, res) => {
+  try {
+    const grd = req.query.grd || 'Fluvius West';
+    const E = Number(req.query.verbruik_mwh);
+    const P = Number(req.query.piek_kw);
+    if (!(E >= 0) || !(P >= 0)) {
+      return res.status(400).json({ error: 'verbruik_mwh en piek_kw zijn verplicht en >= 0' });
+    }
+    return res.json(_lsMsPoort(grd, E, P));
+  } catch (e) {
+    console.error('[ls-ms-poort] fout:', e.message);
+    return res.status(500).json({ error: 'ls-ms-poort gefaald: ' + e.message });
+  }
+});
+
 app.get('/api/leveringscontract-staffel', (req, res) => {
   const meta = CONTRACT_RAW || {};
   res.json({ leverancier: meta.leverancier||'Enwyse', schijven:CONTRACT_STAFFEL, staffel:CONTRACT_STAFFEL,
@@ -2091,24 +2214,22 @@ function _jlog(job, fase, tekst, extra) {
 const OPSTELLING_LABEL = {
   verhogen:    'Opstelling 1 — toegangsvermogen verhogen',
   batterij:    'Opstelling 2 — batterij, aansluiting blijft',
-  ms_batterij: 'Opstelling 3 — naar MS + batterij',
   mix:         'Opstelling 3 — mix: deels verzwaren, kleinere batterij',
 };
 
-// v15.20.1 — WELKE DERDE OPSTELLING?
-// Opstelling 3 was eerst altijd 'naar MS + batterij'. Maar staat de site AL op MS,
-// dan is dat een exacte kopie van opstelling 2: zelfde batterij, zelfde aansluiting,
-// zelfde tariefkaart, geen cabine. Vijf sim-runs om hetzelfde getal twee keer te
-// tonen — en een "keuze" voorleggen die geen keuze is.
+// v15.20.4 — DE DERDE OPSTELLING IS ALTIJD 'mix'.
+// Vroeger: op LS werd de derde opstelling 'ms_batterij' (LS-met-batterij vs
+// MS-met-batterij — de tariefkaart-vraag). Vervallen (overdracht §4 + §4bis.B): de
+// LS/MS-keuze is een POORT die je één keer vooraf beslist; daarna draaien ALLE
+// ontwerpscenario's op die ene tariefkaart. We vergelijken LS niet met MS in de sim.
 //
-// Dan is er wél een zinvolle derde weg. Opstelling 1 en 2 zijn de twee UITERSTEN:
+// De zinvolle derde weg blijft de 'mix'. Opstelling 1 en 2 zijn de twee UITERSTEN:
 // alles oplossen met de aansluiting, of alles met de batterij. Het optimum ligt
 // bijna altijd ertussen: een beetje verzwaren maakt de batterij fors kleiner, en
 // batterij-kWh is duur (350 EUR/kWh) terwijl kVA relatief goedkoop is (100 EUR/kVA).
-// Daarom: al op MS -> 'mix' (zoek de beste verhouding), nog op LS -> 'ms_batterij'
-// (de tariefkaart-vraag, die dan wél iets te kiezen geeft).
+// Dat binnengebied IS Johans batterij-sweep. Werkt identiek op LS en MS.
 function _derdeOpstelling(input) {
-  return ((input.spanning || 'LS') === 'MS') ? 'mix' : 'ms_batterij';
+  return 'mix';
 }
 // Mengverhoudingen: aandeel van de VOLLEDIGE verzwaring uit opstelling 1.
 // Drie punten in het binnengebied — genoeg om de vorm van de afweging te zien,
@@ -2118,11 +2239,17 @@ const MIX_FRACTIES = [0.33, 0.50, 0.67];
 const DIM_MAX_ITER  = 4;      // cap: elke iteratie is een volle sim-run (~20-30s)
 const DIM_GROEI     = 1.30;   // 30% per stap — grof, maar convergeert snel genoeg
 const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succes-stap
-// v15.20: opstelling 3 (MS + batterij) gedraagt zich voor de zoeklus IDENTIEK aan
-// opstelling 2 — de bepalende maat is de batterij-kWh. Enige verschil is de
-// tariefkaart (MS i.p.v. LS), en die zit in de config, niet in de zoeklogica.
+// v15.22.0 — DISCRETE BATTERIJ-EENHEDEN. Johan (§4.3): de batterij groeit in fysieke
+// eenheden van 120 kW / 260 kWh, niet continu in kWh. De zoeklus mag blijven groeien/
+// krimpen met DIM_GROEI, maar _dimZet snapt de maat altijd op een geheel aantal eenheden.
+// Zo is 'aantal batterijen' een echt geheel getal en klopt de capex per eenheid.
+const BATT_UNIT_KW  = 120;
+const BATT_UNIT_KWH = 260;
+// De zoeklus is opstelling-agnostisch: voor 'batterij' én 'mix' is de bepalende maat
+// de batterij-kWh. De tariefkaart ligt vast in de config (de LS/MS-poort, vooraf), niet
+// in de zoeklogica.
 function _isBatterijOpstelling(opst) {
-  return opst === 'batterij' || opst === 'ms_batterij' || opst === 'mix';
+  return opst === 'batterij' || opst === 'mix';
 }
 // Maat uitlezen/zetten per opstelling — zo blijft de zoeklus opstelling-agnostisch.
 function _dimMaat(cfg, opst) {
@@ -2140,11 +2267,15 @@ function _dimZet(cfg, opst, maat) {
     }
     return n;
   }
-  // Batterij-opstellingen (2 en 3): de kWh is de bepalende maat. De spanning ligt
-  // al vast in cfg (LS voor opstelling 2, MS voor 3) en mag hier NIET wijzigen —
-  // anders meet de vergelijking tussen 2 en 3 niet langer alleen de tariefkaart.
-  const kwh = Math.ceil(maat / 10) * 10;
-  cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, { kwh, kw: Math.round(kwh / 2) });
+  // Batterij-opstellingen ('batterij' en 'mix'): de kWh is de bepalende maat. De spanning
+  // ligt vooraf vast via de LS/MS-poort en mag hier NIET wijzigen. v15.22.0: snap de maat
+  // op een geheel aantal fysieke eenheden (120 kW / 260 kWh) — minimaal 1 zodra er een
+  // batterij nodig is. kw en kwh volgen het aantal eenheden, zodat de C-rate en de capex
+  // per eenheid consistent blijven.
+  const eenheden = Math.max(1, Math.ceil(maat / BATT_UNIT_KWH));
+  const kwh = eenheden * BATT_UNIT_KWH;
+  const kw  = eenheden * BATT_UNIT_KW;
+  cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, { kwh, kw, aantal_batterijen: eenheden });
   return kwh;
 }
 function _dimEenheid(opst) { return (opst === 'verhogen') ? 'kVA' : 'kWh'; }
@@ -2342,34 +2473,22 @@ function _opstellingUi(ui, opstelling, cap) {
       v._spanning_omgezet = true;
       console.log(`[sim-3] opstelling 'verhogen': ${cap.benodigd_toegangsvermogen_kw} kVA > ${LS_MAX_KVA} → tariefkaart MS i.p.v. ${v._spanning_origineel}`);
     }
-  } else { // 'batterij' en 'ms_batterij'
+  } else { // 'batterij' en 'mix'
     v.batterijId = 'CUSTOM';
+    // v15.22.0: start meteen op een geheel aantal fysieke eenheden (120 kW / 260 kWh),
+    // zodat de eerste proefdraai — en dus ook een direct geaccepteerde startmaat — al
+    // op hele batterijen valt en 'aantal_batterijen' overal een integer is.
+    const _startEenheden = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / BATT_UNIT_KWH));
     v.batterijCustom = {
-      naam: 'Advies-batterij', kw: cap.advies_batterij_kw, kwh: cap.advies_batterij_kwh,
+      naam: 'Advies-batterij',
+      kw: _startEenheden * BATT_UNIT_KW, kwh: _startEenheden * BATT_UNIT_KWH,
+      aantal_batterijen: _startEenheden,
       dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
     };
-    // v15.20 — OPSTELLING 3: zelfde batterij, zelfde aansluiting, ANDERE tariefkaart.
-    //
-    // Waarom dit een eigen opstelling verdient: op LS is de distributie voor een
-    // groot deel VOLUMETRISCH (23-28 EUR/MWh netgebruik + 24-33 EUR/MWh ODV), op MS
-    // is dat nul en zit alles in EUR/kW. Een batterij vlakt vermogen af — precies de
-    // as waar MS zijn geld haalt — maar kan niets doen aan een tarief per MWh. Op LS
-    // wordt hij dus afgestraft op een as waar hij geen invloed op heeft.
-    // Kantelpunt (Fluvius West 2026): ~93 MWh/jaar. Elk laadplein zit daarboven.
-    //
-    // Bewust GELIJK gehouden aan opstelling 2 (aansluiting, dimensioneringslogica,
-    // haalbaarheidscriterium) zodat het verschil tussen 2 en 3 exact één variabele
-    // meet: de tariefkaart. De prijs staat er los van (cabine ~90.000 EUR) en hoort
-    // in de investeringsvergelijking, niet in de sim.
-    if (opstelling === 'ms_batterij') {
-      v._spanning_origineel = v.spanning || 'LS';
-      v.spanning = 'MS';
-      v._spanning_omgezet = (v._spanning_origineel !== 'MS');
-      v._cabine_nodig = v._spanning_omgezet;
-      if (v._spanning_omgezet)
-        console.log(`[sim-3] opstelling 'ms_batterij': tariefkaart MS i.p.v. ${v._spanning_origineel} (cabine vereist)`);
-    }
-    // v15.20.1 'mix': deels verzwaren EN een batterij. De aansluiting wordt hier
+    // v15.20.4: de tariefkaart (LS/MS) ligt vooraf vast via de poort en wordt hier NIET
+    // meer omgezet. De verdwenen 'ms_batterij'-tak zette hier v.spanning='MS' om
+    // LS-met-batterij tegen MS-met-batterij te zetten; die vergelijking is vervallen
+    // (overdracht §4). 'mix': deels verzwaren EN een batterij — de aansluiting wordt
     // gezet door _mixCfg() (per mengverhouding); dit is enkel de batterij-basis.
   }
   return v;
@@ -2494,30 +2613,25 @@ async function _draaiSim3(input, job) {
 
     // ── Aansluiting ontoereikend voor de laadvraag → 3 opstellingen × 3 sturingen ──
     // Opstelling 1 = toegangsvermogen verhogen (LS, of MS als het >100 kVA moet)
-    // Opstelling 2 = geadviseerde batterij, aansluiting blijft, tariefkaart blijft LS
-    // Opstelling 3 = zelfde batterij, maar tariefkaart MS (v15.20)
+    // Opstelling 2 = geadviseerde batterij, aansluiting blijft, tariefkaart blijft gelijk
+    // Opstelling 3 = 'mix': deels verzwaren EN een kleinere batterij (v15.20.4)
     //
-    // v15.20 — waarom opstelling 3: op LS is de distributie grotendeels VOLUMETRISCH
-    // (netgebruik 23-28 + ODV 24-33 EUR/MWh), op MS is dat nul en zit alles in EUR/kW.
-    // Een batterij vlakt vermogen af maar kan niets aan een EUR/MWh-tarief doen; op LS
-    // wordt hij dus afgestraft op een as waar hij geen invloed op heeft. Kantelpunt
-    // (Fluvius West 2026): ~93 MWh/jaar — elk laadplein zit daar ruim boven.
-    // v15.20.1: de derde opstelling hangt af van waar de site vandaan komt.
-    //   nog op LS -> 'ms_batterij': is de MS-tariefkaart de cabine waard?
-    //   al op MS  -> 'mix': MS+batterij ZOU een exacte kopie van opstelling 2 zijn
-    //                (zelfde batterij, zelfde aansluiting, zelfde kaart, geen cabine).
-    //                Dan is de zinvolle derde weg het BINNENGEBIED tussen de twee
-    //                uitersten: deels verzwaren maakt de batterij fors kleiner, en
-    //                kWh is duur (350 EUR) terwijl kVA goedkoop is (100 EUR).
+    // v15.20.4 — de derde opstelling is altijd 'mix'. De vroegere 'ms_batterij' (LS vs
+    // MS tariefkaart) is vervallen: de LS/MS-keuze is een POORT die je vooraf beslist,
+    // geen scenario-as (overdracht §4). Opstelling 1 en 2 zijn de twee UITERSTEN — alles
+    // met de aansluiting, of alles met de batterij. De zinvolle derde weg is het
+    // BINNENGEBIED: deels verzwaren maakt de batterij fors kleiner, en kWh is duur
+    // (350 EUR) terwijl kVA goedkoop is (100 EUR). Dat is Johans batterij-sweep, en werkt
+    // identiek op LS en MS (de tariefkaart ligt vast, we vergelijken hem niet).
     const derde = _derdeOpstelling(input);
     const OPSTELLINGEN = ['verhogen', 'batterij', derde];
     _jlog(job, 'start', `Aansluiting te klein: ${cap.tekort_mwh} MWh raakt niet geladen. ` +
                         `Drie opstellingen doorrekenen…`, { tekort_mwh: cap.tekort_mwh });
     if (derde === 'mix')
-      _jlog(job, 'start', 'De site staat al op middenspanning, dus "naar MS + batterij" zou ' +
-                          'identiek zijn aan opstelling 2. In plaats daarvan zoeken we de beste ' +
-                          'mix van verzwaren en batterij.');
-    if (job) job.runs_verwacht = (derde === 'mix' ? 22 : 15);
+      _jlog(job, 'start', 'Naast verzwaren (opstelling 1) en de volledige batterij (opstelling 2) ' +
+                          'zoeken we de beste mix ertussen: deels verzwaren met een kleinere batterij, ' +
+                          'op de huidige tariefkaart.');
+    if (job) job.runs_verwacht = 22;
     const opstellingen = {};
     for (const opst of OPSTELLINGEN) {
       _jlog(job, 'opstelling', OPSTELLING_LABEL[opst], { opstelling: opst });
@@ -2614,11 +2728,10 @@ async function _draaiSim3(input, job) {
       if (opstellingen[derde]) {
         vergelijking['besparing_' + derde + '_' + s + '_excl_btw'] =
           _sub(opstellingen.verhogen.varianten[s]) - _sub(opstellingen[derde].varianten[s]);
-        // Bij 'ms_batterij' is dit het ZUIVERE tariefkaart-effect: opstelling 2 en 3
-        // zijn identiek op de spanning na, dus het verschil IS de LS/MS-keuze (los van
-        // de cabinekost). Bij 'mix' is het gewoon 3 t.o.v. 2 — daar verschilt óók de
-        // aansluiting, dus dat is géén zuiver effect en heet het anders.
-        vergelijking[(derde === 'ms_batterij' ? 'tariefkaart_effect_' : 'mix_vs_batterij_') + s + '_excl_btw'] =
+        // derde is altijd 'mix' (v15.20.4): 3 t.o.v. 2 — hier verschilt óók de
+        // aansluiting, dus géén zuiver tariefkaart-effect (dat was de vervallen
+        // 'ms_batterij'-vergelijking).
+        vergelijking['mix_vs_batterij_' + s + '_excl_btw'] =
           _sub(opstellingen.batterij.varianten[s]) - _sub(opstellingen[derde].varianten[s]);
       }
     });
@@ -2627,7 +2740,7 @@ async function _draaiSim3(input, job) {
           `(${job ? job.runs : '?'} sim-runs).`);
     console.log(`[sim-3] drie opstellingen — ${Date.now() - startTime}ms (tekort ${cap.tekort_mwh} MWh)`);
     return { ok: true, modus: 'twee_opstellingen', capaciteit: cap, opstellingen, vergelijking,
-      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.20.1',
+      _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.20.4',
                opstellingen: Object.keys(opstellingen), derde_opstelling: derde,
                sim_runs: job ? job.runs : null } };
   }
