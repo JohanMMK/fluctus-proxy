@@ -13,6 +13,10 @@
 # Versie:        v1.8.11 (per-kwartier-profielen in output voor financieel rapport)
 # Wijziging v1.8.11 vs v1.8.10: output.profielen met per-kwartier arrays
 #   (vermogen_aansluiting_kw, spot_prijs_eur_mwh, kost_eur_mwh) t.b.v. de heatmaps.
+# Versie:        v1.8.11 (vlag geen_aansluiting_verhoging: aansluiting vast houden i.p.v. verhogen)
+# Wijziging v1.8.11 vs v1.8.10: als input 'geen_aansluiting_verhoging' true is (groeipad), wordt de
+#   auto-verhoging van het toegangsvermogen overgeslagen — de dispatch clipt op de vaste aansluiting en
+#   rapporteert het reële tekort (geladen_mwh = wat er past). Default false → ongewijzigd gedrag.
 # Versie:        v1.8.10 (2-uurs batterij-dimensionering + auto-verhoging aansluiting)
 # Wijziging v1.8.10 vs v1.8.9: (1) batterij gedimensioneerd als STANDAARD 2-uurs
 #   component: kW = max(dagenergie/2, minimaal-vermogen), kWh = 2×kW. (2) Als de
@@ -2558,8 +2562,11 @@ def run_simulation(inp: dict) -> dict:
         # v1.8.10: MANUELE BATTERIJ ONTOEREIKEND (variant 2/3) → verhoog het
         # toegangsvermogen tot de laadvraag haalbaar wordt, i.p.v. dagen te
         # verliezen. (Variant 1 laadt ongetemperd op 1e12 → geen tekort, geen raise.)
+        # v1.8.11: vlag 'geen_aansluiting_verhoging' (groeipad) → NIET verhogen, wél clippen;
+        # zo blijft de aansluiting vast en toont geladen_mwh wat er écht onder past.
         _conn_verhoogd_kw = 0.0
-        if (not inp.get('geen_arbitrage', False)) and _ev_tekort > 1e-6 and _ev_conn < 1e11:
+        if (not inp.get('geen_arbitrage', False)) and (not inp.get('geen_aansluiting_verhoging', False)) \
+                and _ev_tekort > 1e-6 and _ev_conn < 1e11:
             _lo = _ev_conn
             _hi = _ev_conn + _lp_prep['tot_cap_kw'] + (max(consumption_kw) if consumption_kw else 0.0) + 1.0
             for _ in range(28):
