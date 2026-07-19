@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.9.1 (energie-begrensde batterij-headroom in _bouw_ev_load)
+# Wijziging v1.9.1 vs v1.9.0: _bouw_ev_load begrenst de batterij-bijdrage aan de EV-headroom nu door
+#   haar bruikbare energie per laadsessie (nieuwe param battery_kwh = kWh × DoD) i.p.v. haar vermogen
+#   onbeperkt te tellen. De ACTUELE dispatch (variant 2/3, incl. de aansluiting-verhoog-zoektocht)
+#   geeft die energie mee → een te kleine batterij levert nu écht minder km (tekort > 0) i.p.v. 100%.
+#   De dimensioneringszoektocht (_laadplein_capaciteit) laat battery_kwh=None → ongebonden, ongewijzigd.
 # Versie:        v1.9.0 (per-laadplein kwartier-arrays voor het laadplein-hoofdstuk)
 # Wijziging v1.9.0 vs v1.8.11: _bouw_ev_load kan via de optionele out-parameter
 #   per_plein_out per laadplein bijhouden wat er effectief geladen werd (kW/kwartier)
@@ -636,10 +642,17 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
 def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                   pv_kw: list, base_cons_kw: list, modus: str,
                   connection_kw: float = 1e12, battery_kw: float = 0.0,
-                  per_plein_out: list = None):
+                  per_plein_out: list = None, battery_kwh: float = None):
     """Bouw het EV-laadprofiel (kW/kwartier) voor alle laadpleinen samen, CONNECTION-AWARE:
     per kwartier laden we max = min(laadpunt-cap, vrije ruimte onder het toegangsvermogen
     (+ batterij-buffer)). We zetten dus nooit 'ineens alle vermogen' aan.
+
+    v1.9.1 — ENERGIE-BEGRENSDE BATTERIJ-HEADROOM: de batterij levert extra headroom BOVEN de
+    aansluiting, maar begrensd door haar bruikbare energie per laadsessie (battery_kwh, bruikbaar =
+    kWh × DoD). Zonder deze grens telde de batterij als oneindig-energetisch vermogen, waardoor zelfs
+    1 kleine batterij alle km leverde (100% overal). Nu put de batterij per sessie een energie-budget
+    uit; is dat op, dan blijft enkel de aansluiting over → een te kleine batterij levert écht minder
+    km (tekort > 0). battery_kwh=None ⇒ oud ongebonden gedrag (dimensioneringszoektocht ongewijzigd).
     Returnt (ev_load, tekort_kwh): tekort = dagenergie die NIET geladen raakte binnen het
     venster onder de aansluiting (drijft de dimensionering van verhoging/batterij).
     Modi: 'onmiddellijk' (variant 1, chronologisch vullen), 'shift_spot' (PV-zelfconsumptie
@@ -663,9 +676,14 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     def _uur(i):
         return sim_timestamps[i].hour + sim_timestamps[i].minute / 60.0
 
-    def _headroom_kw(i):
-        # Vrije ruimte onder de aansluiting (+ batterijbuffer), na wat al toegewezen is.
-        return max(0.0, connection_kw + battery_kw - base_cons_kw[i] - ev[i])
+    # v1.9.1: batterij-energiebudget per laadsessie (gedeeld over pleinen op dezelfde start-dag).
+    # None ⇒ ongebonden (oud gedrag: batterij = oneindige energie voor de headroom).
+    _batt_ongebonden = (battery_kwh is None)
+    _batt_budget = {}
+
+    def _conn_vrij_kw(i):
+        # Vrije ruimte onder de AANSLUITING (zonder batterij), na wat al toegewezen is.
+        return max(0.0, connection_kw - base_cons_kw[i] - ev[i])
 
     for rec in lp_prep['pleinen']:
         # v1.9: per-plein tracking (alleen wanneer de caller erom vraagt).
@@ -710,15 +728,27 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
                 volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
             resterend = rec['dag_kwh']
+            if not _batt_ongebonden and dag not in _batt_budget:
+                _batt_budget[dag] = max(0.0, battery_kwh)   # bruikbare batterij-energie voor deze sessie
             for i in volgorde:
                 if resterend <= 1e-9:
                     break
-                beschikbaar_kw = min(cap, _headroom_kw(i))
+                conn_kw = _conn_vrij_kw(i)
+                if _batt_ongebonden:
+                    batt_kw_vrij = battery_kw
+                else:
+                    _rem = _batt_budget[dag]
+                    batt_kw_vrij = min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
+                beschikbaar_kw = min(cap, conn_kw + batt_kw_vrij)
                 take = min(beschikbaar_kw * dt_h, resterend)
                 if take > 0:
                     ev[i] += take / dt_h
                     if _pp is not None:
                         _pp['load_kw'][i] += take / dt_h
+                    if not _batt_ongebonden:
+                        # energie boven de vrije aansluiting komt uit de batterij → budget aframen
+                        _uit_batt = max(0.0, take - conn_kw * dt_h)
+                        _batt_budget[dag] -= _uit_batt
                     resterend -= take
             if resterend > 1e-6:
                 tekort_kwh += resterend  # paste niet onder de aansluiting in dit venster
@@ -2548,17 +2578,21 @@ def run_simulation(inp: dict) -> dict:
             _ev_modus = 'onmiddellijk'
             _ev_conn = 1e12
             _batt_kw = 0.0
+            _batt_usable_kwh = 0.0
         else:
             # Variant 2 & 3: connection-aware laden — de totale afname (verbruik +
             # EV + batterij) blijft ONDER het toegangsvermogen (batterij buffert).
             _ev_modus = 'shift_onbalans' if inp.get('bsp', {}).get('actief', False) else 'shift_spot'
             _ev_conn = _conn_hard
             _batt_kw = inp['batterij'].get('kw', 0) or 0
+            # v1.9.1: bruikbare batterij-energie per laadsessie = kWh × DoD (begrenst de EV-headroom).
+            _batt_dod = (inp['batterij'].get('dod_pct', 90) or 90) / 100.0
+            _batt_usable_kwh = (inp['batterij'].get('kwh', 0) or 0) * _batt_dod
         _ev_per_plein = []
         _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                              pv_kw, consumption_kw, _ev_modus,
                                              connection_kw=_ev_conn, battery_kw=_batt_kw,
-                                             per_plein_out=_ev_per_plein)
+                                             per_plein_out=_ev_per_plein, battery_kwh=_batt_usable_kwh)
         # v1.8.10: MANUELE BATTERIJ ONTOEREIKEND (variant 2/3) → verhoog het
         # toegangsvermogen tot de laadvraag haalbaar wordt, i.p.v. dagen te
         # verliezen. (Variant 1 laadt ongetemperd op 1e12 → geen tekort, geen raise.)
@@ -2573,7 +2607,7 @@ def run_simulation(inp: dict) -> dict:
                 _mid = (_lo + _hi) / 2.0
                 _, _tk = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                        pv_kw, consumption_kw, _ev_modus,
-                                       connection_kw=_mid, battery_kw=_batt_kw)
+                                       connection_kw=_mid, battery_kw=_batt_kw, battery_kwh=_batt_usable_kwh)
                 if _tk <= 1e-6:
                     _hi = _mid
                 else:
@@ -2589,7 +2623,7 @@ def run_simulation(inp: dict) -> dict:
             _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                                  pv_kw, consumption_kw, _ev_modus,
                                                  connection_kw=_ev_conn, battery_kw=_batt_kw,
-                                                 per_plein_out=_ev_per_plein)
+                                                 per_plein_out=_ev_per_plein, battery_kwh=_batt_usable_kwh)
             _w = (f"Manuele batterij ontoereikend voor de laadvraag → toegangsvermogen "
                   f"verhoogd met ~{_conn_verhoogd_kw:.0f} kW (naar {_hi:.0f} kW) zodat alles "
                   f"laadt. Overweeg een grotere batterij om die verhoging te vermijden.")
