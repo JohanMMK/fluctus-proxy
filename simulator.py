@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.9.2 (opstelling 2 gedimensioneerd op MINIMALE ENERGIE i.p.v. 2-uurs-piekregel)
+# Wijziging v1.9.2 vs v1.9.1: _laadplein_capaciteit dimensioneert opstelling 2 nu als het kleinste
+#   aantal standaard 2u-eenheden (120 kW/260 kWh) dat op de bestaande aansluiting 100% van de km
+#   levert met gespreid, energie-begrensd (spot-slim) laden — i.p.v. de 2-uurs-batterij op piekvermogen.
+#   Zo valt opstelling 2 samen met het groeipad en met de goedkoopste-km/beste-NPV-filosofie.
 # Versie:        v1.9.1 (energie-begrensde batterij-headroom in _bouw_ev_load)
 # Wijziging v1.9.1 vs v1.9.0: _bouw_ev_load begrenst de batterij-bijdrage aan de EV-headroom nu door
 #   haar bruikbare energie per laadsessie (nieuwe param battery_kwh = kWh × DoD) i.p.v. haar vermogen
@@ -566,6 +571,14 @@ def build_pv_profile(
 
 _LAADPUNT_KW = {'AC22': 22.0, 'DC160': 160.0, 'DC300': 300.0}
 
+# v1.9.2 — standaard batterij-eenheid (Fluctus) voor de MINIMALE-ENERGIE-dimensionering
+# van opstelling 2: het kleinste aantal van deze 2u-eenheden dat op de bestaande aansluiting
+# 100% van de km levert met gespreid, energie-begrensd (spot-slim) laden.
+_BATT_UNIT_KW = 120.0
+_BATT_UNIT_KWH = 260.0
+_BATT_DOD = 0.90
+_MAX_BATT_UNITS = 40
+
 
 def _is_laaddag(dt, dpw: int) -> bool:
     wd = dt.weekday()  # ma=0 .. zo=6
@@ -796,36 +809,27 @@ def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: 
         else:
             lo = mid
     verhoogd_P = hi
-    # Opstelling 2 — minimale batterij-kW bij het huidige toegangsvermogen.
-    lo, hi = 0.0, _bovengrens
-    for _ in range(28):
-        mid = (lo + hi) / 2.0
-        if _tekort(toegangsvermogen, mid) <= 1e-6:
-            hi = mid
-        else:
-            lo = mid
-    _p_min = hi   # minimaal batterijVERMOGEN voor haalbaarheid (piek boven aansluiting)
-    # Batterij-kWh = zwaarste boven-aansluiting-energie in een ROLLEND 24u-venster
-    # (met DoD-marge). v1.8.9: rollend i.p.v. per kalenderdag, zodat een overnacht-
-    # sessie (avond + ochtend over middernacht) niet gesplitst en onderschat wordt.
+    # Opstelling 2 — MINIMALE ENERGIE (v1.9.2). Niet langer op piek-op-aanvraag (de oude
+    # 2-uurs-piekregel), maar het KLEINSTE aantal standaard 2u-eenheden (120 kW / 260 kWh) dat
+    # op de HUIDIGE aansluiting 100% van de km levert met gespreid, energie-begrensd (spot-slim)
+    # laden. Zo dimensioneren we op de energie die de km strikt nodig hebben — de goedkoopste
+    # oplossing (min. batterij, geen verzwaring) — consistent met het groeipad.
+    _k = 0
+    _tk = short0
+    while _k < _MAX_BATT_UNITS and _tk > 1e-6:
+        _k += 1
+        _, _tk = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
+                               _DIM_MODUS, connection_kw=toegangsvermogen,
+                               battery_kw=_k * _BATT_UNIT_KW,
+                               battery_kwh=_k * _BATT_UNIT_KWH * _BATT_DOD)
+    _bat_kw = _k * _BATT_UNIT_KW
+    _bat_kwh = _k * _BATT_UNIT_KWH
+    # diagnostiek: energie die met de gekozen batterij nog boven de aansluiting moet vloeien.
     evb, _ = _bouw_ev_load(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw,
-                           _DIM_MODUS, connection_kw=toegangsvermogen, battery_kw=_p_min)
-    _boven = [max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen) * 0.25
-              for i in range(len(sim_timestamps))]
-    _W = 96  # 24u = 96 kwartieren
-    _run = sum(_boven[:_W])
-    max_dag_kwh = _run
-    for i in range(_W, len(_boven)):
-        _run += _boven[i] - _boven[i - _W]
-        if _run > max_dag_kwh:
-            max_dag_kwh = _run
-    _e_cap = max_dag_kwh / 0.90   # nodige capaciteit uit dagenergie (1 cyclus, DoD-marge)
-    # v1.8.10 — 2-UURS BATTERIJ (Johan): standaardcomponenten. Capaciteit = dagenergie,
-    # vermogen = capaciteit / 2. Het laadpunt-/haalbaarheids-minimumvermogen (_p_min)
-    # is de vloer: ligt dat hoger dan capaciteit/2, dan groeit de batterij mee
-    # (kWh = 2 × kW) zodat het een geldige 2u-batterij blijft.
-    _bat_kw = max(_e_cap / 2.0, _p_min)
-    _bat_kwh = 2.0 * _bat_kw
+                           _DIM_MODUS, connection_kw=toegangsvermogen,
+                           battery_kw=_bat_kw, battery_kwh=_bat_kwh * _BATT_DOD)
+    _boven_kwh = sum(max(0.0, (base_cons_kw[i] + evb[i]) - toegangsvermogen)
+                     for i in range(len(sim_timestamps))) * 0.25
     return {
         'voldoende': False, 'tekort_mwh': round(short0 / 1000.0, 3),
         'huidig_toegangsvermogen_kw': round(toegangsvermogen, 1),
@@ -833,9 +837,9 @@ def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: 
         'verhoging_kw': round(verhoogd_P - toegangsvermogen, 1),
         'advies_batterij_kw': round(_bat_kw, 1),
         'advies_batterij_kwh': round(_bat_kwh, 1),
-        # diagnostiek: energie-gedreven capaciteit + vermogen-vloer apart
-        'dagenergie_boven_aansluiting_kwh': round(_e_cap, 1),
-        'min_vermogen_kw': round(_p_min, 1),
+        'advies_batterij_eenheden': _k,
+        # diagnostiek: energie die met de gekozen batterij nog boven de aansluiting vloeit.
+        'energie_boven_aansluiting_kwh': round(_boven_kwh, 1),
     }
 
 
