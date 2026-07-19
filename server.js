@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.29.0 (groeipad: aansluiting VAST — geen auto-verhoging, wél clip → echt % geladen)
+// Wijziging v15.29.0 vs v15.28.1: /api/groeipad zet cfg.geen_aansluiting_verhoging=true en buildSimInput
+//   geeft de vlag door aan simulator.py (v1.8.11), zodat de aansluiting op de vaste (volgroeide) waarde
+//   blijft en de dispatch clipt i.p.v. de aansluiting te verhogen. Zo toont geladen_mwh per stap wat er
+//   écht onder die aansluiting past (dalend % met minder batterijen).
 // Versie:        v15.28.1 (mix-log rendement net van opex; keuze-TCO ongewijzigd)
 // Wijziging v15.28.1 vs v15.28.0: het rendement in de mix-log is nu net van opex (onderhoud +
 //   verzekering jaar 1), consistent met de frontend. De keuze blijft op de laagste TCO.
@@ -2711,6 +2716,7 @@ app.post('/api/groeipad', async (req, res) => {
       // Aansluiting VAST op de optimale opstelling; batterij = k eenheden.
       cfg.aansluiting_kva = aansluitingKva; cfg.aansluitingKva = aansluitingKva;
       cfg.toegangsvermogen_kw = aansluitingKva;
+      cfg.geen_aansluiting_verhoging = true;   // v15.29.0: aansluiting mag NIET verhoogd worden → clip + tekort
       cfg.batterijId = 'CUSTOM';
       cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
         naam: 'Groeipad-batterij', kw: k * 120, kwh: k * 260, aantal_batterijen: k,
@@ -3175,6 +3181,8 @@ function buildSimInput(ui) {
     // v15.15.3: 3-sturingen variant 1 — batterij enkel zelfconsumptie +
     // piekshaving, geen arbitrage (simulator.py v1.7.1 leest deze vlag).
     geen_arbitrage: !!ui.geen_arbitrage,
+    // v15.29.0: groeipad houdt de aansluiting VAST → simulator.py mag ze niet verhogen maar clipt.
+    geen_aansluiting_verhoging: !!ui.geen_aansluiting_verhoging,
     // v15.15.4: laadpleinen (flexibele EV-laadvraag). simulator.py v1.8 leest
     // deze lijst; normalisatie + laadpunt-kW gebeurt daar. Zonder lijst = inert.
     laadpleinen: Array.isArray(ui.laadpleinen) ? ui.laadpleinen : [],
