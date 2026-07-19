@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.31.0 (KEUZEMAATSTAF = hoogste NPV @ cost of capital i.p.v. laagste TCO)
+// Wijziging v15.31.0 vs v15.30.0: _dimensioneerMix kiest de mix nu op de HOOGSTE NPV (contante waarde
+//   van de netto besparingen − investering, verdisconteerd aan input._tco.disconto). besparingNet =
+//   base_net − netdeel per kandidaat. Terugval op laagste TCO als base_net/disconto ontbreken.
 // Versie:        v15.30.0 (groeipad geeft distributie_eur per stap door → cumulatieve besparing in de frontend)
 // Versie:        v15.29.0 (groeipad: aansluiting VAST — geen auto-verhoging, wél clip → echt % geladen)
 // Wijziging v15.29.0 vs v15.28.1: /api/groeipad zet cfg.geen_aansluiting_verhoging=true en buildSimInput
@@ -2506,6 +2510,7 @@ async function _dimensioneerMix(input, cap, job) {
   const tp = input._tco || null;                      // v15.28.0: TCO-escalatieparameters (rapport-afgestemd)
   const ohBatKw = Number((tp && tp.onderhoud && tp.onderhoud.batterij_kw)) || 0;   // €/kW/jaar batterij-onderhoud
   const ohVast = Number((tp && tp.onderhoud_vast)) || 0;                           // PV + laadpalen onderhoud (jaar 1)
+  const baseNet = Number((tp && tp.base_net));                                     // v15.31.0: netkosten opstelling 0 (jaarbasis) → NPV
   const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
   const punten = [];
   for (let k = 1; k <= N; k++) {
@@ -2525,23 +2530,31 @@ async function _dimensioneerMix(input, cap, job) {
     const oh1 = ohVast + (k * BATT_UNIT_KW) * ohBatKw;                       // onderhoud jaar 1 (incl batterij)
     const opex1 = oh1 + capex * (Number((tp && tp.verzekering_promille)) || 0) / 1000;   // opex jaar 1
     const rendement = (Number.isFinite(K) && capex > 0) ? ((K - jaarkost - opex1) / capex * 100) : null;  // netto
-    const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);   // keuzemaatstaf
-    punten.push({ k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, tco, cabine, z });
+    const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);
+    // v15.31.0: KEUZEMAATSTAF = hoogste NPV @ cost of capital. besparingBruto = base0 − jaarkost;
+    // besparingNet = base_net − netdeel (netkosten-component, kan negatief).
+    const besparingBruto = (Number.isFinite(K)) ? (K - jaarkost) : null;
+    const besparingNet = (Number.isFinite(baseNet) && besparingBruto != null) ? (baseNet - netdeel) : null;
+    const npv = (tp && besparingBruto != null) ? _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) : null;
+    punten.push({ k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, tco, npv, cabine, z });
     _jlog(job, 'resultaat',
           `Mix ${k} batt + ${z.kva} kVA${cabine?' (MS+cabine)':''}: factuur € ${Math.round(z.factuur).toLocaleString('nl-BE')}/jaar` +
-          `, TCO € ${Math.round(tco).toLocaleString('nl-BE')}` +
+          (npv != null ? `, NPV € ${Math.round(npv).toLocaleString('nl-BE')}` : `, TCO € ${Math.round(tco).toLocaleString('nl-BE')}`) +
           (rendement != null ? `, rendement ${rendement.toFixed(1)}%` : ''),
           { opstelling: 'mix', kva: z.kva, kwh: z.kwh });
   }
   if (!punten.length) return null;
   let beste;
-  if (punten.every(p => p.tco != null)) {
-    beste = punten.reduce((a, b) => (b.tco < a.tco ? b : a));               // laagste TCO incl cabine
+  if (punten.every(p => p.npv != null)) {
+    beste = punten.reduce((a, b) => (b.npv > a.npv ? b : a));               // HOOGSTE NPV @ cost of capital
     _jlog(job, 'ok', `Beste mix: ${beste.k} batterij${beste.k>1?'en':''} + ${beste.kva} kVA ` +
-          `(laagste TCO € ${Math.round(beste.tco).toLocaleString('nl-BE')} van ${punten.length} onderzochte)`, { opstelling: 'mix' });
+          `(hoogste NPV € ${Math.round(beste.npv).toLocaleString('nl-BE')} van ${punten.length} onderzochte)`, { opstelling: 'mix' });
+  } else if (punten.every(p => p.tco != null)) {
+    beste = punten.reduce((a, b) => (b.tco < a.tco ? b : a));               // terugval: laagste TCO
+    _jlog(job, 'waarschuwing', 'Geen NPV-basis (base_net/disconto) — mix gekozen op laagste TCO.', { opstelling: 'mix' });
   } else {
     beste = punten.reduce((a, b) => (b.factuur < a.factuur ? b : a));       // terugval: laagste factuur
-    _jlog(job, 'waarschuwing', 'Geen TCO-basis meegegeven — mix gekozen op laagste factuur i.p.v. TCO.', { opstelling: 'mix' });
+    _jlog(job, 'waarschuwing', 'Geen TCO/NPV-basis meegegeven — mix gekozen op laagste factuur.', { opstelling: 'mix' });
   }
   // Teruggeefvorm compatibel met de assemblage in _draaiSim3 (m.cfg, m.dim.resultaat, m.kva, …).
   beste.cfg = beste.z.cfg;
@@ -2553,7 +2566,7 @@ async function _dimensioneerMix(input, cap, job) {
   beste.alternatieven = punten.map(p => ({ aantal_batterijen: p.k, kva: p.kva, kwh: p.kwh,
                                            jaarkost: Math.round(p.factuur), capex: Math.round(p.capex),
                                            rendement: p.rendement != null ? Math.round(p.rendement * 10) / 10 : null,
-                                           tco: Math.round(p.tco), cabine: !!p.cabine,
+                                           tco: Math.round(p.tco), npv: (p.npv != null ? Math.round(p.npv) : null), cabine: !!p.cabine,
                                            afname_mwh: Math.round((((p.z.resultaat||{}).kpi||{}).totaal_afname_mwh||0) * 10) / 10,
                                            distributie_eur: Math.round(_distributieJF(p.z.resultaat)),
                                            gekozen: p === beste }));
@@ -2650,6 +2663,28 @@ function _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) {
     if (y === 9) som += (Number(tp.pv_kwp) || 0) * (Number(tp.omvormer_vervang_kwp) || 0);
   }
   return capex + som;
+}
+// v15.31.0 — NPV @ cost of capital: contante waarde van de netto besparingen over de horizon
+// (mét escalatie) MIN de investering. besparingBruto = base0 − jaarkost; besparingNet = base_net −
+// netdeel (kan negatief zijn). De keuze van de mix gebeurt nu op de HOOGSTE NPV i.p.v. laagste TCO.
+function _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) {
+  if (!tp || !(capex > 0) || besparingBruto == null) return null;
+  const inf = Number(tp.inflatie) || 0, nx = Number(tp.net_extra) || 0;
+  const sj = Number(tp.startjaar) || 2026, H = Number(tp.horizon) || 15;
+  const disc = Number(tp.disconto); const r = (isFinite(disc) && disc >= 0) ? disc : 0.05;
+  const ed = Number(tp.besparing_energie_deel); const edeel = (isFinite(ed)) ? ed : 0.72;
+  const verz = capex * (Number(tp.verzekering_promille) || 0) / 1000;
+  const bNet = (besparingNet != null) ? besparingNet : besparingBruto * (1 - edeel);
+  const bE = besparingBruto - bNet;
+  const gN = (y) => { let g = Math.pow(1 + inf + nx, y);
+    if (tp.net_sprong_jaar && (sj + y) >= Number(tp.net_sprong_jaar)) g *= (1 + (Number(tp.net_sprong) || 0)); return g; };
+  let pv = 0;
+  for (let y = 0; y < H; y++) {
+    let netto = (bE * Math.pow(1 + inf, y) + bNet * gN(y)) - (oh1 * Math.pow(1 + inf, y) + verz);
+    if (y === 9) netto -= (Number(tp.pv_kwp) || 0) * (Number(tp.omvormer_vervang_kwp) || 0);
+    pv += netto / Math.pow(1 + r, y);
+  }
+  return pv - capex;
 }
 
 app.post('/api/nominatie-sim-3', async (req, res) => {
