@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.32.0 (groeipad rekent op MEERDERE vaste aansluitingen — O2 én O3 — per stap)
+// Wijziging v15.32.0 vs v15.31.0: /api/groeipad accepteert aansluitingen_kva[] en draait elke
+//   batterijstap op ELKE meegegeven aansluiting (die van opstelling 2 = geen verzwaring én die van
+//   opstelling 3 = verzwaard voor 100%). Elke stap krijgt aansluiting_kva mee terug; de frontend kiest
+//   per stap de aansluiting met de hoogste NPV op de geleverde km. Back-compat: enkel aansluiting_kva.
 // Versie:        v15.31.0 (KEUZEMAATSTAF = hoogste NPV @ cost of capital i.p.v. laagste TCO)
 // Wijziging v15.31.0 vs v15.30.0: _dimensioneerMix kiest de mix nu op de HOOGSTE NPV (contante waarde
 //   van de netto besparingen − investering, verdisconteerd aan input._tco.disconto). besparingNet =
@@ -2738,45 +2743,57 @@ app.post('/api/groeipad', async (req, res) => {
   const input = req.body;
   if (!input || typeof input !== 'object') return res.status(400).json({ error: 'body is verplicht' });
   if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
-  const aansluitingKva = Number(input.aansluiting_kva || input.aansluitingKva || 0);
+  // v15.32.0: het groeipad rekent nu op MEERDERE vaste aansluitingen (die van opstelling 2 én
+  // opstelling 3). Per batterijstap draaien we elke aansluiting → de frontend kiest per stap de
+  // aansluiting met de hoogste NPV (partiële levering). Back-compat: enkel aansluiting_kva → 1 lijst.
+  const aansluitingKvaEnkel = Number(input.aansluiting_kva || input.aansluitingKva || 0);
+  let aansluitingen = Array.isArray(input.aansluitingen_kva)
+    ? input.aansluitingen_kva.map(Number).filter((v) => v > 0)
+    : [];
+  if (!aansluitingen.length && aansluitingKvaEnkel > 0) aansluitingen = [aansluitingKvaEnkel];
+  aansluitingen = [...new Set(aansluitingen.map((v) => Math.round(v)))].sort((a, b) => a - b);   // dedupe + oplopend
   const maxBatt = Math.max(1, Math.min(20, Math.round(Number(input.max_batterijen || 0)) || 1));
-  if (!(aansluitingKva > 0)) return res.status(400).json({ error: 'aansluiting_kva (vast) is verplicht' });
+  if (!aansluitingen.length) return res.status(400).json({ error: 'aansluiting_kva of aansluitingen_kva (vast) is verplicht' });
   try {
     // Gevraagde laadenergie uit de input (Σ per plein), zodat we het % kunnen berekenen.
     const pleinen = Array.isArray(input.laadpleinen) ? input.laadpleinen : [];
     const gevraagdMwhTot = pleinen.reduce((s, p) =>
       s + (Number(p.aantal) || 0) * (Number(p.km_per_jaar) || 0) * (Number(p.kwh_per_km) || 0) / 1000, 0);
     const stappen = [];
-    for (let k = 1; k <= maxBatt; k++) {
-      const cfg = JSON.parse(JSON.stringify(input));
-      // Aansluiting VAST op de optimale opstelling; batterij = k eenheden.
-      cfg.aansluiting_kva = aansluitingKva; cfg.aansluitingKva = aansluitingKva;
-      cfg.toegangsvermogen_kw = aansluitingKva;
-      cfg.geen_aansluiting_verhoging = true;   // v15.29.0: aansluiting mag NIET verhoogd worden → clip + tekort
-      cfg.batterijId = 'CUSTOM';
-      cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
-        naam: 'Groeipad-batterij', kw: k * 120, kwh: k * 260, aantal_batterijen: k,
-        dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
-      });
-      const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
-      const lp = (r && r.laadplein) || {};
-      const geladenMwh = Array.isArray(lp.pleinen)
-        ? lp.pleinen.reduce((s, p) => s + (Number(p.geladen_mwh) || 0), 0)
-        : (Number(lp.ev_last_mwh) || 0);
-      const pct = gevraagdMwhTot > 0 ? Math.min(100, Math.round(geladenMwh / gevraagdMwhTot * 1000) / 10) : null;
-      stappen.push({
-        aantal_batterijen: k, kw: k * 120, kwh: k * 260,
-        gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10,
-        geladen_mwh: Math.round(geladenMwh * 10) / 10,
-        geleverd_pct: pct,
-        aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
-        factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
-        distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
-      });
+    for (const c of aansluitingen) {
+      for (let k = 1; k <= maxBatt; k++) {
+        const cfg = JSON.parse(JSON.stringify(input));
+        // Aansluiting VAST op de kandidaat-aansluiting; batterij = k eenheden.
+        cfg.aansluiting_kva = c; cfg.aansluitingKva = c;
+        cfg.toegangsvermogen_kw = c;
+        cfg.geen_aansluiting_verhoging = true;   // v15.29.0: aansluiting mag NIET verhoogd worden → clip + tekort
+        cfg.batterijId = 'CUSTOM';
+        cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
+          naam: 'Groeipad-batterij', kw: k * 120, kwh: k * 260, aantal_batterijen: k,
+          dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
+        });
+        const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+        const lp = (r && r.laadplein) || {};
+        const geladenMwh = Array.isArray(lp.pleinen)
+          ? lp.pleinen.reduce((s, p) => s + (Number(p.geladen_mwh) || 0), 0)
+          : (Number(lp.ev_last_mwh) || 0);
+        const pct = gevraagdMwhTot > 0 ? Math.min(100, Math.round(geladenMwh / gevraagdMwhTot * 1000) / 10) : null;
+        stappen.push({
+          aansluiting_kva: c,   // v15.32.0: welke vaste aansluiting deze stap draaide
+          aantal_batterijen: k, kw: k * 120, kwh: k * 260,
+          gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10,
+          geladen_mwh: Math.round(geladenMwh * 10) / 10,
+          geleverd_pct: pct,
+          aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
+          factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
+          distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
+        });
+      }
     }
-    return res.json({ ok: true, aansluiting_kva: aansluitingKva, max_batterijen: maxBatt,
+    return res.json({ ok: true, aansluiting_kva: aansluitingen[aansluitingen.length - 1],
+      aansluitingen_kva: aansluitingen, max_batterijen: maxBatt,
       gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10, stappen,
-      _meta: { server_version: '15.23.0' } });
+      _meta: { server_version: '15.32.0' } });
   } catch (e) {
     console.error('[groeipad] fout:', e.message);
     return res.status(500).json({ error: 'groeipad gefaald: ' + e.message });
