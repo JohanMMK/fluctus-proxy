@@ -1,6 +1,7 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.30.0 (groeipad geeft distributie_eur per stap door → cumulatieve besparing in de frontend)
 // Versie:        v15.29.0 (groeipad: aansluiting VAST — geen auto-verhoging, wél clip → echt % geladen)
 // Wijziging v15.29.0 vs v15.28.1: /api/groeipad zet cfg.geen_aansluiting_verhoging=true en buildSimInput
 //   geeft de vlag door aan simulator.py (v1.8.11), zodat de aansluiting op de vaste (volgroeide) waarde
@@ -2735,6 +2736,7 @@ app.post('/api/groeipad', async (req, res) => {
         geleverd_pct: pct,
         aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
         factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
+        distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
       });
     }
     return res.json({ ok: true, aansluiting_kva: aansluitingKva, max_batterijen: maxBatt,
