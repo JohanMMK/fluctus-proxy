@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.33.0 (groeipad geeft factuur-componenten per stap → detailfactuur-vergelijking)
+// Wijziging v15.33.0 vs v15.32.0: /api/groeipad geeft per stap factuur_detail mee (energie /
+//   distributie+transport / capaciteit / heffingen / subtotaal, via _frCompJF) zodat de frontend een
+//   gedetailleerde factuurvergelijking van een gekozen groeipad-stap vs. opstelling 0 kan tonen.
 // Versie:        v15.32.0 (groeipad rekent op MEERDERE vaste aansluitingen — O2 én O3 — per stap)
 // Wijziging v15.32.0 vs v15.31.0: /api/groeipad accepteert aansluitingen_kva[] en draait elke
 //   batterijstap op ELKE meegegeven aansluiting (die van opstelling 2 = geen verzwaring én die van
@@ -2467,6 +2471,20 @@ function _distributieJF(r) {
   const sub = g => (g && g._subtotaal != null) ? (Number(g._subtotaal) || 0) : 0;
   return sub(gr.B_netgebruik_afname || gr.B) + sub(gr.C_netgebruik_injectie || gr.C) + sub(gr.D_transport || gr.D);
 }
+// v15.33.0: factuur-componenten (energie / distributie+transport / capaciteit / heffingen / subtotaal)
+// — spiegelt _frComp() in de frontend, zodat de groeipad-detailfactuur per stap kan renderen.
+function _frCompJF(r) {
+  const jf = (r && (r.jaarfactuur || r.factuur)) || {}, gr = jf.groepen || {};
+  const g = (o, k) => { o = o || {}; return (o[k] != null) ? (Number(o[k]) || 0) : 0; };
+  const A = g(gr.A_energiekost || gr.A, '_subtotaal'), B = g(gr.B_netgebruik_afname || gr.B, '_subtotaal'),
+        C = g(gr.C_netgebruik_injectie || gr.C, '_subtotaal'), D = g(gr.D_transport || gr.D, '_subtotaal'),
+        E = g(gr.E_heffingen || gr.E, '_subtotaal');
+  const Bd = gr.B_netgebruik_afname || {}, Dd = gr.D_transport || {};
+  const cap = g(Bd, 'toegangsvermogen') + g(Bd, 'maandpiek') + g(Bd, 'overschrijding_toegangsvermogen')
+            + g(Dd, 'beschikbaar_vermogen') + g(Dd, 'maandpiek_transport') + g(Dd, 'jaarpiek_transport');
+  return { energie: Math.round(A), distributie: Math.round(B + C + D), capaciteit: Math.round(cap),
+           heffingen: Math.round(E), subtotaal: Math.round(Number(jf.subtotaal_excl_btw) || 0) };
+}
 function _mixZetAansluiting(cfg, kva, huidig) {
   cfg.aansluiting_kva = kva; cfg.aansluitingKva = kva; cfg.toegangsvermogen_kw = kva;
   cfg._mix_kva = kva; cfg._mix_huidig_kva = huidig;
@@ -2787,6 +2805,7 @@ app.post('/api/groeipad', async (req, res) => {
           aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
           factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
           distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
+          factuur_detail: _frCompJF(r),   // v15.33.0: componenten voor de groeipad-detailfactuur per stap
         });
       }
     }
