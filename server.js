@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.36.0 (PV-suggestie — POST /api/pv-sweep: 5 PV-stappen 0→PVmax op de vaste instap-config)
+// Wijziging v15.36.0 vs v15.35.0: nieuwe endpoint /api/pv-sweep. Sweept een lijst PV-vermogens (kWp) op
+//   een VASTE aansluiting + VAST batterij-aantal (de instap/Optimaal-config) en geeft per stap factuur +
+//   netkosten + injectie terug. De frontend toont de marginale PV-waarde (besparing t.o.v. 0 PV) en laat
+//   de klant één PV-systeem kiezen dat in Optimaal én groeistap 1 wordt gebakken (via her-run).
 // Versie:        v15.35.0 (Battery-only Kamino — gebouw zonder laadplein: batterij-sweep op bestaand verbruik)
 // Wijziging v15.35.0 vs v15.34.0: een gebouw ZONDER laadplein krijgt nu ook een volwaardige
 //   Kamino-analyse. _batterijSweepGebouw() sweept 1…Nmax batterijen (Nmax = ceil((toegangsvermogen+120)/120),
@@ -2935,6 +2940,55 @@ app.post('/api/groeipad', async (req, res) => {
   } catch (e) {
     console.error('[groeipad] fout:', e.message);
     return res.status(500).json({ error: 'groeipad gefaald: ' + e.message });
+  }
+});
+
+// ── v15.36.0 — PV-SWEEP: POST /api/pv-sweep ──────────────────────────────────
+// Sweept een reeks PV-vermogens (kWp) op een VASTE aansluiting + VAST batterij-aantal
+// (de instap/Optimaal-config). Per stap draait een echte dispatch ('sturing') en geven we
+// de factuur + netkosten terug, zodat de frontend de MARGINALE PV-waarde toont (besparing
+// t.o.v. de 0-PV-stap) en de klant één PV-systeem kiest. Zelfde patroon als /api/groeipad.
+app.post('/api/pv-sweep', async (req, res) => {
+  const input = req.body;
+  if (!input || typeof input !== 'object') return res.status(400).json({ error: 'body is verplicht' });
+  if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  const c = Number(input.aansluiting_kva || input.aansluitingKva || 0);
+  const k = Math.max(0, Math.round(Number(input.aantal_batterijen || 0)));
+  let pvLijst = Array.isArray(input.pv_kwp_lijst) ? input.pv_kwp_lijst.map(Number).filter((v) => v >= 0) : [];
+  pvLijst = [...new Set(pvLijst.map((v) => Math.round(v)))].sort((a, b) => a - b);   // dedupe + oplopend
+  if (!(c > 0)) return res.status(400).json({ error: 'aansluiting_kva (vast) is verplicht' });
+  if (!pvLijst.length) return res.status(400).json({ error: 'pv_kwp_lijst is verplicht' });
+  try {
+    const stappen = [];
+    for (const pv of pvLijst) {
+      const cfg = JSON.parse(JSON.stringify(input));
+      cfg.aansluiting_kva = c; cfg.aansluitingKva = c; cfg.toegangsvermogen_kw = c;
+      cfg.geen_aansluiting_verhoging = true;         // aansluiting blijft vast (net als het groeipad)
+      cfg.pv_kwp = pv; cfg.pvKwp = pv;
+      if (k > 0) {
+        cfg.batterijId = 'CUSTOM';
+        cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
+          naam: 'PV-sweep-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, aantal_batterijen: k,
+          dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
+        });
+      } else { cfg.batterijId = ''; cfg.batterijCustom = null; }
+      const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+      const jf = r.jaarfactuur || r.factuur || {};
+      const grC = (jf.groepen && (jf.groepen.C_netgebruik_injectie || jf.groepen.C)) || {};
+      stappen.push({
+        pv_kwp: pv,
+        productie_mwh: Math.round(pv * 0.95 * 10) / 10,                // ~950 kWh/kWp/jaar
+        factuur_sturing_excl_btw: Math.round(Number(jf.subtotaal_excl_btw) || 0),
+        distributie_eur: Math.round(_distributieJF(r)),               // netkosten (B+C+D) → besparingNet frontend
+        injectie_eur: Math.round(Number(grC._subtotaal) || 0),        // groep C (injectie) — negatief = opbrengst
+        factuur_detail: _frCompJF(r),
+      });
+    }
+    return res.json({ ok: true, aansluiting_kva: c, aantal_batterijen: k, pv_kwp_lijst: pvLijst, stappen,
+      _meta: { server_version: '15.36.0' } });
+  } catch (e) {
+    console.error('[pv-sweep] fout:', e.message);
+    return res.status(500).json({ error: 'pv-sweep gefaald: ' + e.message });
   }
 });
 
