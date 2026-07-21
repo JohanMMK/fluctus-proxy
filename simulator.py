@@ -6,6 +6,14 @@
 #   aantal standaard 2u-eenheden (120 kW/260 kWh) dat op de bestaande aansluiting 100% van de km
 #   levert met gespreid, energie-begrensd (spot-slim) laden — i.p.v. de 2-uurs-batterij op piekvermogen.
 #   Zo valt opstelling 2 samen met het groeipad en met de goedkoopste-km/beste-NPV-filosofie.
+# Versie:        v1.10.0 (batterij-bewuste PV-energiebalans + heldere injectie-opbrengst in de KPI)
+# Wijziging v1.10.0 vs v1.9.2: nieuwe KPI-velden voor de PV-flows (geen gebouw/LP-split, één geheel):
+#   pv_direct_zelfverbruik_mwh, pv_via_batterij_mwh (residu = productie − direct − fysieke injectie,
+#   dus PV die via de batterij naar later lokaal verbruik ging, incl. RTE-verlies), pv_netto_injectie_mwh
+#   (= fysieke grid-out). Plus injectie_opbrengst_eur (netto), injectie_energie_opbrengst_eur en
+#   injectie_netkost_eur, berekend in bereken_jaarfactuur uit groep A (spot/markdown/imbalance op
+#   injectie) en groep C (injectie-netkosten). Curtailment (pv_curtailed_mwh / vermeden_injectie_kost_eur)
+#   bestond al. De onbalans-windfall = verschil sturing↔onbalans (server/frontend, twee runs).
 # Versie:        v1.9.1 (energie-begrensde batterij-headroom in _bouw_ev_load)
 # Wijziging v1.9.1 vs v1.9.0: _bouw_ev_load begrenst de batterij-bijdrage aan de EV-headroom nu door
 #   haar bruikbare energie per laadsessie (nieuwe param battery_kwh = kWh × DoD) i.p.v. haar vermogen
@@ -2229,6 +2237,15 @@ def bereken_jaarfactuur(
     btw_bedrag = btw_basis * 0.21
     totaal_incl_btw = btw_basis * 1.21 + E['energiefonds_vlaanderen']
 
+    # v1.10.0: heldere injectie-opbrengst (periode). Energie-inkomst = spot-opbrengst op de
+    # geïnjecteerde MWh minus markdown/imbalance (A). Injectie-netkosten = groep C. Netto =
+    # energie-inkomst − netkosten (positief = de injectie levert netto op).
+    _inj_energie_opbrengst = -(A.get('injectie_energie_spot', 0.0)
+                               + A.get('markdown_injectie', 0.0)
+                               + A.get('imbalance_injectie', 0.0))
+    _inj_netkost = C.get('_subtotaal', 0.0)
+    _inj_opbrengst_netto = _inj_energie_opbrengst - _inj_netkost
+
     return {
         'groepen': {
             'A_energiekost': A,
@@ -2252,6 +2269,10 @@ def bereken_jaarfactuur(
         'winterpiek_afname_kw': winterpiek_afname,
         'maand_mwh_afname': maand_mwh_afname,
         'maand_mwh_injectie': maand_mwh_injectie,
+        # v1.10.0: heldere injectie-opbrengst (periode)
+        'injectie_energie_opbrengst_eur': _inj_energie_opbrengst,
+        'injectie_netkost_eur': _inj_netkost,
+        'injectie_opbrengst_eur': _inj_opbrengst_netto,
     }
 
 
@@ -3109,6 +3130,13 @@ def run_simulation(inp: dict) -> dict:
     cycli_verbruikt = energie_ontladen_mwh * 1000.0 / (batt['kwh'] * dod) if batt['kwh'] * dod > 0 else 0
     levensduur_jaren = max_cycli / cycli_verbruikt if cycli_verbruikt > 0 else 999
 
+    # v1.10.0: fysieke netto-injectie (batterij-bewust) — één keer berekend, hergebruikt in
+    # de grid-flows én de PV-energiebalans hieronder.
+    if batt['kwh'] <= 0:
+        _fysieke_injectie_mwh = sum(max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)) * 0.25 / 1000.0
+    else:
+        _fysieke_injectie_mwh = sum(max(0.0, grid_out_all[i] - grid_in_all[i]) for i in range(N)) * 0.25 / 1000.0
+
     kpi = {
         'totaal_incl_btw': factuur['totaal_incl_btw'],
         'subtotaal_excl_btw': factuur['subtotaal_excl_btw'],
@@ -3139,11 +3167,23 @@ def run_simulation(inp: dict) -> dict:
             if batt['kwh'] <= 0
             else sum(max(0.0, grid_in_all[i] - grid_out_all[i]) for i in range(N)) * 0.25 / 1000.0
         ),
-        'totaal_grid_out_mwh': (
-            sum(max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)) * 0.25 / 1000.0
-            if batt['kwh'] <= 0
-            else sum(max(0.0, grid_out_all[i] - grid_in_all[i]) for i in range(N)) * 0.25 / 1000.0
+        'totaal_grid_out_mwh': _fysieke_injectie_mwh,
+        # v1.10.0: BATTERIJ-BEWUSTE PV-ENERGIEBALANS (één geheel, geen gebouw/LP-split).
+        # Productie benut (= totaal_pv_mwh, na curtailment) splitst in:
+        #   direct zelfverbruik + via-batterij zelfverbruik + netto fysieke injectie.
+        # Via-batterij = residu: alles wat niet direct verbruikt en niet fysiek geïnjecteerd
+        # werd, ging via de batterij naar later lokaal verbruik (incl. RTE-verlies). Zonder
+        # batterij is dit 0.
+        'pv_direct_zelfverbruik_mwh': pv_naar_eigen_verbruik,
+        'pv_via_batterij_mwh': (
+            max(0.0, totaal_pv_mwh - pv_naar_eigen_verbruik - _fysieke_injectie_mwh)
+            if batt['kwh'] > 0 else 0.0
         ),
+        'pv_netto_injectie_mwh': _fysieke_injectie_mwh,
+        # Injectie-opbrengst (periode) — uit de factuur, zodat de UI één helder cijfer heeft.
+        'injectie_energie_opbrengst_eur': factuur.get('injectie_energie_opbrengst_eur', 0.0),
+        'injectie_netkost_eur': factuur.get('injectie_netkost_eur', 0.0),
+        'injectie_opbrengst_eur': factuur.get('injectie_opbrengst_eur', 0.0),
     }
 
     log.info(f"Totaal: €{kpi['totaal_incl_btw']:.0f} | zelfconsumptie {pct_zelfconsumptie:.1f}% | overschr zacht/hard: {aantal_overschr_zacht}/{aantal_overschr_hard}")
