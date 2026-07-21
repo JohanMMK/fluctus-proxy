@@ -1,6 +1,18 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.35.0 (Battery-only Kamino — gebouw zonder laadplein: batterij-sweep op bestaand verbruik)
+// Wijziging v15.35.0 vs v15.34.0: een gebouw ZONDER laadplein krijgt nu ook een volwaardige
+//   Kamino-analyse. _batterijSweepGebouw() sweept 1…Nmax batterijen (Nmax = ceil((toegangsvermogen+120)/120),
+//   d.w.z. tot 120 kW batterijvermogen boven de bestaande aansluiting) op het bestaande verbruik
+//   (piekshaving + arbitrage + PV-zelfconsumptie + onbalans), kiest de HOOGSTE NPV als Optimaal en geeft
+//   het volledige groeipad terug (modus 'batterij_gebouw', groeipad_gebouw.alternatieven), met stap 1 =
+//   aanbevolen instap. De aansluiting blijft vast (geen verzwaring/cabine).
+// Versie:        v15.34.0 (Kamino-analyse óók als de laadvraag past — optie a: enkel de batterij-opstelling)
+// Wijziging v15.34.0 vs v15.33.0: de `modus 'enkel'`-poort is gesplitst. Geen laadplein (of laadplein
+//   zonder batterij) → 'enkel' zoals vroeger. Laadplein + aansluiting VOLDOENDE + batterij → nu
+//   'twee_opstellingen' met ENKEL opstellingen.batterij (geen verzwaring nodig ⇒ Batterij = Optimaal),
+//   zodat de volle Kamino-analyse (Vandaag vs Batterij + groeipad + KPI's) óók verschijnt als het past.
 // Versie:        v15.33.0 (groeipad geeft factuur-componenten per stap → detailfactuur-vergelijking)
 // Wijziging v15.33.0 vs v15.32.0: /api/groeipad geeft per stap factuur_detail mee (energie /
 //   distributie+transport / capaciteit / heffingen / subtotaal, via _frCompJF) zodat de frontend een
@@ -2300,6 +2312,7 @@ const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succe
 // Zo is 'aantal batterijen' een echt geheel getal en klopt de capex per eenheid.
 const BATT_UNIT_KW  = 120;
 const BATT_UNIT_KWH = 260;
+const _MAX_BATT_UNITS_SRV = 40;   // veiligheidsplafond op de gebouw-batterij-sweep (v15.35.0)
 // De zoeklus is opstelling-agnostisch: voor 'batterij' én 'mix' is de bepalende maat
 // de batterij-kWh. De tariefkaart ligt vast in de config (de LS/MS-poort, vooraf), niet
 // in de zoeklogica.
@@ -2710,6 +2723,112 @@ function _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) {
   return pv - capex;
 }
 
+// ── v15.35.0 — BATTERIJ-ONLY KAMINO (gebouw zonder laadplein) ──────────────────
+// Voor een gebouw ZONDER laadplein sweepen we op het BESTAANDE verbruik of één of
+// meer batterijen rendement geven (piekshaving + arbitrage + PV-zelfconsumptie +
+// onbalans). De aansluiting blijft VAST — er is geen verzwaring en geen cabine.
+// Range: van 1 batterij tot Nmax = ceil((toegangsvermogen + 120)/120) eenheden,
+// d.w.z. tot we 120 kW batterijvermogen boven het bestaande toegangsvermogen zitten.
+// Keuzemaatstaf = HOOGSTE NPV @ cost of capital (= "Optimaal"). Stap 1 = de
+// aanbevolen, capex-arme instap (altijd het meest rendabel per geïnvesteerde euro).
+async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
+  const _sub = r => _subJF(r);
+  const P = Number(input.aansluiting_kva || input.aansluitingKva || input.toegangsvermogen_kw || 0) || 0;
+  const Nmax = Math.min(_MAX_BATT_UNITS_SRV, Math.max(1, Math.ceil((P + BATT_UNIT_KW) / BATT_UNIT_KW)));
+  const annf = Number(input._kpi_annfactor) || 1;
+  const eurKwh = Number((input._investering || {}).eur_per_kwh) || 0;
+  const capexVast = Number(input._kpi_capex_vast) || 0;            // ~0 zonder laadplein (geen laadpalen/kabeltracé)
+  const horizon = Number((input._investering || {}).horizon_jaar) || 15;
+  const tp = input._tco || null;
+  const ohBatKw = Number((tp && tp.onderhoud && tp.onderhoud.batterij_kw)) || 0;
+  const ohVast = Number((tp && tp.onderhoud_vast)) || 0;
+  // Opstelling 0 (Vandaag) = de 'geen'-run; base0 = jaarfactuur op jaarbasis, base0Net = netdeel.
+  const base0 = _sub(probe) * annf;
+  const base0Net = _distributieJF(probe) * annf;
+
+  _jlog(job, 'start', `Gebouw zonder laadplein — batterij-sweep op bestaand verbruik ` +
+                      `(1…${Nmax} batterij${Nmax>1?'en':''}, aansluiting ${P||'?'} kVA vast).`,
+        { nmax: Nmax });
+  if (job) job.runs_verwacht = Nmax + 2;
+
+  const punten = [];
+  for (let k = 1; k <= Nmax; k++) {
+    const cfg = JSON.parse(JSON.stringify(input));
+    cfg.batterijId = 'CUSTOM';
+    cfg.batterijCustom = { naam: 'Batterij-sweep', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH,
+                           aantal_batterijen: k, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
+    _jlog(job, 'opstelling', `${k} batterij${k>1?'en':''} (${k*BATT_UNIT_KW} kW / ${k*BATT_UNIT_KWH} kWh) doorrekenen…`,
+          { maat: k, eenheid: 'batt' });
+    const rS = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+    if (job) job.runs = (job.runs || 0) + 1;
+    const jaarkost = _sub(rS) * annf;
+    const netdeel = _distributieJF(rS) * annf;
+    const capex = (Number.isFinite(capexVast) ? capexVast : 0) + k * BATT_UNIT_KWH * eurKwh;
+    const oh1 = ohVast + (k * BATT_UNIT_KW) * ohBatKw;
+    const opex1 = oh1 + capex * (Number((tp && tp.verzekering_promille)) || 0) / 1000;
+    const besparingBruto = base0 - jaarkost;                        // > 0 = goedkoper dan Vandaag
+    const besparingNet = base0Net - netdeel;
+    const npv = (tp && capex > 0) ? _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) : null;
+    const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);
+    const rendement = (capex > 0) ? ((besparingBruto - opex1) / capex * 100) : null;   // netto jaar-1 rendement
+    punten.push({ k, kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, cfg, resultaat: rS,
+                  jaarkost, netdeel, capex, npv, tco, rendement, besparingBruto });
+    _jlog(job, 'resultaat',
+          `${k} batterij${k>1?'en':''}: factuur € ${Math.round(jaarkost).toLocaleString('nl-BE')}/jaar, ` +
+          `besparing € ${Math.round(besparingBruto).toLocaleString('nl-BE')}/jaar` +
+          (npv != null ? `, NPV € ${Math.round(npv).toLocaleString('nl-BE')}` : '') +
+          (rendement != null ? `, rendement ${rendement.toFixed(1)}%` : ''),
+          { maat: k });
+  }
+  if (!punten.length) return null;
+
+  // Optimaal = hoogste NPV; terugval op laagste TCO, dan hoogste besparing.
+  let beste;
+  if (punten.every(p => p.npv != null)) {
+    beste = punten.reduce((a, b) => (b.npv > a.npv ? b : a));
+    _jlog(job, 'ok', `Optimaal: ${beste.k} batterij${beste.k>1?'en':''} ` +
+          `(hoogste NPV € ${Math.round(beste.npv).toLocaleString('nl-BE')} van ${punten.length}). ` +
+          `Aanbevolen instap = 1 batterij.`, {});
+  } else if (punten.every(p => p.tco != null)) {
+    beste = punten.reduce((a, b) => (b.tco < a.tco ? b : a));
+    _jlog(job, 'waarschuwing', 'Geen NPV-basis — Optimaal gekozen op laagste TCO.', {});
+  } else {
+    beste = punten.reduce((a, b) => (b.besparingBruto > a.besparingBruto ? b : a));
+    _jlog(job, 'waarschuwing', 'Geen TCO/NPV-basis — Optimaal gekozen op hoogste besparing.', {});
+  }
+
+  // Onbalans-variant voor de gekozen (Optimaal) batterij — kers op de taart (2e besparingsregel).
+  const vOnb = await _runSimulatorOnce(buildSimInput(_variantUi(beste.cfg, 'onbalans')));
+  if (job) job.runs = (job.runs || 0) + 1;
+  const varianten = { geen: probe, sturing: beste.resultaat, onbalans: vOnb };
+  const _kpiG = (() => {
+    const kg = _sub(probe), ks = _sub(beste.resultaat), ko = _sub(vOnb);
+    return { kost_geen_excl_btw: kg, kost_sturing_excl_btw: ks, kost_onbalans_excl_btw: ko,
+             meerwaarde_sturing_excl_btw: kg - ks, meerwaarde_onbalans_excl_btw: ks - ko,
+             onbalans_niet_van_toepassing: false };
+  })();
+
+  const alternatieven = punten.map(p => ({
+    aantal_batterijen: p.k, kw: p.kw, kwh: p.kwh,
+    jaarkost: Math.round(p.jaarkost), besparing_jaar: Math.round(p.besparingBruto),
+    capex: Math.round(p.capex), rendement: p.rendement != null ? Math.round(p.rendement * 10) / 10 : null,
+    tco: Math.round(p.tco), npv: (p.npv != null ? Math.round(p.npv) : null),
+    distributie_eur: Math.round(_distributieJF(p.resultaat) * annf),
+    gekozen: p === beste, aanbevolen: (p.k === 1) }));
+
+  _jlog(job, 'klaar', `Batterij-analyse gebouw klaar — Optimaal ${beste.k}×, instap 1× ` +
+                      `(${Math.round((Date.now()-startTime)/1000)}s)`, {});
+  return { ok: true, modus: 'batterij_gebouw', varianten, kpi_sturing: _kpiG, capaciteit: cap,
+           groeipad_gebouw: {
+             alternatieven, nmax: Nmax, optimaal_k: beste.k, aanbevolen_stap: 1,
+             aansluiting_kva: P, base0_jaar: Math.round(base0), base0_net_jaar: Math.round(base0Net),
+             optimaal: { aantal_batterijen: beste.k, kw: beste.kw, kwh: beste.kwh,
+                         capex: Math.round(beste.capex), npv: (beste.npv != null ? Math.round(beste.npv) : null),
+                         besparing_jaar: Math.round(beste.besparingBruto) } },
+           _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.35.0',
+                    modus: 'batterij_gebouw', nmax: Nmax, optimaal_k: beste.k } };
+}
+
 app.post('/api/nominatie-sim-3', async (req, res) => {
   const input = req.body;
   if (!input || typeof input !== 'object')
@@ -2856,8 +2975,17 @@ async function _draaiSim3(input, job) {
     const probe = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'geen')));
     const cap = (probe.laadplein && probe.laadplein.capaciteit) || { voldoende: true };
 
-    // ── Geen laadplein OF aansluiting voldoende → normale 3-sturingen (probe = 'geen') ──
-    if (!heeftLaadplein || cap.voldoende) {
+    // ── v15.35.0: Geen laadplein → BATTERIJ-ONLY KAMINO op het bestaande verbruik.
+    // We sweepen 1…Nmax batterijen (tot 120 kW boven het toegangsvermogen), kiezen de
+    // hoogste NPV als Optimaal en tekenen het groeipad met stap 1 als aanbevolen instap.
+    if (!heeftLaadplein) {
+      const sweep = await _batterijSweepGebouw(input, cap, probe, job, startTime);
+      if (sweep) return sweep;
+      // Terugval (geen sweep-punten, bv. leeg verbruik): oude 'enkel'-weergave.
+    }
+
+    // ── Laadplein zonder batterij en aansluiting volstaat → normale 3-sturingen (enkel) ──
+    if (!heeftLaadplein || (cap.voldoende && !_heeftBatt)) {
       const varianten = { geen: probe };
       varianten.sturing = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing')));
       varianten.onbalans = heeftFlex
@@ -2867,6 +2995,36 @@ async function _draaiSim3(input, job) {
       _jlog(job, 'klaar', `Aansluiting volstaat — geen opstellingen nodig (${Math.round((Date.now()-startTime)/1000)}s)`);
       return { ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap,
         _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.20.0', heeftFlex } };
+    }
+
+    // ── v15.34.0 (optie a): laadplein + aansluiting VOLDOENDE → tóch de Kamino-analyse, maar met
+    // ENKEL de batterij-opstelling. Geen verzwaring nodig ⇒ "Verzwaren" vervalt en Batterij = Optimaal.
+    // De batterij is dan puur voor arbitrage + goedkope eigen km. Vandaag (opstelling 0) bouwt de
+    // frontend zelf uit de basisfactuur + CREG-km. Zo verschijnt de volle analyse óók als het al past.
+    if (cap.voldoende) {
+      const v = { geen: probe };
+      v.sturing  = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing')));
+      v.onbalans = heeftFlex ? await _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans'))) : v.sturing;
+      const _battKwh = (input.batterijCustom && Number(input.batterijCustom.kwh)) || null;
+      const opstellingen = { batterij: {
+        varianten: v, kpi_sturing: _kpi(v, !heeftFlex),
+        config: {
+          spanning: input.spanning || 'LS', spanning_omgezet: false, spanning_origineel: null,
+          aansluiting_kva: input.aansluiting_kva || input.aansluitingKva || null,
+          toegangsvermogen_kw: input.toegangsvermogen_kw || input.aansluiting_kva || null,
+          batterij: input.batterijCustom || null, cabine_nodig: false,
+        },
+        dimensionering: {
+          haalbaar: true, iteraties: 0, beoordeeld_op: 'sturing', stappen: [], start_maat: null,
+          gekozen_maat: _battKwh, eenheid: _battKwh != null ? 'kWh' : null,
+          verloren_dagen: 0, totaal_dagen: null,
+        },
+      }};
+      _jlog(job, 'klaar', `Aansluiting volstaat — batterij-analyse (Vandaag vs Batterij) ` +
+                          `(${Math.round((Date.now()-startTime)/1000)}s)`);
+      return { ok: true, modus: 'twee_opstellingen', capaciteit: cap, opstellingen, vergelijking: {},
+        _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.34.0',
+                 opstellingen: ['batterij'], cap_voldoende: true, heeftFlex } };
     }
 
     // ── Aansluiting ontoereikend voor de laadvraag → 3 opstellingen × 3 sturingen ──
