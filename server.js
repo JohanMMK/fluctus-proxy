@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.38.0 (/api/pv-sweep geeft zelfconsumptie-splitsing + % t.o.v. productie per PV-stap)
+// Wijziging v15.38.0 vs v15.37.0: /api/pv-sweep geeft per stap pv_direct_mwh, pv_via_batterij_mwh,
+//   pv_injectie_mwh en zelfconsumptie_pct (= (direct + via batterij) / bruto productie) mee, zodat de
+//   frontend een zelfconsumptie-%-kolom en het max-zelfconsumptie-scenario kan tonen.
 // Versie:        v15.37.0 (POST /api/opstelling — één volledige opstelling op vaste config, voor "Herbereken groeistap 1")
 // Wijziging v15.37.0 vs v15.36.0: nieuwe endpoint /api/opstelling draait de drie sturingen op een vaste
 //   aansluiting + vast batterij-aantal en geeft één opstellings-object terug (varianten + kpi_sturing +
@@ -2979,17 +2983,27 @@ app.post('/api/pv-sweep', async (req, res) => {
       const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
       const jf = r.jaarfactuur || r.factuur || {};
       const grC = (jf.groepen && (jf.groepen.C_netgebruik_injectie || jf.groepen.C)) || {};
+      const kpi = (r && r.kpi) || {};
+      // v15.38.0: PV-flows uit de KPI (voor de zelfconsumptie-% in de tabel). Zelfconsumptie =
+      // (direct + via batterij) / bruto productie. Bruto = potentiële productie (na curtailment-verlies).
+      const _prodBruto = Number(kpi.pv_potentiele_productie_mwh) || (pv * 0.95);
+      const _zelf = (Number(kpi.pv_direct_zelfverbruik_mwh) || 0) + (Number(kpi.pv_naar_batterij_mwh) || 0);
       stappen.push({
         pv_kwp: pv,
-        productie_mwh: Math.round(pv * 0.95 * 10) / 10,                // ~950 kWh/kWp/jaar
+        productie_mwh: Math.round((_prodBruto) * 10) / 10,             // bruto productie (KPI, of ~950 kWh/kWp)
         factuur_sturing_excl_btw: Math.round(Number(jf.subtotaal_excl_btw) || 0),
         distributie_eur: Math.round(_distributieJF(r)),               // netkosten (B+C+D) → besparingNet frontend
         injectie_eur: Math.round(Number(grC._subtotaal) || 0),        // groep C (injectie) — negatief = opbrengst
         factuur_detail: _frCompJF(r),
+        // v15.38.0: zelfconsumptie-splitsing (MWh) + % t.o.v. productie
+        pv_direct_mwh: Math.round((Number(kpi.pv_direct_zelfverbruik_mwh) || 0) * 10) / 10,
+        pv_via_batterij_mwh: Math.round((Number(kpi.pv_naar_batterij_mwh) || 0) * 10) / 10,
+        pv_injectie_mwh: Math.round((Number(kpi.pv_injectie_mwh) || 0) * 10) / 10,
+        zelfconsumptie_pct: (_prodBruto > 0 && pv > 0) ? Math.round(_zelf / _prodBruto * 1000) / 10 : null,
       });
     }
     return res.json({ ok: true, aansluiting_kva: c, aantal_batterijen: k, pv_kwp_lijst: pvLijst, stappen,
-      _meta: { server_version: '15.36.0' } });
+      _meta: { server_version: '15.38.0' } });
   } catch (e) {
     console.error('[pv-sweep] fout:', e.message);
     return res.status(500).json({ error: 'pv-sweep gefaald: ' + e.message });
