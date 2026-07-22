@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.37.0 (POST /api/opstelling — één volledige opstelling op vaste config, voor "Herbereken groeistap 1")
+// Wijziging v15.37.0 vs v15.36.0: nieuwe endpoint /api/opstelling draait de drie sturingen op een vaste
+//   aansluiting + vast batterij-aantal en geeft één opstellings-object terug (varianten + kpi_sturing +
+//   config + dimensionering), zodat de frontend "Groeistap 1" als extra opstelling naast Optimaal toont.
 // Versie:        v15.36.0 (PV-suggestie — POST /api/pv-sweep: 5 PV-stappen 0→PVmax op de vaste instap-config)
 // Wijziging v15.36.0 vs v15.35.0: nieuwe endpoint /api/pv-sweep. Sweept een lijst PV-vermogens (kWp) op
 //   een VASTE aansluiting + VAST batterij-aantal (de instap/Optimaal-config) en geeft per stap factuur +
@@ -2989,6 +2993,59 @@ app.post('/api/pv-sweep', async (req, res) => {
   } catch (e) {
     console.error('[pv-sweep] fout:', e.message);
     return res.status(500).json({ error: 'pv-sweep gefaald: ' + e.message });
+  }
+});
+
+// ── v15.37.0 — POST /api/opstelling: één volledige opstelling (varianten + KPI) op een VASTE config ──
+// Voor "Herbereken voor groeistap 1": draait de drie sturingen (geen/sturing/onbalans) op een vaste
+// aansluiting + vast batterij-aantal en geeft één opstellings-object terug in dezelfde vorm als de
+// opstellingen in _draaiSim3 (varianten, kpi_sturing, config, dimensionering). Zo kan de frontend het
+// als extra opstelling "Groeistap 1" naast Optimaal tonen, met een echte detailfactuur.
+app.post('/api/opstelling', async (req, res) => {
+  const input = req.body;
+  if (!input || typeof input !== 'object') return res.status(400).json({ error: 'body is verplicht' });
+  if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  const c = Number(input.aansluiting_kva || input.aansluitingKva || 0);
+  const k = Math.max(0, Math.round(Number(input.aantal_batterijen || 0)));
+  if (!(c > 0)) return res.status(400).json({ error: 'aansluiting_kva is verplicht' });
+  try {
+    const cfg = JSON.parse(JSON.stringify(input));
+    cfg.aansluiting_kva = c; cfg.aansluitingKva = c; cfg.toegangsvermogen_kw = c;
+    cfg.geen_aansluiting_verhoging = true;              // vaste aansluiting (geen verzwaring)
+    if (k > 0) {
+      cfg.batterijId = 'CUSTOM';
+      cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
+        naam: 'Groeistap-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, aantal_batterijen: k,
+        dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
+      });
+    } else { cfg.batterijId = ''; cfg.batterijCustom = null; }
+    const _sub = r => _subJF(r);
+    const _pv = Number(cfg.pv_kwp || cfg.pvKwp || 0) > 0;
+    const heeftFlex = _pv || k > 0;
+    const geen    = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
+    const sturing = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+    const onbalans = heeftFlex ? await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans'))) : sturing;
+    const varianten = { geen, sturing, onbalans };
+    const kg = _sub(geen), ks = _sub(sturing), ko = _sub(onbalans);
+    const kpi_sturing = { kost_geen_excl_btw: kg, kost_sturing_excl_btw: ks, kost_onbalans_excl_btw: ko,
+      meerwaarde_sturing_excl_btw: kg - ks, meerwaarde_onbalans_excl_btw: ks - ko,
+      onbalans_niet_van_toepassing: !heeftFlex };
+    return res.json({ ok: true, opstelling: {
+      varianten, kpi_sturing,
+      config: {
+        spanning: input.spanning || 'LS', spanning_omgezet: false, spanning_origineel: null,
+        aansluiting_kva: c, toegangsvermogen_kw: c, batterij: cfg.batterijCustom || null,
+        cabine_nodig: false, aantal_batterijen: k,
+      },
+      dimensionering: {
+        haalbaar: true, iteraties: 0, beoordeeld_op: 'sturing', stappen: [], start_maat: null,
+        gekozen_maat: k > 0 ? k * BATT_UNIT_KWH : null, eenheid: k > 0 ? 'kWh' : null,
+        verloren_dagen: 0, totaal_dagen: null,
+      },
+    }, _meta: { server_version: '15.37.0' } });
+  } catch (e) {
+    console.error('[opstelling] fout:', e.message);
+    return res.status(500).json({ error: 'opstelling gefaald: ' + e.message });
   }
 });
 
