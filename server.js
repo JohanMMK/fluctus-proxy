@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.39.1 (bestaande PV — injectie-optimalisatie SolarActive: /api/injectie-optimalisatie)
+// Wijziging v15.39.1 vs v15.39.0: onbalans-meerwaarde via forecast-nominatie + capture-rate (0,018 ×
+//   modus-multiplier 0,67/1,0/1,5), zelfde methode als de flex-nominatie — GEEN perfecte vooruitzichten.
+// Wijziging v15.39.0 vs v15.38.0: nieuwe endpoint POST /api/injectie-optimalisatie + functie
+//   _analyseerInjectieOptimalisatie (demand-reconstructie bestaande PV + 3-niveau injectiewaardering + heatmaps).
 // Versie:        v15.38.0 (/api/pv-sweep geeft zelfconsumptie-splitsing + % t.o.v. productie per PV-stap)
 // Wijziging v15.38.0 vs v15.37.0: /api/pv-sweep geeft per stap pv_direct_mwh, pv_via_batterij_mwh,
 //   pv_injectie_mwh en zelfconsumptie_pct (= (direct + via batterij) / bruto productie) mee, zodat de
@@ -652,6 +657,175 @@ function _sliceMarktVoorPeriode(MARKT, simPeriode) {
     imb_q[i]  = imbFull[idx];
   }
   return { spot_q, imb_q, n: N, offset, mode: 'gepad' };
+}
+
+// ─── v15.39: BESTAANDE PV — injectie-optimalisatie (SolarActive) ──────────────
+// Zuiver JS, hergebruikt MARKT.solar_norm (900 kWh/kWp-vorm) + spot_q + imb_q + het
+// verbruiksprofiel. Reconstrueert de gebouw-demand per kwartier uit afname + zelfconsumptie
+// (= productie − injectie), leidt daaruit het injectieprofiel af en waardeert dat op drie
+// niveaus: vandaag (spot), + curtailen bij negatieve spot, + nomineren/sturen op de
+// onbalansmarkt (imbalance settlement, uitsluitend passieve respons — geen reservediensten).
+const _MAAND_DAGEN_2025 = [0,31,59,90,120,151,181,212,243,273,304,334];
+function _idx2025(d){
+  const maand=d.getUTCMonth(), dag=d.getUTCDate()-1;
+  const kwartier=Math.floor((d.getUTCHours()*60+d.getUTCMinutes())/15);
+  return (_MAAND_DAGEN_2025[maand]+dag)*96+kwartier;
+}
+function _analyseerInjectieOptimalisatie(MARKT, p){
+  if(!MARKT || !Array.isArray(MARKT.spot_q) || !MARKT.spot_q.length) throw new Error('geen marktdata');
+  const spot = MARKT.spot_q;
+  const imb  = (MARKT.imb_q && MARKT.imb_q.length===spot.length) ? MARKT.imb_q : spot;
+  const N = spot.length;
+  const solar = (MARKT.solar_norm && MARKT.solar_norm.length===35040) ? MARKT.solar_norm : null;
+  const profielRaw = (Array.isArray(p.profiel_kwartier)&&p.profiel_kwartier.length===35040) ? p.profiel_kwartier
+                    : (MARKT.profiel && MARKT.profiel.length===35040 ? MARKT.profiel : null);
+  // kWp / kVA — punt 3: piekvermogen (kW) op de injectiefactuur → kVA-omvormer; kWp ≈ 1,3 × kVA.
+  let kwp = +p.pv_kwp||0;
+  let kva = +p.inverter_kva||0;
+  const piek = +p.piek_kw||0;
+  if(piek>0){ kva = piek; if(kwp<=0) kwp = 1.3*piek; }
+  if(kwp<=0 && kva>0) kwp = 1.3*kva;
+  if(kva<=0 && kwp>0) kva = kwp/1.3;
+  if(kwp<=0) throw new Error('geen PV-vermogen (kWp of kVA)');
+  const YIELD = 900; // kWh/kWp/jaar (Johan)
+
+  // vorm projecteren op de MARKT-timeline (seizoen uitgelijnd met spot/imb)
+  const van = new Date(MARKT.van + 'T00:00:00Z');
+  const solarFrac = new Array(N), profFrac = new Array(N), maandVan = new Array(N);
+  let sSum=0, pSum=0;
+  for(let i=0;i<N;i++){
+    const d = new Date(van.getTime()+i*15*60*1000);
+    const idx = _idx2025(d);
+    const sv = solar ? (idx>=0&&idx<solar.length?solar[idx]:0) : 0;
+    const pv = profielRaw ? (idx>=0&&idx<profielRaw.length?profielRaw[idx]:0) : 0;
+    solarFrac[i]=sv; profFrac[i]=pv; maandVan[i]=d.getUTCMonth()+1; sSum+=sv; pSum+=pv;
+  }
+  if(sSum>0) for(let i=0;i<N;i++) solarFrac[i]/=sSum;
+  if(pSum>0) for(let i=0;i<N;i++) profFrac[i]/=pSum;
+
+  const periodeJaarFractie = N/35040;
+  const productiePeriode = YIELD*kwp*periodeJaarFractie;   // kWh over de periode
+  const afnameJaarMwh = +p.afname_mwh_jaar||0;
+  const afnamePeriodeKwh = afnameJaarMwh*1000*periodeJaarFractie;
+
+  // injectie-totaal (kWh) over de periode
+  let injGegevenPeriode = 0;
+  if(+p.injectie_mwh_jaar>0){
+    injGegevenPeriode = (+p.injectie_mwh_jaar)*1000*periodeJaarFractie;
+  } else if(+p.injectie_mwh_maand>0){
+    // extrapoleren maand→jaar via het aandeel van die maand in de zon (injectie volgt productie)
+    const m = Math.min(12, Math.max(1, +p.injectie_maand||0));
+    let maandSolar=0; for(let i=0;i<N;i++) if(maandVan[i]===m) maandSolar+=solarFrac[i];
+    const injJaar = maandSolar>0 ? (+p.injectie_mwh_maand)*1000/maandSolar : (+p.injectie_mwh_maand)*1000*12;
+    injGegevenPeriode = injJaar*periodeJaarFractie;
+  }
+  // zelfconsumptie = productie − injectie → gebouw-demand = afname + zelfconsumptie
+  const zelfconsumptie = Math.max(0, productiePeriode - injGegevenPeriode);
+  const demandPeriode = afnamePeriodeKwh + zelfconsumptie;
+
+  // demand + productie per kwartier → netto op de aansluiting (afname>0 / injectie<0)
+  let injTotReco=0, prodTot=0, demTot=0;
+  const inj = new Array(N);
+  for(let i=0;i<N;i++){
+    const dem = demandPeriode*profFrac[i];
+    const prod = productiePeriode*solarFrac[i];
+    const net = dem - prod;
+    inj[i] = net<0 ? -net : 0;
+    injTotReco+=inj[i]; prodTot+=prod; demTot+=dem;
+  }
+
+  // ── waardering van de injectie op 3 niveaus (€) ──
+  // 1) vandaag: injectie aan de day-ahead-spot (kan negatief bij negatieve spot).
+  // 2) + curtailen: injectie geblokkeerd bij spot<0 — day-ahead is de dag vooraf gekend,
+  //    dus dit is een ZEKERE actie (geen speculatie), leverancier-onafhankelijk.
+  // 3) + onbalans-sturing: NOMINEREN op forecast en de deviatie inzetten op de onbalansmarkt.
+  //    Zelfde methode als de flex-nominatie in de simulator: de deviatie is per dag begrensd op
+  //    paper_capture_rate × dagvolume (0,018 × forecast-modus-multiplier), en wordt ingezet op de
+  //    kwartieren met de grootste gunstige onbalans-spread. GEEN perfecte vooruitzichten meer.
+  const CAPTURE_BASE = 0.018;
+  const MODUS_MULT = { conservatief:0.67, realistic:1.0, optimistisch:1.5 };
+  const modus = (p.forecast_modus && MODUS_MULT[p.forecast_modus]) ? p.forecast_modus : 'realistic';
+  const captureRate = CAPTURE_BASE * (MODUS_MULT[modus] || 1.0);
+
+  let euroBaseline=0, euroCurtail=0, bespaardCurtail=0, verdiendOnbalans=0;
+  const HR = 24, DG = Math.ceil(N/96);
+  const hm1 = new Array(HR*DG).fill(0);   // netto injectieopbrengst €/kwartier (som per uur-cel), zonder sturing
+  const hm2 = new Array(HR*DG).fill(0);   // bespaarde injectie curtailment €
+  const hm3 = new Array(HR*DG).fill(0);   // verdiende injectie onbalans-sturing €
+  // niveau 1 + 2 (deterministisch, day-ahead vooraf gekend)
+  for(let i=0;i<N;i++){
+    const kwh = inj[i]; if(kwh<=0){ continue; }
+    const s = spot[i];
+    const eBase = kwh*s/1000;
+    const eCurt = kwh*Math.max(0,s)/1000;
+    euroBaseline+=eBase; euroCurtail+=eCurt;
+    const dBespaard = eCurt-eBase;         // ≥0: vermeden verlies bij negatieve spot
+    bespaardCurtail+=dBespaard;
+    const dag=Math.floor(i/96), uur=Math.floor((i%96)/4), cel=uur*DG+dag;
+    if(cel>=0&&cel<hm1.length){ hm1[cel]+=eBase; hm2[cel]+=dBespaard; }
+  }
+  // niveau 3 — onbalans-sturing: per dag een deviatie-budget (capture rate × dagvolume) inzetten op
+  // de kwartieren met de grootste spread (onbalansprijs boven de gecurtailde day-ahead-waarde).
+  for(let d=0; d<DG; d++){
+    const start=d*96, end=Math.min(N, start+96);
+    let dayInjKwh=0; const cand=[];
+    for(let i=start;i<end;i++){ const kwh=inj[i]; if(kwh<=0) continue; dayInjKwh+=kwh;
+      const spread=Math.max(0, imb[i]-Math.max(0,spot[i]));   // extra €/MWh bovenop het curtail-scenario
+      if(spread>0) cand.push({ i:i, kwh:kwh, spread:spread });
+    }
+    if(!cand.length || dayInjKwh<=0) continue;
+    let budgetKwh = captureRate * dayInjKwh;                  // toegelaten deviatie-volume (kWh)
+    cand.sort(function(a,b){ return b.spread-a.spread; });
+    for(let c=0;c<cand.length && budgetKwh>0;c++){
+      const use=Math.min(cand[c].kwh, budgetKwh);
+      const val=use*cand[c].spread/1000;
+      verdiendOnbalans+=val; budgetKwh-=use;
+      const ci=cand[c].i, dag=Math.floor(ci/96), uur=Math.floor((ci%96)/4), cel=uur*DG+dag;
+      if(cel>=0&&cel<hm3.length) hm3[cel]+=val;
+    }
+  }
+  const euroBeide = euroCurtail + verdiendOnbalans;
+  // opschalen naar vol jaar voor de kerncijfers
+  const jaarF = periodeJaarFractie>0 ? 1/periodeJaarFractie : 1;
+  const baselineJaar = euroBaseline*jaarF;
+  const curtailJaar  = euroCurtail*jaarF;
+  const beideJaar    = euroBeide*jaarF;
+  const meerCurtailJaar = bespaardCurtail*jaarF;
+  const meerOnbalansJaar= verdiendOnbalans*jaarF;
+
+  // payback: eenmalig €3.950 + management €0,72/kVA/maand
+  const INVEST=3950, MGMT_KVA_MND=0.72;
+  const mgmtJaar = MGMT_KVA_MND*kva*12;
+  const nettoCurtail = meerCurtailJaar - mgmtJaar;
+  const nettoBeide   = (meerCurtailJaar+meerOnbalansJaar) - mgmtJaar;
+  const paybackCurtailJaar = nettoCurtail>0 ? INVEST/nettoCurtail : null;
+  const paybackBeideJaar   = nettoBeide>0   ? INVEST/nettoBeide   : null;
+
+  return {
+    invoer:{ pv_kwp:Math.round(kwp*10)/10, inverter_kva:Math.round(kva*10)/10, piek_kw:piek||null,
+             afname_mwh_jaar:afnameJaarMwh, injectie_gegeven_mwh_periode:Math.round(injGegevenPeriode/100)/10 },
+    periode:{ van:MARKT.van, tot:MARKT.tot, n_kwartieren:N, jaar_fractie:Math.round(periodeJaarFractie*1000)/1000 },
+    sturing:{ forecast_modus:modus, capture_rate:captureRate, capture_rate_pct:Math.round(captureRate*1000)/10 },
+    energie_jaar:{ productie_mwh:Math.round(YIELD*kwp/1000*10)/10,
+                   zelfconsumptie_mwh:Math.round(zelfconsumptie*jaarF/1000*10)/10,
+                   injectie_mwh:Math.round(injTotReco*jaarF/1000*10)/10,
+                   demand_mwh:Math.round(demTot*jaarF/1000*10)/10,
+                   afname_mwh:afnameJaarMwh },
+    opbrengst_jaar:{ vandaag_spot_eur:Math.round(baselineJaar),
+                     met_curtail_eur:Math.round(curtailJaar),
+                     met_curtail_onbalans_eur:Math.round(beideJaar),
+                     meerwaarde_curtail_eur:Math.round(meerCurtailJaar),
+                     meerwaarde_onbalans_eur:Math.round(meerOnbalansJaar),
+                     meerwaarde_totaal_eur:Math.round(meerCurtailJaar+meerOnbalansJaar) },
+    payback:{ investering_eur:INVEST, management_eur_per_kva_maand:MGMT_KVA_MND, management_jaar_eur:Math.round(mgmtJaar),
+              netto_curtail_jaar_eur:Math.round(nettoCurtail), netto_beide_jaar_eur:Math.round(nettoBeide),
+              payback_curtail_jaar:paybackCurtailJaar!=null?Math.round(paybackCurtailJaar*10)/10:null,
+              payback_beide_jaar:paybackBeideJaar!=null?Math.round(paybackBeideJaar*10)/10:null },
+    heatmaps:{ uren:HR, dagen:DG,
+               netto_injectie_eur:hm1.map(v=>Math.round(v*100)/100),
+               bespaard_curtail_eur:hm2.map(v=>Math.round(v*100)/100),
+               verdiend_onbalans_eur:hm3.map(v=>Math.round(v*100)/100) }
+  };
 }
 
 // Batterijen
@@ -3060,6 +3234,33 @@ app.post('/api/opstelling', async (req, res) => {
   } catch (e) {
     console.error('[opstelling] fout:', e.message);
     return res.status(500).json({ error: 'opstelling gefaald: ' + e.message });
+  }
+});
+
+// v15.39: injectie-optimalisatie voor BESTAANDE PV (SolarActive). Geen dispatch/LP nodig — zuivere
+// waardering van het injectieprofiel op spot + onbalans (imbalance settlement, passieve respons).
+app.post('/api/injectie-optimalisatie', async (req, res) => {
+  const input = req.body;
+  if (!input || typeof input !== 'object') return res.status(400).json({ error: 'body is verplicht' });
+  if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  try {
+    const profielNaam = input.profielNaam || input.profiel_naam || null;
+    const profiel_kwartier = profielNaam ? _laadProfielKwartier(profielNaam) : null;
+    const r = _analyseerInjectieOptimalisatie(MARKT, {
+      pv_kwp: Number(input.pv_kwp || input.pvKwp || 0),
+      inverter_kva: Number(input.inverter_kva || input.kva || 0),
+      piek_kw: Number(input.piek_kw || input.piekKw || 0),
+      afname_mwh_jaar: Number(input.afname_mwh_jaar || input.jaarverbruik || 0),
+      injectie_mwh_jaar: Number(input.injectie_mwh_jaar || 0),
+      injectie_mwh_maand: Number(input.injectie_mwh_maand || 0),
+      injectie_maand: Number(input.injectie_maand || 0),
+      forecast_modus: input.forecast_modus || input.bspForecastModus || 'realistic',
+      profiel_kwartier: profiel_kwartier,
+    });
+    return res.json({ ok: true, analyse: r, _meta: { server_version: '15.39.1' } });
+  } catch (e) {
+    console.error('[injectie-opt] fout:', e.message);
+    return res.status(500).json({ error: 'injectie-optimalisatie gefaald: ' + e.message });
   }
 });
 
