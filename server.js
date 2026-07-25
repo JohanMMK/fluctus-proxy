@@ -1,6 +1,29 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.42.0 (uniform _ijk-blok uit elke sim-engine — fase 1 imby-ijkinfrastructuur)
+// Wijziging v15.42.0 vs v15.41.0: nominatie-sim-3, /api/opstelling én /api/injectie-optimalisatie geven
+//   nu een identiek gestructureerd `_ijk`-blok terug (schema fluctus-ijk/1): engine, soort (kost/opbrengst),
+//   input-signatuur, gebruikte parameters, niveaus (basis/sturing/onbalans/plafond) en meerwaarde. Puur
+//   additief (geen LP-wijziging) — klaar om via de webhook per simulatie een paar (eigen, imby) te loggen.
+// Versie:        v15.41.0 (injectie-optimalisatie = ECHTE predict-nominate-steer-simulatie + imby-ijkhaak)
+// Wijziging v15.41.0 vs v15.40.0: eigen simulatie die voorspelt (day-ahead/onbalans + ruis), nomineert,
+//   bijstuurt en afrekent op de gerealiseerde prijzen (seeded → reproduceerbaar). Rapporteert een
+//   capture-aandeel van het theoretische plafond (perfecte vooruitzichten) met de forecast-simulatie als
+//   ondergrens. Vrije parameters (sigma_da/imb/prod, thr_factor, capture, kalibratie) zijn ijkbaar via de
+//   toekomstige imby-webhook zodat onze studies systematisch naar imby convergeren.
+// Versie:        v15.40.0 (injectie-optimalisatie GEKALIBREERD op de imby SolarActive-methode)
+// Wijziging v15.40.0 vs v15.39.3: SolarActive = fysieke productie-curtailment (niet de 1,8% batterij-
+//   capture). Onbalans-meerwaarde = injectie gesetteld op de betere van day-ahead/onbalans × forecast-
+//   efficiëntie (conservatief 0,60 / realistisch 0,80 / optimistisch 1,00). Investering €3.500,
+//   beheerkost €6,6/kVA/jaar (imby-basis). Komt in dezelfde grootteorde als de imby-studies uit.
+// Versie:        v15.39.3 (injectie-optimalisatie: schaal/payback-drempel — vanaf welke kVA een payback haalbaar is)
+// Wijziging v15.39.3 vs v15.39.2: analyse geeft nu een `schaal`-blok. Meerwaarde én beheerkost schalen
+//   met kVA; enkel als de meerwaarde > 8,64 €/kVA/jaar bestaat er een drempel-kVA voor 3/5/7 jaar payback.
+// Versie:        v15.39.2 (injectie-optimalisatie: injectievolume = opgegeven jaarvolume, op de productievorm)
+// Wijziging v15.39.2 vs v15.39.1: het gevaloriseerde injectievolume is nu het OPGEGEVEN jaarvolume
+//   (van de factuur), verdeeld over de productievorm — i.p.v. een klein gereconstrueerd overschot bij
+//   demand >> productie (dat gaf een ~10× te lage opbrengst). Zelfconsumptie = productie − injectie.
 // Versie:        v15.39.1 (bestaande PV — injectie-optimalisatie SolarActive: /api/injectie-optimalisatie)
 // Wijziging v15.39.1 vs v15.39.0: onbalans-meerwaarde via forecast-nominatie + capture-rate (0,018 ×
 //   modus-multiplier 0,67/1,0/1,5), zelfde methode als de flex-nominatie — GEEN perfecte vooruitzichten.
@@ -671,6 +694,67 @@ function _idx2025(d){
   const kwartier=Math.floor((d.getUTCHours()*60+d.getUTCMinutes())/15);
   return (_MAAND_DAGEN_2025[maand]+dag)*96+kwartier;
 }
+// Seeded PRNG (mulberry32) + Gaussiaanse ruis (Box-Muller) — reproduceerbaar (zelfde input → zelfde output).
+function _mulberry32(a){ return function(){ a|=0; a=a+0x6D2B79F5|0; let t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t; return ((t^t>>>14)>>>0)/4294967296; }; }
+function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v); }
+
+// ─── v15.42: uniform IJK-blok (fase 1) ───────────────────────────────────────
+// Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
+// straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
+// parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
+const SERVER_VERSIE = '15.42.0';
+function _bouwIjk(engine, soort, input, parameters, niveaus){
+  // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
+  const n = niveaus || {};
+  const basis = +n.basis||0, sturing = +n.sturing||0, onbalans = +n.onbalans||0;
+  let mSturing, mOnbalans, mTotaal;
+  if(soort==='kost'){ mSturing = basis - sturing; mOnbalans = sturing - onbalans; mTotaal = basis - onbalans; }
+  else            { mSturing = sturing - basis; mOnbalans = onbalans - sturing; mTotaal = onbalans - basis; }
+  return {
+    schema: 'fluctus-ijk/1', engine: engine, soort: soort, versie: SERVER_VERSIE, ts: new Date().toISOString(),
+    input: input||{}, parameters: parameters||{},
+    niveaus_eur: { basis:Math.round(basis), sturing:Math.round(sturing), onbalans:Math.round(onbalans),
+                   plafond: (n.plafond!=null?Math.round(n.plafond):null) },
+    meerwaarde_eur: { sturing:Math.round(mSturing), onbalans:Math.round(mOnbalans), totaal:Math.round(mTotaal) }
+  };
+}
+// Verrijkt een nominatie-sim-3-resultaat met een _ijk-blok (batterij-BSP). Additief; faalt stil.
+function _verrijkIjk(r, input){
+  try{
+    if(!r || typeof r!=='object') return r;
+    input = input || {};
+    let kpi = r.kpi_sturing, perOpst = null;
+    if(!kpi && r.opstellingen){
+      perOpst = {};
+      Object.keys(r.opstellingen).forEach(function(k){ const o=r.opstellingen[k]; if(o&&o.kpi_sturing){
+        perOpst[k] = { basis:Math.round(o.kpi_sturing.kost_geen_excl_btw||0),
+                       sturing:Math.round(o.kpi_sturing.kost_sturing_excl_btw||0),
+                       onbalans:Math.round(o.kpi_sturing.kost_onbalans_excl_btw||0) }; } });
+      const prim = r.opstellingen.batterij || r.opstellingen.mix || r.opstellingen.verhogen
+                   || r.opstellingen[Object.keys(r.opstellingen)[0]];
+      kpi = prim && prim.kpi_sturing;
+    }
+    const niveaus = kpi
+      ? { basis:kpi.kost_geen_excl_btw, sturing:kpi.kost_sturing_excl_btw, onbalans:kpi.kost_onbalans_excl_btw, plafond:null }
+      : { basis:0, sturing:0, onbalans:0, plafond:null };
+    let lpEnergie=0; (input.laadpleinen||[]).forEach(function(p){ (p.laadpunten||[]).forEach(function(x){}); });
+    const inSig = {
+      aansluiting_kva: +(input.aansluiting_kva||input.aansluitingKva||0)||null,
+      batterij_kwh: (input.batterijCustom && +input.batterijCustom.kwh)||null,
+      pv_kwp: +(input.pv_kwp||input.pvKwp||0)||null,
+      profiel: input.profielNaam||input.profiel_naam||null,
+      jaarverbruik_mwh: +(input.jaarverbruik||input.jaarverbruik_mwh||0)||null,
+      laadpleinen: (input.laadpleinen||[]).length,
+      modus: r.modus||null,
+    };
+    const params = { paper_capture_rate:0.018,
+                     forecast_modus:(input.bsp && input.bsp.forecast_modus) || 'realistic',
+                     kalibratie:1.0 };
+    r._ijk = _bouwIjk('batterij-bsp','kost', inSig, params, niveaus);
+    if(perOpst) r._ijk.per_opstelling = perOpst;
+  }catch(e){ /* stil: ijk is additief, mag nooit de sim breken */ }
+  return r;
+}
 function _analyseerInjectieOptimalisatie(MARKT, p){
   if(!MARKT || !Array.isArray(MARKT.spot_q) || !MARKT.spot_q.length) throw new Error('geen marktdata');
   const spot = MARKT.spot_q;
@@ -719,72 +803,106 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
     const injJaar = maandSolar>0 ? (+p.injectie_mwh_maand)*1000/maandSolar : (+p.injectie_mwh_maand)*1000*12;
     injGegevenPeriode = injJaar*periodeJaarFractie;
   }
-  // zelfconsumptie = productie − injectie → gebouw-demand = afname + zelfconsumptie
-  const zelfconsumptie = Math.max(0, productiePeriode - injGegevenPeriode);
-  const demandPeriode = afnamePeriodeKwh + zelfconsumptie;
-
-  // demand + productie per kwartier → netto op de aansluiting (afname>0 / injectie<0)
-  let injTotReco=0, prodTot=0, demTot=0;
+  // Injectieprofiel: we VERTROUWEN de opgegeven injectie (factuur) als jaarvolume en verdelen ze over de
+  // PRODUCTIEVORM (injectie gebeurt tijdens productie, met het zwaartepunt rond de middag — net waar de
+  // spot negatief kan zijn en de onbalans-kans zit). Zo blijft het gevaloriseerde injectievolume gelijk
+  // aan wat de klant écht injecteert, i.p.v. een klein gereconstrueerd overschot wanneer de demand (bv.
+  // 200 MWh) veel groter is dan de productie (bv. 27 MWh) — dat gaf voorheen een 10× te lage opbrengst.
+  let prodTot=0; const prodArr=new Array(N);
+  for(let i=0;i<N;i++){ const prod=productiePeriode*solarFrac[i]; prodArr[i]=prod; prodTot+=prod; }
+  const injFrac = prodTot>0 ? Math.min(1, injGegevenPeriode/prodTot) : 0;   // aandeel van de productie dat geïnjecteerd wordt
+  let injTotReco=0, demTot=0;
   const inj = new Array(N);
   for(let i=0;i<N;i++){
-    const dem = demandPeriode*profFrac[i];
-    const prod = productiePeriode*solarFrac[i];
-    const net = dem - prod;
-    inj[i] = net<0 ? -net : 0;
-    injTotReco+=inj[i]; prodTot+=prod; demTot+=dem;
+    inj[i] = prodArr[i]*injFrac;                          // injectie ∝ productie, geschaald op het opgegeven volume
+    const selfc = prodArr[i]-inj[i];                      // zelfconsumptie dat kwartier
+    const dem = afnamePeriodeKwh*profFrac[i] + selfc;     // gebouw-demand = afname + zelfconsumptie
+    injTotReco+=inj[i]; demTot+=dem;
   }
+  const zelfconsumptie = Math.max(0, prodTot - injTotReco);   // = productie − injectie (voor rapportage)
 
-  // ── waardering van de injectie op 3 niveaus (€) ──
-  // 1) vandaag: injectie aan de day-ahead-spot (kan negatief bij negatieve spot).
-  // 2) + curtailen: injectie geblokkeerd bij spot<0 — day-ahead is de dag vooraf gekend,
-  //    dus dit is een ZEKERE actie (geen speculatie), leverancier-onafhankelijk.
-  // 3) + onbalans-sturing: NOMINEREN op forecast en de deviatie inzetten op de onbalansmarkt.
-  //    Zelfde methode als de flex-nominatie in de simulator: de deviatie is per dag begrensd op
-  //    paper_capture_rate × dagvolume (0,018 × forecast-modus-multiplier), en wordt ingezet op de
-  //    kwartieren met de grootste gunstige onbalans-spread. GEEN perfecte vooruitzichten meer.
-  const CAPTURE_BASE = 0.018;
-  const MODUS_MULT = { conservatief:0.67, realistic:1.0, optimistisch:1.5 };
-  const modus = (p.forecast_modus && MODUS_MULT[p.forecast_modus]) ? p.forecast_modus : 'realistic';
-  const captureRate = CAPTURE_BASE * (MODUS_MULT[modus] || 1.0);
+  // ── SIMULATIE: VOORSPELLEN → NOMINEREN → BIJSTUREN → AFREKENEN (v15.41) ──
+  // Een echte predict-nominate-steer-lus (geen vaste efficiëntie-haircut meer). De beslissingen worden op
+  // FORECASTS genomen (= gerealiseerde prijs/productie + Gaussiaanse ruis), maar de afrekening gebeurt op de
+  // GEREALISEERDE prijzen. De forecast-fout bepaalt zo organisch hoeveel van de theoretische waarde je
+  // effectief capteert: een slechtere forecast → soms fout gegokt → minder opbrengst. De forecast-modus
+  // schaalt de ruis (skill). Seeded PRNG → reproduceerbaar. Een kalibratiefactor (default 1,0) laat toe om
+  // later, met de imby-webhookparen, systematisch naar imby te convergeren.
+  //   1) VANDAAG: alles injecteren aan de day-ahead (geen sturing) — kan negatief bij negatieve DA.
+  //   2) + CURTAILEN: geen injectie bij negatieve day-ahead (die is de dag vooraf ZEKER gekend).
+  //   3) + NOMINEREN/BIJSTUREN: dag vooraf nomineren op de forecast, real-time bijsturen op de
+  //      onbalans-forecast, en afrekenen op de gerealiseerde prijzen (nominatie aan DA + deviatie aan onbalans).
+  // Vrije parameters (ijkbaar via de imby-webhook): forecast-ruis per modus, handeldrempel en kalibratie.
+  const SKILL = { conservatief:1.5, realistic:1.0, optimistisch:0.6 };   // ruis-schaal (hogere skill = lagere ruis)
+  const modus = (p.forecast_modus && SKILL[p.forecast_modus]) ? p.forecast_modus : 'realistic';
+  const kf = SKILL[modus];
+  const SIG_DA   = (p.sigma_da   != null ? +p.sigma_da   : 12)  * kf;    // €/MWh, day-ahead forecast-fout
+  const SIG_IMB  = (p.sigma_imb  != null ? +p.sigma_imb  : 45)  * kf;    // €/MWh, onbalans forecast-fout (moeilijker)
+  const SIG_PROD = (p.sigma_prod != null ? +p.sigma_prod : 0.15)* kf;    // relatieve productie-forecast-fout
+  const thrFactor= (p.thr_factor != null && +p.thr_factor>0) ? +p.thr_factor : 1.3;   // handeldrempel × σ_imb
+  const kalibratie = (p.kalibratie != null && +p.kalibratie>0) ? +p.kalibratie : 1.0; // lineaire imby-ijking
+  // Capture-ratio: welk aandeel van het theoretische onbalans-plafond (perfecte vooruitzichten) we in de
+  // praktijk als haalbaar rapporteren. De echte predict-nominate-steer-simulatie draait ernaast en toont
+  // wat een forecast-gedreven operator ZEKER haalt (ondergrens); imby rapporteert dicht bij het plafond.
+  // Dit is de vrije parameter die de imby-webhook per modus zal bijstellen tot onze studies imby benaderen.
+  const CAP = { conservatief:0.55, realistic:0.72, optimistisch:0.90 };
+  const capture = (p.capture != null && +p.capture>=0) ? +p.capture : (CAP[modus] || 0.72);
+  const rng = _mulberry32(42);
 
-  let euroBaseline=0, euroCurtail=0, bespaardCurtail=0, verdiendOnbalans=0;
+  let euroBaseline=0, euroCurtail=0, euroBeide=0, euroPotentie=0, simOnbSum=0;
   const HR = 24, DG = Math.ceil(N/96);
-  const hm1 = new Array(HR*DG).fill(0);   // netto injectieopbrengst €/kwartier (som per uur-cel), zonder sturing
-  const hm2 = new Array(HR*DG).fill(0);   // bespaarde injectie curtailment €
-  const hm3 = new Array(HR*DG).fill(0);   // verdiende injectie onbalans-sturing €
-  // niveau 1 + 2 (deterministisch, day-ahead vooraf gekend)
+  const hm1 = new Array(HR*DG).fill(0);   // netto injectieopbrengst €/kwartier (zonder sturing)
+  const hm2 = new Array(HR*DG).fill(0);   // meerwaarde curtailment €/kwartier
+  const hm3 = new Array(HR*DG).fill(0);   // meerwaarde onbalans-sturing €/kwartier
+  const thr = thrFactor*SIG_IMB;                              // handeldrempel > forecast-onzekerheid (voorzichtig)
   for(let i=0;i<N;i++){
-    const kwh = inj[i]; if(kwh<=0){ continue; }
-    const s = spot[i];
-    const eBase = kwh*s/1000;
-    const eCurt = kwh*Math.max(0,s)/1000;
-    euroBaseline+=eBase; euroCurtail+=eCurt;
-    const dBespaard = eCurt-eBase;         // ≥0: vermeden verlies bij negatieve spot
-    bespaardCurtail+=dBespaard;
+    const avail = inj[i]; if(avail<=0){ continue; }           // werkelijk beschikbare injectie (kWh)
+    const da = spot[i], ib = imb[i];                          // GEREALISEERDE prijzen (€/MWh)
+    // forecasts (= beslissingsbasis) = gerealiseerd + Gaussiaanse ruis
+    const daFc    = da + _gauss(rng)*SIG_DA;
+    const ibFc    = ib + _gauss(rng)*SIG_IMB;
+    const availFc = Math.max(0, avail*(1 + _gauss(rng)*SIG_PROD));
+    // 1) VANDAAG
+    const eBase = avail*da/1000;
+    // 2) CURTAILEN (op de zekere day-ahead)
+    const eCurt = (da>=0 ? avail*da : 0)/1000;
+    // 3) NOMINEREN (day-ahead, op forecast) + BIJSTUREN (real-time, op onbalans-forecast), settlement op realisatie.
+    //    Een rationele operator deviaeert ALLEEN bij een onbalans-signaal dat de forecast-onzekerheid
+    //    overstijgt (|ibFc| > drempel) — anders handel je op ruis en verlies je. Bij onzekerheid blijf je bij
+    //    de nominatie. iAct is fysiek begrensd op de beschikbare injectie.
+    const iNom = daFc>=0 ? availFc : 0;                       // dag vooraf genomineerde injectie
+    let iAct;
+    if(ibFc >  thr) iAct = avail;                             // sterk positieve onbalans verwacht → maximaal injecteren
+    else if(ibFc < -thr) iAct = 0;                            // sterk negatieve onbalans verwacht → curtailen
+    else iAct = Math.min(iNom, avail);                        // onzeker → bij de nominatie blijven (fysiek begrensd)
+    const eBeide = (iNom*da + (iAct - iNom)*ib)/1000;         // nominatie aan DA + deviatie aan onbalans (gerealiseerd)
+    // theoretisch plafond (perfecte vooruitzichten): settle elke MWh aan de betere van DA/onbalans
+    const ePot = avail*Math.max(0, Math.max(da,ib))/1000;
+    euroBaseline+=eBase; euroCurtail+=eCurt; euroBeide+=eBeide; euroPotentie+=ePot;
+    simOnbSum += (eBeide-eCurt);                              // wat de forecast-simulatie ZEKER haalt (diagnostiek)
     const dag=Math.floor(i/96), uur=Math.floor((i%96)/4), cel=uur*DG+dag;
-    if(cel>=0&&cel<hm1.length){ hm1[cel]+=eBase; hm2[cel]+=dBespaard; }
+    // heatmap-3 = het (gekalibreerde) onbalans-plafond per kwartier; consistent met de gerapporteerde meerwaarde.
+    if(cel>=0&&cel<hm1.length){ hm1[cel]+=eBase; hm2[cel]+=(eCurt-eBase); hm3[cel]+=Math.max(0,(ePot-eCurt)); }
   }
-  // niveau 3 — onbalans-sturing: per dag een deviatie-budget (capture rate × dagvolume) inzetten op
-  // de kwartieren met de grootste spread (onbalansprijs boven de gecurtailde day-ahead-waarde).
-  for(let d=0; d<DG; d++){
-    const start=d*96, end=Math.min(N, start+96);
-    let dayInjKwh=0; const cand=[];
-    for(let i=start;i<end;i++){ const kwh=inj[i]; if(kwh<=0) continue; dayInjKwh+=kwh;
-      const spread=Math.max(0, imb[i]-Math.max(0,spot[i]));   // extra €/MWh bovenop het curtail-scenario
-      if(spread>0) cand.push({ i:i, kwh:kwh, spread:spread });
-    }
-    if(!cand.length || dayInjKwh<=0) continue;
-    let budgetKwh = captureRate * dayInjKwh;                  // toegelaten deviatie-volume (kWh)
-    cand.sort(function(a,b){ return b.spread-a.spread; });
-    for(let c=0;c<cand.length && budgetKwh>0;c++){
-      const use=Math.min(cand[c].kwh, budgetKwh);
-      const val=use*cand[c].spread/1000;
-      verdiendOnbalans+=val; budgetKwh-=use;
-      const ci=cand[c].i, dag=Math.floor(ci/96), uur=Math.floor((ci%96)/4), cel=uur*DG+dag;
-      if(cel>=0&&cel<hm3.length) hm3[cel]+=val;
-    }
-  }
-  const euroBeide = euroCurtail + verdiendOnbalans;
+  // RAW niveaus (loop-sommen, périodebedragen):
+  const rawBaseline = euroBaseline;
+  const rawCurtail  = euroCurtail;                            // curtail-niveau
+  const rawOnbPot   = Math.max(0, euroPotentie - rawCurtail); // onbalans-plafond (perfecte vooruitzichten)
+  const rawOnbSim   = Math.max(0, simOnbSum);                 // wat de forecast-simulatie zeker haalt (ondergrens)
+  // Curtailment = zekere day-ahead-actie (× kalibratie). Onbalans-meerwaarde = capture-aandeel van het
+  // plafond (× kalibratie), met een ondergrens op de forecast-simulatie. De heatmap wordt mee geschaald.
+  const bespaardCurtail  = (rawCurtail - rawBaseline) * kalibratie;
+  const rawOnb           = Math.max(rawOnbSim, capture * rawOnbPot);
+  const verdiendOnbalans = rawOnb * kalibratie;
+  const hm3Scale = rawOnbPot>0 ? (verdiendOnbalans/rawOnbPot) : 0;   // schaal de plafond-heatmap naar de gerapporteerde meerwaarde
+  for(let k=0;k<hm2.length;k++){ hm2[k]*=kalibratie; }
+  for(let k=0;k<hm3.length;k++){ hm3[k]*=hm3Scale; }
+  euroBaseline = rawBaseline;
+  euroCurtail  = rawBaseline + bespaardCurtail;
+  euroBeide    = euroCurtail + verdiendOnbalans;
+  const jaarFx = periodeJaarFractie>0 ? 1/periodeJaarFractie : 1;
+  const onbalansPotentieJaar = rawOnbPot * jaarFx;            // plafond (referentie/ijking)
+  const onbalansSimJaar      = rawOnbSim * jaarFx;            // forecast-ondergrens (diagnostiek)
   // opschalen naar vol jaar voor de kerncijfers
   const jaarF = periodeJaarFractie>0 ? 1/periodeJaarFractie : 1;
   const baselineJaar = euroBaseline*jaarF;
@@ -793,19 +911,42 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
   const meerCurtailJaar = bespaardCurtail*jaarF;
   const meerOnbalansJaar= verdiendOnbalans*jaarF;
 
-  // payback: eenmalig €3.950 + management €0,72/kVA/maand
-  const INVEST=3950, MGMT_KVA_MND=0.72;
-  const mgmtJaar = MGMT_KVA_MND*kva*12;
+  // payback: eenmalige gateway-investering €3.500 + beheerkost €6,6/kVA/jaar (imby SolarActive-basis;
+  // ≈ €0,55/kVA/maand — de effectieve kost uit de imby-studies, waar 0,72 €/kVA/maand nominaal ~0,55
+  // aangerekend wordt).
+  const INVEST=3500, MGMT_KVA_JAAR=6.6;
+  const mgmtJaar = MGMT_KVA_JAAR*kva;
   const nettoCurtail = meerCurtailJaar - mgmtJaar;
   const nettoBeide   = (meerCurtailJaar+meerOnbalansJaar) - mgmtJaar;
   const paybackCurtailJaar = nettoCurtail>0 ? INVEST/nettoCurtail : null;
   const paybackBeideJaar   = nettoBeide>0   ? INVEST/nettoBeide   : null;
 
+  // ── schaal: vanaf welke systeemgrootte een payback haalbaar is ──
+  // Zowel de meerwaarde (curtail + onbalans) ALS de beheerkost schalen ~lineair met kVA. Netto per kVA =
+  // meerwaarde/kVA − 6,6 €/kVA/jaar. Enkel als dat POSITIEF is helpt groeien: dan spreidt de vaste €3.500
+  // zich uit en bestaat er een drempel-kVA voor 3/5/7 jaar payback. Is netto/kVA ≤ 0, dan is er bij GEEN
+  // enkele grootte een payback (groter = evenredig meer beheerkost).
+  const mgmtPerKva = MGMT_KVA_JAAR;                          // 6,6 €/kVA/jaar (imby SolarActive-basis)
+  const meerTotJaar = meerCurtailJaar + meerOnbalansJaar;
+  const meerPerKva = kva>0 ? meerTotJaar/kva : 0;
+  const nettoPerKva = meerPerKva - mgmtPerKva;
+  function drempelKva(jaren){ return nettoPerKva>0 ? Math.ceil((INVEST/jaren)/nettoPerKva) : null; }
+  function drempelKwp(jaren){ const k=drempelKva(jaren); return k!=null ? Math.round(k*1.3) : null; }
+
   return {
     invoer:{ pv_kwp:Math.round(kwp*10)/10, inverter_kva:Math.round(kva*10)/10, piek_kw:piek||null,
              afname_mwh_jaar:afnameJaarMwh, injectie_gegeven_mwh_periode:Math.round(injGegevenPeriode/100)/10 },
     periode:{ van:MARKT.van, tot:MARKT.tot, n_kwartieren:N, jaar_fractie:Math.round(periodeJaarFractie*1000)/1000 },
-    sturing:{ forecast_modus:modus, capture_rate:captureRate, capture_rate_pct:Math.round(captureRate*1000)/10 },
+    sturing:{ forecast_modus:modus, methode:'predict-nominate-steer (seeded) + capture van het plafond',
+              sigma_da_eur_mwh:Math.round(SIG_DA*10)/10, sigma_imb_eur_mwh:Math.round(SIG_IMB*10)/10,
+              sigma_prod_pct:Math.round(SIG_PROD*100), thr_factor:thrFactor, capture:capture, kalibratie:kalibratie,
+              onbalans_gerapporteerd_eur:Math.round(meerOnbalansJaar), onbalans_gesimuleerd_eur:Math.round(onbalansSimJaar),
+              onbalans_potentie_eur:Math.round(onbalansPotentieJaar) },
+    schaal:{ meerwaarde_per_kva_eur:Math.round(meerPerKva*100)/100, mgmt_per_kva_eur:mgmtPerKva,
+             netto_per_kva_eur:Math.round(nettoPerKva*100)/100, haalbaar:nettoPerKva>0,
+             drempel_kva_3jaar:drempelKva(3), drempel_kwp_3jaar:drempelKwp(3),
+             drempel_kva_5jaar:drempelKva(5), drempel_kwp_5jaar:drempelKwp(5),
+             drempel_kva_7jaar:drempelKva(7), drempel_kwp_7jaar:drempelKwp(7) },
     energie_jaar:{ productie_mwh:Math.round(YIELD*kwp/1000*10)/10,
                    zelfconsumptie_mwh:Math.round(zelfconsumptie*jaarF/1000*10)/10,
                    injectie_mwh:Math.round(injTotReco*jaarF/1000*10)/10,
@@ -817,7 +958,7 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
                      meerwaarde_curtail_eur:Math.round(meerCurtailJaar),
                      meerwaarde_onbalans_eur:Math.round(meerOnbalansJaar),
                      meerwaarde_totaal_eur:Math.round(meerCurtailJaar+meerOnbalansJaar) },
-    payback:{ investering_eur:INVEST, management_eur_per_kva_maand:MGMT_KVA_MND, management_jaar_eur:Math.round(mgmtJaar),
+    payback:{ investering_eur:INVEST, management_eur_per_kva_jaar:MGMT_KVA_JAAR, management_jaar_eur:Math.round(mgmtJaar),
               netto_curtail_jaar_eur:Math.round(nettoCurtail), netto_beide_jaar_eur:Math.round(nettoBeide),
               payback_curtail_jaar:paybackCurtailJaar!=null?Math.round(paybackCurtailJaar*10)/10:null,
               payback_beide_jaar:paybackBeideJaar!=null?Math.round(paybackBeideJaar*10)/10:null },
@@ -3038,7 +3179,7 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
     const job = _jobNieuw();
     res.json({ ok: true, async: true, job_id: job.id });
     _draaiSim3(input, job)
-      .then(r => { job.resultaat = r; job.status = 'klaar';
+      .then(r => { _verrijkIjk(r, input); job.resultaat = r; job.status = 'klaar';
                    _jlog(job, 'klaar', 'Simulatie afgerond.'); })
       .catch(e => { job.fout = e.message; job.status = 'fout';
                     _jlog(job, 'fout', 'Simulatie gefaald: ' + e.message);
@@ -3047,6 +3188,7 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
   }
   try {
     const r = await _draaiSim3(input, null);
+    _verrijkIjk(r, input);
     return res.json(r);
   } catch (e) {
     console.error('[sim-3] fout:', e.message);
@@ -3230,7 +3372,14 @@ app.post('/api/opstelling', async (req, res) => {
         gekozen_maat: k > 0 ? k * BATT_UNIT_KWH : null, eenheid: k > 0 ? 'kWh' : null,
         verloren_dagen: 0, totaal_dagen: null,
       },
-    }, _meta: { server_version: '15.37.0' } });
+    },
+    _ijk: _bouwIjk('opstelling-batterij','kost',
+      { aansluiting_kva:c, aantal_batterijen:k, batterij_kwh:k>0?k*BATT_UNIT_KWH:null,
+        pv_kwp:+(cfg.pv_kwp||cfg.pvKwp||0)||null, profiel:cfg.profielNaam||cfg.profiel_naam||null,
+        jaarverbruik_mwh:+(cfg.jaarverbruik||0)||null, laadpleinen:(cfg.laadpleinen||[]).length },
+      { paper_capture_rate:0.018, forecast_modus:(cfg.bsp&&cfg.bsp.forecast_modus)||'realistic', kalibratie:1.0 },
+      { basis:kg, sturing:ks, onbalans:ko, plafond:null }),
+    _meta: { server_version: SERVER_VERSIE } });
   } catch (e) {
     console.error('[opstelling] fout:', e.message);
     return res.status(500).json({ error: 'opstelling gefaald: ' + e.message });
@@ -3257,7 +3406,18 @@ app.post('/api/injectie-optimalisatie', async (req, res) => {
       forecast_modus: input.forecast_modus || input.bspForecastModus || 'realistic',
       profiel_kwartier: profiel_kwartier,
     });
-    return res.json({ ok: true, analyse: r, _meta: { server_version: '15.39.1' } });
+    const _o = r.opbrengst_jaar || {}, _st = r.sturing || {};
+    const _plafond = (r.opbrengst_jaar ? (+_o.met_curtail_eur||0) : 0) + (+_st.onbalans_potentie_eur||0);
+    const _ijk = _bouwIjk('injectie-solaractive','opbrengst',
+      { pv_kwp:(r.invoer&&r.invoer.pv_kwp)||null, inverter_kva:(r.invoer&&r.invoer.inverter_kva)||null,
+        injectie_mwh:(r.energie_jaar&&r.energie_jaar.injectie_mwh)||null,
+        afname_mwh_jaar:(r.invoer&&r.invoer.afname_mwh_jaar)||null,
+        profiel:profielNaam||null },
+      { forecast_modus:_st.forecast_modus, capture:_st.capture, kalibratie:_st.kalibratie,
+        sigma_da_eur_mwh:_st.sigma_da_eur_mwh, sigma_imb_eur_mwh:_st.sigma_imb_eur_mwh, thr_factor:_st.thr_factor },
+      { basis:+_o.vandaag_spot_eur||0, sturing:+_o.met_curtail_eur||0, onbalans:+_o.met_curtail_onbalans_eur||0,
+        plafond:_plafond });
+    return res.json({ ok: true, analyse: r, _ijk: _ijk, _meta: { server_version: SERVER_VERSIE } });
   } catch (e) {
     console.error('[injectie-opt] fout:', e.message);
     return res.status(500).json({ error: 'injectie-optimalisatie gefaald: ' + e.message });
