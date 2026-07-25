@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.43.0 (bestaande PV fysiek in de LP-run: buildSimInput zet pv.kwp = nieuw + bestaand,
+//                          injectie-cap += bestaande omvormer, capex enkel nieuw, en levert
+//                          aanvullingen['pv_zelfverbruik'] (netto-afname gross-up op de zonvorm) →
+//                          simulator.py v1.10.3. Facturatie neutraal; batterij ziet het bestaande surplus.)
 // Versie:        v15.42.1 (SolarActive-heatmap-x-as = kalenderdag 1 jan→31 dec i.p.v. sim-index; bij een
 //                          rolling-12-maand-venster viel de winter voorheen in het midden van de heatmap)
 // Versie:        v15.42.0 (uniform _ijk-blok uit elke sim-engine — fase 1 imby-ijkinfrastructuur)
@@ -704,7 +708,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.42.1';
+const SERVER_VERSIE = '15.43.0';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2503,7 +2507,10 @@ function _runSimulatorOnce(simInput) {
 // vlaggen doorwerken (bsp.actief, pv_curtailment.actief, batterijId, contract.modus).
 function _variantUi(ui, variant) {
   const v = JSON.parse(JSON.stringify(ui || {}));
-  const heeftPv = (Number(v.pv_kwp || v.pvKwp || 0) > 0);
+  // v15.43: bestaande PV telt ook als PV voor de sturing (curtailment/injectie op de TOTALE PV).
+  const _bpV = v.bestaande_pv || v.bestaandePv;
+  const _bpAanw = !!(_bpV && _bpV.aanwezig!==false && (Number(_bpV.kwp)>0 || Number(_bpV.kva)>0 || Number(_bpV.piek_kw)>0));
+  const heeftPv = (Number(v.pv_kwp || v.pvKwp || 0) > 0) || _bpAanw;
   v.pv_curtailment = v.pv_curtailment || {};
   v.bsp = v.bsp || {};
   v.geen_arbitrage = false;   // default; enkel variant 'geen' zet dit op true
@@ -3690,7 +3697,31 @@ function buildSimInput(ui) {
                     rte_pct:Math.round((b.eta||0.85)*100), capex_eur:b.capex||0, max_cycli:b.max_cycli||8000 };
   }
 
-  const pvKwp    = ui.pv_kwp || ui.pvKwp || 0;
+  const pvKwpNieuw = ui.pv_kwp || ui.pvKwp || 0;
+  // v15.43: BESTAANDE PV (SolarActive) fysiek meenemen in de LP-run. pv.kwp (energie) = nieuw + bestaand;
+  // de netto-afname gross-up (= bestaande zelfconsumptie) gaat via aanvullingen['pv_zelfverbruik'] op de
+  // zonvorm. capex telt ENKEL de nieuwe PV (bestaande is sunk); de injectie-cap krijgt de bestaande omvormer
+  // er wél bij. De SolarActive-injectiestudie blijft een aparte deliverable (los endpoint).
+  const _bp = ui.bestaande_pv || ui.bestaandePv || null;
+  let bpKwp = 0, bpInvKw = 0, bpSelfMwh = 0;
+  const _cumDay2025 = [0,31,59,90,120,151,181,212,243,273,304,334,365];
+  function _maandVanIdx2025(i){ const day=Math.floor(i/96); for(let m=0;m<12;m++){ if(day<_cumDay2025[m+1]) return m+1; } return 12; }
+  if (_bp && (_bp.aanwezig!==false) && (Number(_bp.kwp)>0 || Number(_bp.kva)>0 || Number(_bp.piek_kw)>0)) {
+    bpKwp = Number(_bp.kwp)>0 ? Number(_bp.kwp) : (Number(_bp.kva)>0 ? 1.3*Number(_bp.kva) : 1.3*Number(_bp.piek_kw));
+    const bpKva = Number(_bp.kva)>0 ? Number(_bp.kva) : (Number(_bp.piek_kw)>0 ? Number(_bp.piek_kw) : bpKwp/1.3);
+    bpInvKw = bpKva;
+    const bpProdMwh = 900*bpKwp/1000;
+    let bpInjMwh = Number(_bp.inj_mwh_jaar)>0 ? Number(_bp.inj_mwh_jaar) : 0;
+    if (bpInjMwh<=0 && Number(_bp.inj_mwh_maand)>0 && MARKT && MARKT.solar_norm && MARKT.solar_norm.length===35040) {
+      const m = Math.min(12, Math.max(1, Number(_bp.maand)||6)); const sn=MARKT.solar_norm;
+      let sMaand=0, sJaar=0; for (let i=0;i<35040;i++){ sJaar+=sn[i]; if(_maandVanIdx2025(i)===m) sMaand+=sn[i]; }
+      const frac = sJaar>0 ? sMaand/sJaar : 0;
+      bpInjMwh = frac>0 ? Number(_bp.inj_mwh_maand)/frac : Number(_bp.inj_mwh_maand)*12;
+    }
+    bpSelfMwh = Math.max(0, bpProdMwh - bpInjMwh);   // netto-afname gross-up (= zelfconsumptie)
+    console.log(`[sim] bestaande PV: ${bpKwp.toFixed(0)} kWp / ${bpKva.toFixed(0)} kVA → prod ${bpProdMwh.toFixed(1)} MWh, inj ${bpInjMwh.toFixed(1)} MWh, zelfverbruik-grossup ${bpSelfMwh.toFixed(1)} MWh`);
+  }
+  const pvKwp    = pvKwpNieuw + bpKwp;                // TOTALE PV in de dispatch (energie + productievorm)
   const aanslKw  = ui.aansluiting_kva || ui.aansluitingKva || 80;
   // v15.15.7: GECONTRACTEERD toegangsvermogen (uit de klantfactuur) is de
   // facturatiebasis voor Groep B/D — LOS van het fysieke aansluitvermogen (aanslKw,
@@ -3708,8 +3739,11 @@ function buildSimInput(ui) {
   // de meest voorkomende defaults uit de Fluctus-catalogus voor populaire kWp's.
   // Bij geen match: 0.77 × kWp (fabriekstypisch).
   const _invTabel = { 125: 96, 150: 115, 200: 153 };
-  const pvInverterKw = Number(ui.pv_inverter_kw || ui.pvInverterKw || 0) ||
-                       (pvKwp > 0 ? (_invTabel[pvKwp] || Math.round(pvKwp * 0.77)) : 0);
+  // v15.43: omvormer nieuw PV via de tabel (op de NIEUWE kWp), + de bestaande omvormer erbij voor de totale
+  // injectie-cap (clipping op nieuw + bestaand). UI-override telt voor de nieuwe installatie.
+  const pvInverterKwNieuw = Number(ui.pv_inverter_kw || ui.pvInverterKw || 0) ||
+                       (pvKwpNieuw > 0 ? (_invTabel[pvKwpNieuw] || Math.round(pvKwpNieuw * 0.77)) : 0);
+  const pvInverterKw = pvInverterKwNieuw + bpInvKw;
   // Injectie-cap = som van fysieke injectie-vermogens (PV-omvormer + BESS-omvormer).
   // UI kan dit overschrijven via ui.max_injectie_kw. Default = pvInverterKw + batt.kw.
   // De afname-cap (aanslKw) blijft het contractueel toegangsvermogen — onafhankelijk
@@ -3831,15 +3865,26 @@ function buildSimInput(ui) {
   // netbeheer + aansluiting (overschrijdingstarief).
   const _kaart = _kiesTarieven(grd, spanning);
 
+  // v15.43: bestaande-PV zelfconsumptie als aanvulling op de zonvorm (som=1 genormaliseerd), zodat de
+  // bruto gebouw-demand hersteld wordt zonder de facturatie te wijzigen (PV-productie dekt ze op de middag).
+  let _aanvullingen = {};
+  if (bpSelfMwh > 0 && MARKT && MARKT.solar_norm && MARKT.solar_norm.length === 35040) {
+    const sn = MARKT.solar_norm; let s = 0; for (let i=0;i<35040;i++) s += sn[i];
+    if (s > 0) {
+      const solarProfNorm = new Array(35040);
+      for (let i=0;i<35040;i++) solarProfNorm[i] = sn[i]/s;
+      _aanvullingen = { pv_zelfverbruik: { profiel_kwartier: solarProfNorm, jaarvolume_mwh: bpSelfMwh } };
+    }
+  }
   return {
     profiel_kwartier: profielKwartier,
     jaarverbruik_mwh: jaarverbruik,
-    aanvullingen: {},
+    aanvullingen: _aanvullingen,
     pv: {
       kwp: pvKwp,
       specifiek_rendement_kwh_per_kwp: 900,
       vorm_kwartier: pvVorm,
-      capex_eur: pvKwp > 0 ? (pvKwp <= 125 ? 71875 : pvKwp <= 150 ? 86250 : 115000) : 0,
+      capex_eur: pvKwpNieuw > 0 ? (pvKwpNieuw <= 125 ? 71875 : pvKwpNieuw <= 150 ? 86250 : 115000) : 0,
       // v15.13: expliciete inverter_kw doorgeven (simulator gebruikt dit voor
       // PV-clipping; default fallback in simulator.py is 0.77 × kWp).
       inverter_kw: pvInverterKw,
