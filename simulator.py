@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.10.3 (bestaande PV in de LP-run: aanvullingen['pv_zelfverbruik'] telt de netto-afname
+#                gross-up terug op de zonvorm — bruto-demand + totale PV in de dispatch, facturatie neutraal)
+# Wijziging v1.10.3 vs v1.10.2: build_consumption_profile ondersteunt een derde aanvulling 'pv_zelfverbruik'
+#   ({profiel_kwartier: solar_norm, jaarvolume_mwh: bestaande_zelfconsumptie}). Inert wanneer afwezig; oude
+#   flow blijft 1-op-1. Server.js v15.43 zet pv.kwp = nieuw + bestaand en levert deze aanvulling aan.
 # Versie:        v1.10.2 (PV-zelfverbruik gesplitst gebouw vs laadpleinen + rapport-aliassen)
 # Wijziging v1.10.2 vs v1.10.1: het directe PV-zelfverbruik wordt per kwartier gesplitst over gebouw en
 #   laadpleinen naar rato van de last (pv_naar_gebouw_mwh + pv_naar_laadplein_mwh = pv_direct). Plus
@@ -525,6 +530,24 @@ def build_consumption_profile(
         elektr = aanvullingen['elektrificatie']
         prof = elektr.get('profiel_kwartier', [])
         vol_mwh = elektr.get('jaarvolume_mwh', 0)
+        if prof and vol_mwh > 0 and len(prof) == 35040:
+            vol_kwh = vol_mwh * 1000.0
+            for i, ts in enumerate(sim_timestamps):
+                idx2025 = quarter_index_in_year_2025(ts)
+                kwh_kwartier = prof[idx2025] * vol_kwh
+                consumption_kw[i] += kwh_kwartier * 4.0
+
+    # Aanvulling pv_zelfverbruik (v1.10.3): reconstrueer de BRUTO gebouw-demand bij een klant met
+    # BESTAANDE PV. De factuur-afname is netto (na eigen zelfconsumptie); we tellen die zelfconsumptie
+    # terug op — verdeeld over de ZONVORM (middagpiek), niet het standaardprofiel — zodat de LP-dispatch
+    # de bruto-demand ziet én de bijbehorende PV-productie (pv.kwp = nieuw + bestaand) kan afzetten tegen
+    # de eigen last vóór ze injecteert. Energiebalans blijft behouden: bruto-demand += zelfconsumptie en
+    # PV-productie += bestaande productie, dus de netto grid-afname (facturatie) verandert niet — enkel
+    # het middagsurplus wordt zichtbaar voor de batterij.
+    if aanvullingen and aanvullingen.get('pv_zelfverbruik'):
+        pvz = aanvullingen['pv_zelfverbruik']
+        prof = pvz.get('profiel_kwartier', [])
+        vol_mwh = pvz.get('jaarvolume_mwh', 0)
         if prof and vol_mwh > 0 and len(prof) == 35040:
             vol_kwh = vol_mwh * 1000.0
             for i, ts in enumerate(sim_timestamps):
