@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.42.1 (SolarActive-heatmap-x-as = kalenderdag 1 jan→31 dec i.p.v. sim-index; bij een
+//                          rolling-12-maand-venster viel de winter voorheen in het midden van de heatmap)
 // Versie:        v15.42.0 (uniform _ijk-blok uit elke sim-engine — fase 1 imby-ijkinfrastructuur)
 // Wijziging v15.42.0 vs v15.41.0: nominatie-sim-3, /api/opstelling én /api/injectie-optimalisatie geven
 //   nu een identiek gestructureerd `_ijk`-blok terug (schema fluctus-ijk/1): engine, soort (kost/opbrengst),
@@ -702,7 +704,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.42.0';
+const SERVER_VERSIE = '15.42.1';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -775,7 +777,7 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
 
   // vorm projecteren op de MARKT-timeline (seizoen uitgelijnd met spot/imb)
   const van = new Date(MARKT.van + 'T00:00:00Z');
-  const solarFrac = new Array(N), profFrac = new Array(N), maandVan = new Array(N);
+  const solarFrac = new Array(N), profFrac = new Array(N), maandVan = new Array(N), dagVanJaar = new Array(N);
   let sSum=0, pSum=0;
   for(let i=0;i<N;i++){
     const d = new Date(van.getTime()+i*15*60*1000);
@@ -783,6 +785,10 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
     const sv = solar ? (idx>=0&&idx<solar.length?solar[idx]:0) : 0;
     const pv = profielRaw ? (idx>=0&&idx<profielRaw.length?profielRaw[idx]:0) : 0;
     solarFrac[i]=sv; profFrac[i]=pv; maandVan[i]=d.getUTCMonth()+1; sSum+=sv; pSum+=pv;
+    // kalender-dag-van-het-jaar (0..364) — de heatmap-x-as loopt zo altijd 1 jan → 31 dec,
+    // ongeacht of de sim-periode een rolling-12-maand-venster is (anders viel de winter in het midden).
+    const yStart = Date.UTC(d.getUTCFullYear(),0,1);
+    dagVanJaar[i] = Math.min(364, Math.max(0, Math.floor((d.getTime()-yStart)/86400000)));
   }
   if(sSum>0) for(let i=0;i<N;i++) solarFrac[i]/=sSum;
   if(pSum>0) for(let i=0;i<N;i++) profFrac[i]/=pSum;
@@ -850,7 +856,7 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
   const rng = _mulberry32(42);
 
   let euroBaseline=0, euroCurtail=0, euroBeide=0, euroPotentie=0, simOnbSum=0;
-  const HR = 24, DG = Math.ceil(N/96);
+  const HR = 24, DG = 365;   // heatmap-x-as = kalenderdag (1 jan → 31 dec), niet de sim-index
   const hm1 = new Array(HR*DG).fill(0);   // netto injectieopbrengst €/kwartier (zonder sturing)
   const hm2 = new Array(HR*DG).fill(0);   // meerwaarde curtailment €/kwartier
   const hm3 = new Array(HR*DG).fill(0);   // meerwaarde onbalans-sturing €/kwartier
@@ -880,7 +886,7 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
     const ePot = avail*Math.max(0, Math.max(da,ib))/1000;
     euroBaseline+=eBase; euroCurtail+=eCurt; euroBeide+=eBeide; euroPotentie+=ePot;
     simOnbSum += (eBeide-eCurt);                              // wat de forecast-simulatie ZEKER haalt (diagnostiek)
-    const dag=Math.floor(i/96), uur=Math.floor((i%96)/4), cel=uur*DG+dag;
+    const dag=dagVanJaar[i], uur=Math.floor((i%96)/4), cel=uur*DG+dag;
     // heatmap-3 = het (gekalibreerde) onbalans-plafond per kwartier; consistent met de gerapporteerde meerwaarde.
     if(cel>=0&&cel<hm1.length){ hm1[cel]+=eBase; hm2[cel]+=(eCurt-eBase); hm3[cel]+=Math.max(0,(ePot-eCurt)); }
   }
