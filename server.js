@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.44.0 (project-ID + rapport-opslag: /api/project-id (stabiel FLX-nummer per project),
+//                          /api/rapport-opslaan (PDF → rapporten/<id>/ in de facturen-bucket + meta-JSON),
+//                          /api/rapporten (lijst per project). Voor het ontwerp-rapport én de andere rapporten.)
 // Versie:        v15.43.0 (bestaande PV fysiek in de LP-run: buildSimInput zet pv.kwp = nieuw + bestaand,
 //                          injectie-cap += bestaande omvormer, capex enkel nieuw, en levert
 //                          aanvullingen['pv_zelfverbruik'] (netto-afname gross-up op de zonvorm) →
@@ -708,7 +711,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.43.0';
+const SERVER_VERSIE = '15.44.0';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2303,6 +2306,102 @@ app.get('/api/factuuranalyse', async (req, res) => {
     return res.type('application/json').send(txt);
   } catch (e) {
     console.error('[factuuranalyse] ophalen faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.44: PROJECT-ID + RAPPORT-OPSLAG (PDF) in dezelfde private bucket als de factuur ──
+// Elk project krijgt een STABIEL identificatienummer (deterministisch uit de projectnaam → idempotent,
+// zelfde project = zelfde nummer, geen teller nodig). Dat nummer komt op elk rapport (titel + voettekst)
+// en in het opslagpad. Gegenereerde rapporten worden als PDF bewaard onder rapporten/<project-id>/ in de
+// bestaande 'facturen'-bucket, zodat ze samen met de factuur oproepbaar zijn (o.a. voor de rapport-chatbox).
+function _projectId(project){
+  const s = String(project||'').trim().toLowerCase();
+  let h = 0x811c9dc5 >>> 0;
+  for(let i=0;i<s.length;i++){ h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  const code = h.toString(36).toUpperCase().padStart(7,'0').slice(-7);
+  return 'FLX-' + code.slice(0,3) + '-' + code.slice(3);
+}
+async function _bucketList(prefix){
+  if (!SUPABASE_OK) throw new Error('Supabase niet geconfigureerd');
+  const url = `${SUPABASE_URL}/storage/v1/object/list/${FACTUREN_BUCKET}`;
+  const r = await fetch(url, { method:'POST',
+    headers:{ 'Authorization':`Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type':'application/json' },
+    body: JSON.stringify({ prefix, limit:100, sortBy:{ column:'name', order:'desc' } }) });
+  if (!r.ok) throw new Error(`storage list ${prefix}: HTTP ${r.status}`);
+  return r.json();
+}
+
+// POST /api/project-id  { project }  → { id }  (+ registratie in de bucket onder projecten/)
+app.post('/api/project-id', async (req, res) => {
+  try {
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const project = String((req.body||{}).project || '').trim();
+    if (!project) return res.status(400).json({ error: 'project verplicht' });
+    const id = _projectId(project);
+    if (SUPABASE_OK) {
+      try {
+        const veilig = project.replace(/[^A-Za-z0-9._-]/g,'_').slice(0,60);
+        const reg = JSON.stringify({ id, project, aangemaakt: new Date().toISOString(), door: u.name || u.id || null });
+        await _factuurUpload(Buffer.from(reg,'utf8').toString('base64'), 'application/json', `projecten/${veilig}.json`);
+      } catch(e){ console.warn(`[project-id] registratie faalde (niet blokkerend): ${e.message}`); }
+    }
+    return res.json({ id, project });
+  } catch (e) {
+    console.error('[project-id] fout:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/rapport-opslaan  { project, project_id, type, filenaam, pdf_base64, meta? }
+//   → bewaart de PDF onder rapporten/<project-id>/<type>-<ts>.pdf in de private bucket
+app.post('/api/rapport-opslaan', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const b = req.body || {};
+    const project = String(b.project || '').trim();
+    const pid = String(b.project_id || (project ? _projectId(project) : '')).trim();
+    if (!pid) return res.status(400).json({ error: 'project of project_id verplicht' });
+    if (!b.pdf_base64 || typeof b.pdf_base64 !== 'string') return res.status(400).json({ error: 'pdf_base64 (string) verplicht' });
+    const type = String(b.type || 'rapport').replace(/[^A-Za-z0-9._-]/g,'_').slice(0,40);
+    // grootte-check (base64 → bytes ≈ ×0,75)
+    const bytes = Math.floor(b.pdf_base64.length * 0.75);
+    if (bytes > 20 * 1024 * 1024) return res.status(413).json({ error: 'PDF te groot (>20 MB)' });
+    const veiligPid = pid.replace(/[^A-Za-z0-9._-]/g,'_').slice(0,40);
+    const pad = `rapporten/${veiligPid}/${type}-${Date.now()}.pdf`;
+    await _factuurUpload(b.pdf_base64, 'application/pdf', pad);
+    // metadata-zijkaartje (JSON) naast de PDF, handig voor de latere chatbox/recall
+    try {
+      const meta = JSON.stringify({ project, project_id:pid, type, pad, filenaam:b.filenaam||null,
+        bewaard: new Date().toISOString(), door: u.name||u.id||null, bytes, extra: b.meta||null });
+      await _factuurUpload(Buffer.from(meta,'utf8').toString('base64'), 'application/json', pad.replace(/\.pdf$/, '.json'));
+    } catch(e){ /* niet blokkerend */ }
+    let signed = null; try { signed = await _factuurSignedUrl(pad, 600); } catch(e){}
+    console.log(`[rapport-opslaan] ${FACTUREN_BUCKET}/${pad} (${(bytes/1024).toFixed(0)} KB) type=${type} pid=${pid}`);
+    return res.json({ ok:true, bucket:FACTUREN_BUCKET, pad, project_id:pid, bytes, signed_url:signed });
+  } catch (e) {
+    console.error('[rapport-opslaan] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/rapporten?project_id=FLX-XXX-XXX  → lijst van bewaarde rapporten voor een project
+app.get('/api/rapporten', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const pid = String(req.query.project_id || '').replace(/[^A-Za-z0-9._-]/g,'_').slice(0,40);
+    if (!pid) return res.status(400).json({ error: 'project_id verplicht' });
+    const lijst = await _bucketList(`rapporten/${pid}/`);
+    const pdfs = (Array.isArray(lijst)?lijst:[]).filter(o => o.name && /\.pdf$/.test(o.name))
+      .map(o => ({ pad:`rapporten/${pid}/${o.name}`, naam:o.name, bijgewerkt:o.updated_at||o.created_at||null }));
+    return res.json({ project_id:pid, rapporten:pdfs });
+  } catch (e) {
+    console.error('[rapporten] lijst faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
