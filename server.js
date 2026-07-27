@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.45.0 (Kamino-toegangspoort: /api/kamino/project (record bewaren) +
+//                /api/kamino/project-open (project-ID + e-mail → record; e-mail moet matchen met
+//                klant of adviseur). Zo heropenen klant + adviseur een project voor een volgende studie.
 // Versie:        v15.44.0 (project-ID + rapport-opslag: /api/project-id (stabiel FLX-nummer per project),
 //                          /api/rapport-opslaan (PDF → rapporten/<id>/ in de facturen-bucket + meta-JSON),
 //                          /api/rapporten (lijst per project). Voor het ontwerp-rapport én de andere rapporten.)
@@ -711,7 +714,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.44.0';
+const SERVER_VERSIE = '15.45.0';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2402,6 +2405,63 @@ app.get('/api/rapporten', async (req, res) => {
     return res.json({ project_id:pid, rapporten:pdfs });
   } catch (e) {
     console.error('[rapporten] lijst faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.45: KAMINO-projectrecord + toegangspoort (project-ID + e-mail) ───────────
+// Zodat klant én adviseur een bestaand project later heropenen om een volgende studie te doen —
+// zonder mailverkeer. Record = kamino/<id>.json in de private bucket: id, naam, klant/adviseur (incl.
+// e-mail), factuurref en de reeds gedane studies. Bewaren vereist login; heropenen mag zonder login
+// maar de e-mail moet matchen met klant of adviseur (tweede factor naast het ondoorzichtige FLX-id).
+app.post('/api/kamino/project', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const b = req.body || {};
+    const id = String(b.id || '').trim().toUpperCase();
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+    const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    let bestaand = {};
+    try { bestaand = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); } catch (e) {}
+    const rec = {
+      id, naam: b.naam || bestaand.naam || '',
+      klant: b.klant || bestaand.klant || {},
+      adviseur: b.adviseur || bestaand.adviseur || {},
+      factuur: b.factuur || bestaand.factuur || '',
+      baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
+      studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
+      aangemaakt: bestaand.aangemaakt || new Date().toISOString(),
+      bijgewerkt: new Date().toISOString(), door: u.name || u.id || null
+    };
+    await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    return res.json({ ok: true, id });
+  } catch (e) {
+    console.error('[kamino/project] bewaren faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/kamino/project-open  { id, email }  → projectrecord (email moet matchen met klant of adviseur)
+app.post('/api/kamino/project-open', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const b = req.body || {};
+    const id = String(b.id || '').trim().toUpperCase();
+    const email = String(b.email || '').trim().toLowerCase();
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id) || !/\S+@\S+\.\S+/.test(email))
+      return res.status(400).json({ error: 'project-id en e-mail verplicht' });
+    const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    let rec;
+    try { rec = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); }
+    catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
+    const mails = [ (rec.klant && rec.klant.email) || '', (rec.adviseur && rec.adviseur.email) || '' ].map(function (s) { return String(s).toLowerCase(); });
+    if (mails.indexOf(email) < 0) return res.status(403).json({ error: 'Dit e-mailadres hoort niet bij dit project.' });
+    console.log(`[kamino/project-open] ${id} geopend door ${email}`);
+    return res.json({ ok: true, project: rec });
+  } catch (e) {
+    console.error('[kamino/project-open] faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
