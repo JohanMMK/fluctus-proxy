@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.46.0 (Kamino studie 1: /api/kamino/onderhandel — echte onderhandelingsmarge via
+//                dezelfde buildSimInput → _runSimulatorOnce als /api/nominatie-sim, drift-vrij.)
 // Versie:        v15.45.0 (Kamino-toegangspoort: /api/kamino/project (record bewaren) +
 //                /api/kamino/project-open (project-ID + e-mail → record; e-mail moet matchen met
 //                klant of adviseur). Zo heropenen klant + adviseur een project voor een volgende studie.
@@ -714,7 +716,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.45.0';
+const SERVER_VERSIE = '15.46.0';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2462,6 +2464,65 @@ app.post('/api/kamino/project-open', async (req, res) => {
     return res.json({ ok: true, project: rec });
   } catch (e) {
     console.error('[kamino/project-open] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.46: KAMINO studie 1 — onderhandelingsmarge (echte run, drift-vrij) ──────
+// Draait de kale factuur-sim (profiel × spot + Enwyse-staffel) via DEZELFDE weg als /api/nominatie-sim
+// (buildSimInput → _runSimulatorOnce), zodat het cijfer identiek is aan de simulator. Marge = huidige
+// energiepost (uit de factuur) − gesimuleerde dynamische energiepost. Enkel de energiepost telt; netkosten,
+// aansluiting en toegangsvermogen raken de marge niet, dus die mogen benaderd zijn.
+app.post('/api/kamino/onderhandel', async (req, res) => {
+  try {
+    if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw' });
+    const b = req.body || {}; const bc = b.baseCase || {};
+    const profielNaam = String(b.profielNaam || b.profiel || '').trim();
+    if (!profielNaam) return res.status(400).json({ error: 'profielNaam verplicht' });
+    const energie = +bc.totaalEnergieExclBtw || 0;
+    if (!(energie > 0)) return res.status(400).json({ error: 'geen energiepost in de factuurgegevens' });
+    const distributie = +bc.totaalDistributieExclBtw || 0, heffingen = +bc.totaalHeffingenExclBtw || 0;
+    const subtot = (+bc.totaalExclBtw || 0) || (energie + distributie + heffingen);
+    const pVan = bc.periodeVan, pTot = bc.periodeTot;
+    // dagen IDENTIEK aan de simulator (_periodeDagen): span + 1, met DD-MM-YYYY of ISO-parsing.
+    const _pd = (s) => { if (!s) return null; const m = String(s).match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+      if (m) return new Date(+m[3], +m[2]-1, +m[1]); const d = new Date(s); return isNaN(d) ? null : d; };
+    let dagen = 30; try { const a=_pd(pVan), b=_pd(pTot); if (a && b) dagen = Math.max(1, Math.round((b-a)/86400000)+1); } catch (e) {}
+    const volumeMwh = (+bc.afnameKwh || 0) / 1000;
+    const kva = +bc.aansluitVermogenKva || 100;
+    const spanning = (bc.spanningsniveau === 'MS' || bc.spanningsniveau === 'LS') ? bc.spanningsniveau : (kva >= 100 ? 'MS' : 'LS');
+    const ui = {
+      project: bc.klantNaam || 'kamino', scenario: 'kamino_onderhandel',
+      postcode: String(bc.postcode || '').trim(), grd: bc.dnb || '', spanning,
+      profielNaam, jaarverbruik_mwh: volumeMwh,
+      pv_kwp: 0, pv_curtailment: { actief: false }, bsp: { actief: false },
+      batterijId: null, batterijCustom: null, laadpleinen: [],
+      contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
+        staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: (CONTRACT_RAW && CONTRACT_RAW.vergroening_eur_per_mwh) || 2.50,
+        vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
+      aansluiting_kva: kva, toegangsvermogen_kw: Math.max(1, Math.round(kva * 0.9)),
+      max_injectie_kw: 0, jaar: 'specifiek', periodeVan: pVan, periodeTot: pTot,
+      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' }
+    };
+    const simInput = buildSimInput(ui);
+    const result = await _runSimulatorOnce(simInput);
+    const jf = result.jaarfactuur || result.factuur || {}; const gr = jf.groepen || {};
+    const A = gr.A_energiekost || gr.A || {};
+    const energie_dyn = (A._subtotaal != null) ? (+A._subtotaal || 0) : null;
+    if (energie_dyn == null) return res.status(500).json({ error: 'geen energiepost in de simulatie-output' });
+    const factor = 365 / dagen, marge_maand = energie - energie_dyn;
+    const out = {
+      marge_jaar: Math.round(marge_maand * factor), marge_maand: Math.round(marge_maand),
+      energie_nu: Math.round(energie), energie_dyn: Math.round(energie_dyn),
+      besparing_pct: subtot > 0 ? +(marge_maand / subtot * 100).toFixed(1) : 0,
+      energiekost_nu_mwh: volumeMwh > 0 ? Math.round(energie / volumeMwh) : null,
+      energiekost_dyn_mwh: volumeMwh > 0 ? Math.round(energie_dyn / volumeMwh) : null,
+      volume_mwh: +volumeMwh.toFixed(1), dagen
+    };
+    console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam})`);
+    return res.json(out);
+  } catch (e) {
+    console.error('[kamino/onderhandel] fout:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
