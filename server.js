@@ -716,7 +716,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.46.0';
+const SERVER_VERSIE = '15.46.1';
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2517,9 +2517,31 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
       besparing_pct: subtot > 0 ? +(marge_maand / subtot * 100).toFixed(1) : 0,
       energiekost_nu_mwh: volumeMwh > 0 ? Math.round(energie / volumeMwh) : null,
       energiekost_dyn_mwh: volumeMwh > 0 ? Math.round(energie_dyn / volumeMwh) : null,
-      volume_mwh: +volumeMwh.toFixed(1), dagen
+      volume_mwh: +volumeMwh.toFixed(1), dagen, profiel: profielNaam
     };
-    console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam})`);
+    // diagnose: welk geprojecteerd jaarverbruik + staffelschijf gebruikte de sim? (zo is een profiel-mismatch zichtbaar)
+    try {
+      const pk = _laadProfielKwartier(profielNaam);
+      if (pk && pk.length === 35040) {
+        const iso = (d) => d ? new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10) : null;
+        const sr = projectJaarverbruik({ profielNaam, profielKwartier: pk, afnameKwh: (+bc.afnameKwh||0),
+          periodeVan: iso(_pd(pVan)), periodeTot: iso(_pd(pTot)), staffel: CONTRACT_STAFFEL });
+        if (sr) { out.geprojecteerd_mwh = sr.geprojecteerdJaarverbruikMWh!=null ? Math.round(sr.geprojecteerdJaarverbruikMWh*10)/10 : null;
+          out.schijf = (sr.tier && (sr.tier.label || sr.tier.code)) || null;
+          out.markup = (sr.tier && sr.tier.consumption_dam_markup) != null ? sr.tier.consumption_dam_markup : null; }
+      }
+    } catch (e) { console.warn('[kamino/onderhandel] diagnose-projectie faalde (niet-blokkerend):', e.message); }
+    // DEBUG: exacte sim-input + energiepost-opbouw + toegepaste pricing, om Kamino ↔ simulator te vergelijken.
+    out._debug = {
+      in: { volume_mwh: ui.jaarverbruik_mwh, profiel: profielNaam, periode: [pVan, pTot], dagen, spanning,
+            aansluiting_kva: kva, vergroening: ui.contract.vergroening_eur_per_mwh, vast: ui.contract.vaste_kost_eur_maand,
+            staffel_n: (ui.contract.staffel || []).length },
+      A_energiekost: A,
+      jf_keys: Object.keys(jf || {}),
+      pricing: result.pricing || jf.pricing || result._pricing || null,
+      effectief_jaarverbruik_mwh: result.effectief_jaarverbruik_mwh || jf.effectief_jaarverbruik_mwh || result.effectief_jaarverbruik || null
+    };
+    console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam} · vergroening=${ui.contract.vergroening_eur_per_mwh} · geproj=${out.geprojecteerd_mwh} · schijf=${out.schijf})`);
     return res.json(out);
   } catch (e) {
     console.error('[kamino/onderhandel] fout:', e.message);
