@@ -716,7 +716,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.46.1';
+const SERVER_VERSIE = '15.47.0'; // Kamino: tegel 1 vergroening→0 (=simulator €6.361) + tegel 2 /api/kamino/productie (hergebruikt _analyseerInjectieOptimalisatie)
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2498,7 +2498,13 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
       pv_kwp: 0, pv_curtailment: { actief: false }, bsp: { actief: false },
       batterijId: null, batterijCustom: null, laadpleinen: [],
       contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
-        staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: (CONTRACT_RAW && CONTRACT_RAW.vergroening_eur_per_mwh) || 2.50,
+        // v15.47: vergroening ANCHORED op 0 — identiek aan de simulator-factuuranalyse.
+        // De simulator draait _bareSimInput('specifiek') met STATE.contractVergroening, dat default 0 is
+        // en pas 2,50 wordt als het staffel-paneel geopend is (niet tijdens een factuuranalyse). Kamino
+        // gebruikte de contract-fallback 2,50 → dynamische energiepost ~€40/maand hoger → marge ~€471/j lager
+        // (€5.890 i.p.v. €6.361). Johan-beslissing 28-07: vergroening UIT de factuur-energiepost. Zo matcht
+        // Kamino de simulator deterministisch. gsc/wkk blijven 0 (passthrough, niet in de energiepost).
+        staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
         vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
       aansluiting_kva: kva, toegangsvermogen_kw: Math.max(1, Math.round(kva * 0.9)),
       max_injectie_kw: 0, jaar: 'specifiek', periodeVan: pVan, periodeTot: pTot,
@@ -2545,6 +2551,64 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
     return res.json(out);
   } catch (e) {
     console.error('[kamino/onderhandel] fout:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── KAMINO TEGEL 2 — SolarActive / injectie-optimalisatie ──────────────────────
+// v15.47: exact dezelfde valuatie als de simulator. We roepen NIET een eigen
+// berekening aan, maar HERGEBRUIKEN _analyseerInjectieOptimalisatie() — precies de
+// functie achter /api/injectie-optimalisatie die de simulator zelf aanroept. Zo is
+// het cijfer per constructie identiek voor dezelfde invoer (pv_kwp, injectie, profiel).
+// De 'eerste rapport'-standaardaannames (inverter ≈ PV-vermogen, piek uit de aansluiting)
+// worden teruggegeven zodat de gebruiker ze 1-op-1 in de simulator kan reproduceren.
+app.post('/api/kamino/productie', async (req, res) => {
+  try {
+    if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw' });
+    const b = req.body || {}; const bc = b.baseCase || {};
+    const profielNaam = String(b.profielNaam || b.profiel || '').trim();
+    if (!profielNaam) return res.status(400).json({ error: 'profielNaam verplicht' });
+    const pv_kwp = +b.pv_kwp || 0;
+    const injectie_mwh_jaar = +b.injectie_mwh_jaar || +b.pv_inj || 0;
+    if (!(pv_kwp > 0)) return res.status(400).json({ error: 'pv_kwp verplicht (bestaande PV)' });
+    // dagen + geprojecteerd jaarverbruik IDENTIEK aan de onderhandel-tegel (zelfde projectie als de simulator).
+    const _pd = (s) => { if (!s) return null; const m = String(s).match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+      if (m) return new Date(+m[3], +m[2]-1, +m[1]); const d = new Date(s); return isNaN(d) ? null : d; };
+    const pVan = bc.periodeVan, pTot = bc.periodeTot;
+    let dagen = 30; try { const a = _pd(pVan), b2 = _pd(pTot); if (a && b2) dagen = Math.max(1, Math.round((b2-a)/86400000)+1); } catch (e) {}
+    const volumeMwh = (+bc.afnameKwh || 0) / 1000;
+    let afnameJaarMwh = dagen > 0 ? volumeMwh * (365 / dagen) : volumeMwh;
+    try {
+      const pk = _laadProfielKwartier(profielNaam);
+      if (pk && pk.length === 35040) {
+        const iso = (d) => d ? new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10) : null;
+        const sr = projectJaarverbruik({ profielNaam, profielKwartier: pk, afnameKwh: (+bc.afnameKwh||0),
+          periodeVan: iso(_pd(pVan)), periodeTot: iso(_pd(pTot)), staffel: CONTRACT_STAFFEL });
+        if (sr && sr.geprojecteerdJaarverbruikMWh != null) afnameJaarMwh = sr.geprojecteerdJaarverbruikMWh;
+      }
+    } catch (e) { console.warn('[kamino/productie] projectie faalde (niet-blokkerend):', e.message); }
+    const kva = +bc.aansluitVermogenKva || 100;
+    const inverter_kva = +b.inverter_kva || pv_kwp;              // standaard: inverter ≈ PV-vermogen
+    const piek_kw = +b.piek_kw || Math.max(1, Math.round(kva * 0.9)); // standaard: uit de aansluiting
+    const profiel_kwartier = _laadProfielKwartier(profielNaam);
+    const a = _analyseerInjectieOptimalisatie(MARKT, {
+      pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: afnameJaarMwh,
+      injectie_mwh_jaar, injectie_mwh_maand: 0, injectie_maand: 0,
+      forecast_modus: 'realistic', profiel_kwartier
+    });
+    const o = a.opbrengst_jaar || {}, pb = a.payback || {}, e = a.energie_jaar || {};
+    const out = {
+      extra_opbrengst_jaar: Math.round(+o.meerwaarde_totaal_eur || 0),
+      netto_jaar: Math.round(+pb.netto_beide_jaar_eur || 0),
+      terugverdientijd_jaar: (pb.payback_beide_jaar != null ? pb.payback_beide_jaar : null),
+      injectie_mwh: (e.injectie_mwh != null ? e.injectie_mwh : null),
+      pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: Math.round(afnameJaarMwh*10)/10, profiel: profielNaam,
+      _debug: { opbrengst_jaar: o, payback: pb, energie_jaar: e, sturing: a.sturing }
+    };
+    console.log(`[kamino/productie] extra=${out.extra_opbrengst_jaar} netto=${out.netto_jaar} tvt=${out.terugverdientijd_jaar} (pv=${pv_kwp} inj=${injectie_mwh_jaar} profiel=${profielNaam})`);
+    return res.json(out);
+  } catch (e) {
+    console.error('[kamino/productie] fout:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
