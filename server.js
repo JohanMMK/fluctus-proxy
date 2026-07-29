@@ -716,7 +716,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.47.0'; // Kamino: tegel 1 vergroening→0 (=simulator €6.361) + tegel 2 /api/kamino/productie (hergebruikt _analyseerInjectieOptimalisatie)
+const SERVER_VERSIE = '15.48.0'; // Kamino: T1 vergroening→0 (=sim €6.361) · T2 /productie (=_analyseerInjectieOptimalisatie) · T3 /aansluiting (async: PV@90% sweep + _draaiSim3 batterij_gebouw, exacte investeringsconstanten)
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2611,6 +2611,139 @@ app.post('/api/kamino/productie', async (req, res) => {
     console.error('[kamino/productie] fout:', e.message);
     return res.status(500).json({ error: e.message });
   }
+});
+
+// ─── KAMINO TEGEL 3 — BatteryActive / Mijn aansluiting ──────────────────────────
+// v15.47: het "eerste rapport op standaardprofiel". ORCHESTREERT bestaande, al-geverifieerde
+// server-logica — GEEN herrekening:
+//   (1) extra PV dimensioneren op ≥90% zelfverbruik via een PV-sweep (zelfde zelfconsumptie-%
+//       als /api/pv-sweep: (direct + via batterij)/bruto), met de instap-batterij (1 eenheid) vast;
+//   (2) batterij-groeipad via _draaiSim3 (batterij_gebouw-pad) → per stap besparing/rendement/NPV
+//       server-side berekend met _batterijSweepGebouw, IDENTIEK aan de simulator omdat we exact
+//       dezelfde investeringsconstanten meesturen (_investering/_tco/_kpi_*) als simulator.html:9437-9469.
+// Kerncijfers = de AANBEVOLEN instap (1 batterij / 120 kW / 260 kWh, hard-verankerd = "eerste groeistap");
+// de OPTIMALE opstelling (hoogste NPV) gaat mee als advies. Async (job + /api/sim-voortgang) want de
+// sweep + het groeipad zijn meerdere dispatch-runs. VERGROENING = 0 (Johan 28-07, = de andere tegels).
+// LET OP: geen lokale MARKT-data in de dev-sandbox → live smoke-test vereist tegen de simulator.
+app.post('/api/kamino/aansluiting', async (req, res) => {
+  try {
+    if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw' });
+    const b = req.body || {}; const bc = b.baseCase || {};
+    const profielNaam = String(b.profielNaam || b.profiel || '').trim();
+    if (!profielNaam) return res.status(400).json({ error: 'profielNaam verplicht' });
+    if (!((+bc.totaalEnergieExclBtw || 0) > 0)) return res.status(400).json({ error: 'geen energiepost in de factuurgegevens' });
+    const _pd = (s) => { if (!s) return null; const m = String(s).match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+      if (m) return new Date(+m[3], +m[2]-1, +m[1]); const d = new Date(s); return isNaN(d) ? null : d; };
+    const pVan = bc.periodeVan, pTot = bc.periodeTot;
+    let dagen = 30; try { const a = _pd(pVan), b2 = _pd(pTot); if (a && b2) dagen = Math.max(1, Math.round((b2-a)/86400000)+1); } catch (e) {}
+    const annf = dagen > 0 ? 365 / dagen : 1;
+    const volumeMwh = (+bc.afnameKwh || 0) / 1000;
+    let afnameJaarMwh = dagen > 0 ? volumeMwh * (365 / dagen) : volumeMwh;
+    try {
+      const pk0 = _laadProfielKwartier(profielNaam);
+      if (pk0 && pk0.length === 35040) {
+        const iso = (d) => d ? new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10) : null;
+        const sr = projectJaarverbruik({ profielNaam, profielKwartier: pk0, afnameKwh: (+bc.afnameKwh||0),
+          periodeVan: iso(_pd(pVan)), periodeTot: iso(_pd(pTot)), staffel: CONTRACT_STAFFEL });
+        if (sr && sr.geprojecteerdJaarverbruikMWh != null) afnameJaarMwh = sr.geprojecteerdJaarverbruikMWh;
+      }
+    } catch (e) { console.warn('[kamino/aansluiting] projectie faalde (niet-blokkerend):', e.message); }
+    const kva = +bc.aansluitVermogenKva || 100;
+    const spanning = (bc.spanningsniveau === 'MS' || bc.spanningsniveau === 'LS') ? bc.spanningsniveau : (kva >= 100 ? 'MS' : 'LS');
+    const postcode = String(bc.postcode || '').trim(), grd = bc.dnb || '';
+    const baseUi = () => ({
+      project: bc.klantNaam || 'kamino', scenario: 'kamino_aansluiting',
+      postcode, grd, spanning, profielNaam, jaarverbruik_mwh: volumeMwh,
+      pv_curtailment: { actief: false }, bsp: { actief: false }, laadpleinen: [],
+      batterijId: null, batterijCustom: null,
+      contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
+        staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
+        vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
+      aansluiting_kva: kva, toegangsvermogen_kw: Math.max(1, Math.round(kva * 0.9)),
+      max_injectie_kw: 0, jaar: 'specifiek', periodeVan: pVan, periodeTot: pTot,
+      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' }
+    });
+
+    const job = _jobNieuw();
+    res.json({ ok: true, async: true, job_id: job.id });
+
+    (async () => {
+      try {
+        const DREMPEL = 90;
+        if (job) job.runs_verwacht = 12;
+        // Investeringsconstanten voor een gegeven PV — IDENTIEK aan simulator.html:9437-9469.
+        const _consts = (pvKwp) => {
+          const kabeltrace = 15000 + (pvKwp > 0 ? 10000 : 0);   // L=0, batterij + PV (= _kabeltrace(true) zonder laadplein/override)
+          const baseNet = dagen > 0 ? (+bc.totaalDistributieExclBtw || 0) * (365 / dagen) : null;
+          return {
+            _investering: { cabine_eur: 90000, eur_per_kva: 100, eur_per_kwh: 350, kabel_pct: 0.20, horizon_jaar: 15 },
+            _tco: { scenario: 'realistisch', inflatie: 0.02, net_extra: 0.04, net_sprong_jaar: 2029, net_sprong: 0.30,
+              startjaar: 2026, horizon: 15, verzekering_promille: 3.4, omvormer_vervang_kwp: 50, pv_kwp: pvKwp,
+              onderhoud: { pv_kwp: 5, batterij_kw: 5, laadpaal: 50 }, onderhoud_vast: pvKwp * 5,
+              besparing_energie_deel: 0.72, base_net: baseNet, disconto: 0.05 },
+            _kpi_capex_vast: pvKwp * 450 + kabeltrace,
+            _kpi_base_plus_creg: dagen > 0 ? (+bc.totaalExclBtw || 0) * (365 / dagen) : (+bc.totaalExclBtw || 0),
+            _kpi_annfactor: annf, _kabeltrace: kabeltrace
+          };
+        };
+        const _pas = (ui, pvKwp) => { const c = _consts(pvKwp); const kt = c._kabeltrace; delete c._kabeltrace; Object.assign(ui, c); return kt; };
+
+        // STAP 1 — OPTIMALE OPSTELLING berekenen (zonder extra PV) → kOpt (hoogste NPV). (= simulator-volgorde.)
+        _jlog(job, 'start', 'Optimale opstelling berekenen (batterij-groeipad)…', {});
+        const ui0 = baseUi(); ui0.pv_kwp = 0; ui0.pvKwp = 0; _pas(ui0, 0);
+        const sim0 = await _draaiSim3(ui0, job);
+        const gp0 = sim0 && sim0.groeipad_gebouw;
+        if (!gp0) throw new Error('geen groeipad_gebouw (optimale opstelling)');
+        const kOpt = Math.max(1, gp0.optimaal_k || (gp0.optimaal && gp0.optimaal.aantal_batterijen) || 1);
+        _jlog(job, 'ok', `Optimale opstelling: ${kOpt} batterij${kOpt>1?'en':''} (hoogste NPV).`, {});
+
+        // STAP 2 — EXTRA PV @ ≥90% zelfverbruik, met de OPTIMALE batterij (kOpt) VAST (= _pvSweepConfig).
+        const pvMax = Math.max(0, Math.round(afnameJaarMwh));   // ~1 kWp per MWh verbruik (= _pvMaxKwp zonder laadplein)
+        const pvKandidaten = []; for (let i = 1; i <= 4; i++) { const v = Math.round(pvMax * i / 4); if (v > 0 && pvKandidaten.indexOf(v) < 0) pvKandidaten.push(v); }
+        _jlog(job, 'start', `Extra PV dimensioneren op ≥${DREMPEL}% zelfverbruik (${pvKandidaten.length} stappen, ${kOpt}× batterij vast)…`, {});
+        let pvKwp = 0, pvZelf = null; const sweep = [];
+        for (const pv of pvKandidaten) {
+          const cfg = baseUi(); cfg.pv_kwp = pv; cfg.pvKwp = pv; cfg.geen_aansluiting_verhoging = true;
+          cfg.batterijId = 'CUSTOM'; cfg.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * BATT_UNIT_KW, kwh: kOpt * BATT_UNIT_KWH, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
+          const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
+          if (job) job.runs = (job.runs || 0) + 1;
+          const kpi = (r && r.kpi) || {};
+          const prodBruto = Number(kpi.pv_potentiele_productie_mwh) || (pv * 0.95);
+          const zelf = (Number(kpi.pv_direct_zelfverbruik_mwh) || 0) + (Number(kpi.pv_naar_batterij_mwh) || 0);
+          const zc = (prodBruto > 0 && pv > 0) ? Math.round(zelf / prodBruto * 1000) / 10 : null;
+          sweep.push({ pv_kwp: pv, zelfconsumptie_pct: zc });
+          _jlog(job, 'opstelling', `PV ${pv} kWp → zelfverbruik ${zc != null ? zc + '%' : '?'}`, {});
+          if (zc != null && zc >= DREMPEL && pv > pvKwp) { pvKwp = pv; pvZelf = zc; }
+        }
+        if (pvKwp === 0) { let best = null; sweep.forEach(s => { if (s.zelfconsumptie_pct != null && (!best || s.zelfconsumptie_pct > best.zelfconsumptie_pct)) best = s; });
+          if (best) { pvKwp = best.pv_kwp; pvZelf = best.zelfconsumptie_pct; } }
+        _jlog(job, 'ok', `Extra PV gekozen: ${pvKwp} kWp (zelfverbruik ${pvZelf != null ? pvZelf + '%' : '?'}).`, {});
+
+        // STAP 3 — GROEISTAPPEN mét die PV → stap 1 (aanbevolen instap) weerhouden; optimaal = advies.
+        const ui = baseUi(); ui.pv_kwp = pvKwp; ui.pvKwp = pvKwp;
+        const kabeltrace = _pas(ui, pvKwp);
+        const sim = await _draaiSim3(ui, job);
+        const gp = sim && sim.groeipad_gebouw;
+        if (!gp) throw new Error('geen groeipad_gebouw (groeistappen)');
+        const alts = gp.alternatieven || [];
+        const stap1 = alts.find(a => a.aanbevolen) || alts.find(a => a.aantal_batterijen === 1) || alts[0] || {};
+        const opt = gp.optimaal || {};
+        const rend = (stap1.rendement != null) ? stap1.rendement : null;
+        const tvt = (rend && rend > 0) ? Math.round((100 / rend) * 10) / 10 : null;   // TVT = capex/besparingNetto = 100/rendement
+        const out = {
+          besparing_jaar: (stap1.besparing_jaar != null ? stap1.besparing_jaar : null),
+          rendement_pct: rend, terugverdientijd_jaar: tvt,
+          instap: { batterijen: stap1.aantal_batterijen || 1, kw: stap1.kw || BATT_UNIT_KW, kwh: stap1.kwh || BATT_UNIT_KWH,
+                    capex: (stap1.capex != null ? stap1.capex : null), npv: (stap1.npv != null ? stap1.npv : null) },
+          optimaal: { batterijen: opt.aantal_batterijen, kw: opt.kw, kwh: opt.kwh, capex: opt.capex, npv: opt.npv, besparing_jaar: opt.besparing_jaar },
+          pv_kwp: pvKwp, pv_zelfconsumptie_pct: pvZelf, profiel: profielNaam, afname_mwh_jaar: Math.round(afnameJaarMwh*10)/10,
+          _debug: { pv_sweep: sweep, drempel: DREMPEL, kOpt, kabeltrace, capex_vast: ui._kpi_capex_vast, annf, nmax: gp.nmax, optimaal_k: gp.optimaal_k }
+        };
+        job.resultaat = out; job.status = 'klaar';
+        _jlog(job, 'klaar', `Aansluiting-studie klaar — instap 1 batterij: besparing € ${Math.round(out.besparing_jaar||0).toLocaleString('nl-BE')}/j, rendement ${rend!=null?rend+'%':'?'}, optimaal ${opt.aantal_batterijen||'?'}×.`);
+      } catch (e) { job.fout = e.message; job.status = 'fout'; _jlog(job, 'fout', 'Aansluiting-studie gefaald: ' + e.message); console.error('[kamino/aansluiting] async fout:', e.message); }
+    })();
+  } catch (e) { console.error('[kamino/aansluiting] fout:', e.message); return res.status(500).json({ error: e.message }); }
 });
 
 // POST /api/factuur-staffel-bepalen
