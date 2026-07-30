@@ -8,6 +8,10 @@
 //                PV@90%-sweep → _draaiSim3 (batterij_gebouw) → groeistap 1, met exacte investeringsconstanten.)
 // Versie:        v15.47.0 (Kamino T1 vergroening→0 (= simulator-factuuranalyse, €6.361) +
 //                T2 /api/kamino/productie = _analyseerInjectieOptimalisatie (zelfde functie als de simulator).)
+// Versie:        v15.50.0 (Kamino auto-rapport: /api/kamino/rapport-bewaar zet het rapportartefact na élke
+//                tegel-berekening in de bucket (rapporten/<pid>/kamino-<tegel>.json) + /api/kamino/rapport-open
+//                voor recall. Geen manuele PDF-upload meer nodig. + project-open matcht klant/adviseur (trim),
+//                projectrecord bewaart PV (kWp+injectie).)
 // Versie:        v15.46.0 (Kamino studie 1: /api/kamino/onderhandel — echte onderhandelingsmarge via
 //                dezelfde buildSimInput → _runSimulatorOnce als /api/nominatie-sim, drift-vrij.)
 // Versie:        v15.45.0 (Kamino-toegangspoort: /api/kamino/project (record bewaren) +
@@ -2472,6 +2476,57 @@ app.post('/api/kamino/project-open', async (req, res) => {
     return res.json({ ok: true, project: rec });
   } catch (e) {
     console.error('[kamino/project-open] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.50: KAMINO auto-rapport in de bucket ────────────────────────────────
+// Na élke tegel-berekening heeft Kamino het rapport al in handen (kern + reportData/HTML). Dit endpoint
+// zet dat artefact meteen in de bucket (rapporten/<pid>/kamino-<tegel>.json), nog vóór het geopend wordt.
+// Zo hoeft niemand het rapport nog manueel (PDF) naar Supabase te laden. Overschrijft = één actueel
+// rapport per tegel. De losse PDF-opslag (/api/rapport-opslaan) blijft bestaan voor een downloadbare PDF.
+app.post('/api/kamino/rapport-bewaar', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const b = req.body || {};
+    const pid = String(b.project_id || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const tegel = String(b.tegel || '').replace(/[^a-z]/gi, '').slice(0, 20);
+    if (!pid || !tegel) return res.status(400).json({ error: 'project_id en tegel verplicht' });
+    const artefact = {
+      project_id: pid, tegel,
+      kern: b.kern || null, reportKey: b.reportKey || null,
+      reportData: b.reportData || null, reportHtml: b.reportHtml || null,
+      bewaard: new Date().toISOString(), door: u.name || u.id || null
+    };
+    const json = JSON.stringify(artefact);
+    if (json.length > 8 * 1024 * 1024) return res.status(413).json({ error: 'rapport te groot (>8 MB)' });
+    const pad = `rapporten/${pid}/kamino-${tegel}.json`;
+    await _factuurUpload(Buffer.from(json, 'utf8').toString('base64'), 'application/json', pad);
+    console.log(`[kamino/rapport-bewaar] ${pad} (${(json.length/1024).toFixed(0)} KB) tegel=${tegel}`);
+    return res.json({ ok: true, pad });
+  } catch (e) {
+    console.error('[kamino/rapport-bewaar] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/kamino/rapport-open?project_id=&tegel=  → het bewaarde Kamino-rapportartefact (voor recall)
+app.get('/api/kamino/rapport-open', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const pid = String(req.query.project_id || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const tegel = String(req.query.tegel || '').replace(/[^a-z]/gi, '').slice(0, 20);
+    if (!pid || !tegel) return res.status(400).json({ error: 'project_id en tegel verplicht' });
+    let art;
+    try { art = JSON.parse(await _factuurDownload(`rapporten/${pid}/kamino-${tegel}.json`)); }
+    catch (e) { return res.status(404).json({ error: 'geen bewaard rapport' }); }
+    return res.json({ ok: true, rapport: art });
+  } catch (e) {
+    console.error('[kamino/rapport-open] faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
