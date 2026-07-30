@@ -1,6 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.49.0 (Kamino T3 /aansluiting: kern = VOLLEDIGE besparing vs vandaag (_kpiEngine-headline),
+//                niet de groeipad-marginale (Johan-keuze A 28-07). NB: sinds het launcher-model rekent de
+//                Kamino-kaart niet meer via dit endpoint — de simulator is de enige rekenmachine.)
+// Versie:        v15.48.0 (Kamino T3: /api/kamino/aansluiting — async (job): optimale opstelling →
+//                PV@90%-sweep → _draaiSim3 (batterij_gebouw) → groeistap 1, met exacte investeringsconstanten.)
+// Versie:        v15.47.0 (Kamino T1 vergroening→0 (= simulator-factuuranalyse, €6.361) +
+//                T2 /api/kamino/productie = _analyseerInjectieOptimalisatie (zelfde functie als de simulator).)
 // Versie:        v15.46.0 (Kamino studie 1: /api/kamino/onderhandel — echte onderhandelingsmarge via
 //                dezelfde buildSimInput → _runSimulatorOnce als /api/nominatie-sim, drift-vrij.)
 // Versie:        v15.45.0 (Kamino-toegangspoort: /api/kamino/project (record bewaren) +
