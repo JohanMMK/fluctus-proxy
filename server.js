@@ -716,7 +716,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.48.0'; // Kamino: T1 vergroening→0 (=sim €6.361) · T2 /productie (=_analyseerInjectieOptimalisatie) · T3 /aansluiting (async: PV@90% sweep + _draaiSim3 batterij_gebouw, exacte investeringsconstanten)
+const SERVER_VERSIE = '15.49.0'; // T3 /aansluiting: kern = VOLLEDIGE besparing vs vandaag (_kpiEngine-headline), niet groeipad-marginaal (Johan-keuze A 28-07) · T1 vergroening→0 · T2 /productie
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2728,19 +2728,35 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         const alts = gp.alternatieven || [];
         const stap1 = alts.find(a => a.aanbevolen) || alts.find(a => a.aantal_batterijen === 1) || alts[0] || {};
         const opt = gp.optimaal || {};
-        const rend = (stap1.rendement != null) ? stap1.rendement : null;
-        const tvt = (rend && rend > 0) ? Math.round((100 / rend) * 10) / 10 : null;   // TVT = capex/besparingNetto = 100/rendement
+        const optAlt = alts.find(a => a.aantal_batterijen === opt.aantal_batterijen) || stap1;
+        // v15.49 (Johan-keuze A, 28-07): VOLLEDIGE besparing vs vandaag = de headline van het simulator-ontwerp-rapport
+        // (_kpiEngine-methodiek), NIET de groeipad-marginale (die crediteert de PV-winst niet en oogt onterecht op ~3%).
+        //   besparing = E_base − E ; E_base = factuur vandaag geannualiseerd (bc.totaalExclBtw × 365/dagen) ; E = factuur van de config.
+        //   rendement = (besparing − opex1)/capex×100 ; opex1 = pv·5 + battKw·5 + capex·3,4‰. (C=0 zonder laadplein.)
+        const E_base = dagen > 0 ? (+bc.totaalExclBtw || 0) * (365 / dagen) : (+bc.totaalExclBtw || 0);
+        const _volleFR = (a) => {
+          const capex = +a.capex || 0, E = +a.jaarkost || 0;
+          const battKw = +a.kw || (BATT_UNIT_KW * (a.aantal_batterijen || 1));
+          const oh1 = pvKwp * 5 + battKw * 5, opex1 = oh1 + capex * 3.4 / 1000;
+          const besparing = E_base - E, besparingNetto = besparing - opex1;
+          const rend = capex > 0 ? (besparingNetto / capex * 100) : null;
+          const tvt = (besparingNetto > 0 && capex > 0) ? (capex / besparingNetto) : null;
+          return { E: Math.round(E), besparing: Math.round(besparing), besparing_netto: Math.round(besparingNetto),
+                   rendement: rend != null ? Math.round(rend * 10) / 10 : null, tvt: tvt != null ? Math.round(tvt * 10) / 10 : null, capex: Math.round(capex) };
+        };
+        const fr1 = _volleFR(stap1), frOpt = _volleFR(optAlt);
         const out = {
-          besparing_jaar: (stap1.besparing_jaar != null ? stap1.besparing_jaar : null),
-          rendement_pct: rend, terugverdientijd_jaar: tvt,
+          besparing_jaar: fr1.besparing, rendement_pct: fr1.rendement, terugverdientijd_jaar: fr1.tvt,
           instap: { batterijen: stap1.aantal_batterijen || 1, kw: stap1.kw || BATT_UNIT_KW, kwh: stap1.kwh || BATT_UNIT_KWH,
-                    capex: (stap1.capex != null ? stap1.capex : null), npv: (stap1.npv != null ? stap1.npv : null) },
-          optimaal: { batterijen: opt.aantal_batterijen, kw: opt.kw, kwh: opt.kwh, capex: opt.capex, npv: opt.npv, besparing_jaar: opt.besparing_jaar },
+                    capex: fr1.capex, npv: (stap1.npv != null ? stap1.npv : null), factuur_jaar: fr1.E, vandaag_jaar: Math.round(E_base) },
+          optimaal: { batterijen: opt.aantal_batterijen, kw: opt.kw, kwh: opt.kwh, capex: opt.capex, npv: opt.npv,
+                      besparing_jaar: frOpt.besparing, rendement_pct: frOpt.rendement, terugverdientijd_jaar: frOpt.tvt },
           pv_kwp: pvKwp, pv_zelfconsumptie_pct: pvZelf, profiel: profielNaam, afname_mwh_jaar: Math.round(afnameJaarMwh*10)/10,
-          _debug: { pv_sweep: sweep, drempel: DREMPEL, kOpt, kabeltrace, capex_vast: ui._kpi_capex_vast, annf, nmax: gp.nmax, optimaal_k: gp.optimaal_k }
+          _debug: { pv_sweep: sweep, drempel: DREMPEL, kOpt, kabeltrace, capex_vast: ui._kpi_capex_vast, annf, nmax: gp.nmax, optimaal_k: gp.optimaal_k,
+                    vandaag_jaar: Math.round(E_base), marginaal: { besparing_jaar: stap1.besparing_jaar, rendement: stap1.rendement }, volledig: fr1 }
         };
         job.resultaat = out; job.status = 'klaar';
-        _jlog(job, 'klaar', `Aansluiting-studie klaar — instap 1 batterij: besparing € ${Math.round(out.besparing_jaar||0).toLocaleString('nl-BE')}/j, rendement ${rend!=null?rend+'%':'?'}, optimaal ${opt.aantal_batterijen||'?'}×.`);
+        _jlog(job, 'klaar', `Aansluiting-studie klaar — instap ${stap1.aantal_batterijen||1} batterij: VOLLE besparing € ${Math.round(fr1.besparing||0).toLocaleString('nl-BE')}/j (vandaag € ${Math.round(E_base).toLocaleString('nl-BE')} → € ${(fr1.E||0).toLocaleString('nl-BE')}), rendement ${fr1.rendement!=null?fr1.rendement+'%':'?'}, TVT ${fr1.tvt!=null?fr1.tvt+'j':'?'}, optimaal ${opt.aantal_batterijen||'?'}×.`);
       } catch (e) { job.fout = e.message; job.status = 'fout'; _jlog(job, 'fout', 'Aansluiting-studie gefaald: ' + e.message); console.error('[kamino/aansluiting] async fout:', e.message); }
     })();
   } catch (e) { console.error('[kamino/aansluiting] fout:', e.message); return res.status(500).json({ error: e.message }); }
