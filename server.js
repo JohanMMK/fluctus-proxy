@@ -2440,6 +2440,7 @@ app.post('/api/kamino/project', async (req, res) => {
       adviseur: b.adviseur || bestaand.adviseur || {},
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
+      pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
       aangemaakt: bestaand.aangemaakt || new Date().toISOString(),
       bijgewerkt: new Date().toISOString(), door: u.name || u.id || null
