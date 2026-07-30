@@ -8,6 +8,9 @@
 //                PV@90%-sweep → _draaiSim3 (batterij_gebouw) → groeistap 1, met exacte investeringsconstanten.)
 // Versie:        v15.47.0 (Kamino T1 vergroening→0 (= simulator-factuuranalyse, €6.361) +
 //                T2 /api/kamino/productie = _analyseerInjectieOptimalisatie (zelfde functie als de simulator).)
+// Versie:        v15.51.0 (Manager-ondersteuning: /api/kamino/project-get (manager-only, zonder e-mail →
+//                projectrecord + rapportenlijst met signed PDF-URLs) zodat de manager een project in de
+//                simulator kan openen, bestaande rapporten bekijken en nieuwe scenario's maken.)
 // Versie:        v15.50.0 (Kamino auto-rapport: /api/kamino/rapport-bewaar zet het rapportartefact na élke
 //                tegel-berekening in de bucket (rapporten/<pid>/kamino-<tegel>.json) + /api/kamino/rapport-open
 //                voor recall. Geen manuele PDF-upload meer nodig. + project-open matcht klant/adviseur (trim),
@@ -2527,6 +2530,44 @@ app.get('/api/kamino/rapport-open', async (req, res) => {
     return res.json({ ok: true, rapport: art });
   } catch (e) {
     console.error('[kamino/rapport-open] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// GET /api/kamino/project-get?id=FLX-...  → MANAGER-ONLY: haalt het projectrecord op ZONDER e-mail-check.
+// De manager mag elk project inzien om te ondersteunen (data bekijken, bestaande rapporten openen, nieuwe
+// scenario's maken in de simulator). Geeft ook de bestaande rapporten mee: PDF's (met signed URL) + de
+// per-tegel Kamino-artefacten.
+app.get('/api/kamino/project-get', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    if (!_isManager(u)) return res.status(403).json({ error: 'Alleen managers kunnen een project rechtstreeks openen.' });
+    const id = String(req.query.id || '').trim().toUpperCase();
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+    const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    let rec;
+    try { rec = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); }
+    catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
+    let pdfs = [], studies = [];
+    try {
+      const lijst = await _bucketList(`rapporten/${veilig}/`);
+      for (const o of (Array.isArray(lijst) ? lijst : [])) {
+        if (!o.name) continue;
+        const pad = `rapporten/${veilig}/${o.name}`;
+        if (/\.pdf$/i.test(o.name)) {
+          let url = null; try { url = await _factuurSignedUrl(pad, 3600); } catch (e) {}
+          pdfs.push({ naam: o.name, pad, url, bijgewerkt: o.updated_at || o.created_at || null });
+        } else if (/^kamino-.+\.json$/i.test(o.name)) {
+          studies.push({ tegel: o.name.replace(/^kamino-/, '').replace(/\.json$/, ''), pad, bijgewerkt: o.updated_at || o.created_at || null });
+        }
+      }
+    } catch (e) { /* niet-blokkerend */ }
+    console.log(`[kamino/project-get] ${id} geopend door manager ${u.name || u.id}`);
+    return res.json({ ok: true, project: rec, rapporten: { pdfs, studies } });
+  } catch (e) {
+    console.error('[kamino/project-get] faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
