@@ -2465,7 +2465,7 @@ app.post('/api/kamino/project-open', async (req, res) => {
     let rec;
     try { rec = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); }
     catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
-    const mails = [ (rec.klant && rec.klant.email) || '', (rec.adviseur && rec.adviseur.email) || '' ].map(function (s) { return String(s).toLowerCase(); });
+    const mails = [ (rec.klant && rec.klant.email) || '', (rec.adviseur && rec.adviseur.email) || '' ].map(function (s) { return String(s).trim().toLowerCase(); }).filter(Boolean);
     if (mails.indexOf(email) < 0) return res.status(403).json({ error: 'Dit e-mailadres hoort niet bij dit project.' });
     console.log(`[kamino/project-open] ${id} geopend door ${email}`);
     return res.json({ ok: true, project: rec });
