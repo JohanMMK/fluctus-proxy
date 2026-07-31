@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.50.0 (31-07): /api/groeipad geeft per stap `afname_mwh` (grid-afname uit r.kpi.totaal_afname_mwh)
+//                mee → de simulator berekent de loadfactor (KPI3) per groeistap client-side = afname/(8760×aansluiting),
+//                zelfde conventie als _kpiEngine. Voordien enkel de optimale stap een loadfactor.
 // Versie:        v15.49.0 (Kamino T3 /aansluiting: kern = VOLLEDIGE besparing vs vandaag (_kpiEngine-headline),
 //                niet de groeipad-marginale (Johan-keuze A 28-07). NB: sinds het launcher-model rekent de
 //                Kamino-kaart niet meer via dit endpoint — de simulator is de enige rekenmachine.)
@@ -3825,6 +3828,7 @@ app.post('/api/groeipad', async (req, res) => {
           aansluiting_verhoogd_kw: Number(lp.toegangsvermogen_verhoogd_kw) || 0,   // >0 → paste niet op de vaste aansluiting
           factuur_sturing_excl_btw: Math.round(Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0),
           distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
+          afname_mwh: Math.round((Number((r.kpi || {}).totaal_afname_mwh) || 0) * 10) / 10,   // v15.50.0: grid-afname → loadfactor per stap (KPI3) client-side = afname/(8760×aansluiting)
           factuur_detail: _frCompJF(r),   // v15.33.0: componenten voor de groeipad-detailfactuur per stap
         });
       }
