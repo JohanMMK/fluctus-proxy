@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.52.0 (01-08, Johan): MARGINALE zelfconsumptie voor de extra-PV-dimensionering. /api/pv-sweep en
+//                /api/kamino/aansluiting nemen nu een NULPUNT-baseline (pv=0 = enkel bestaande PV) en geven/kiezen op
+//                `marginale_zelfconsumptie_pct` = (Δzelfverbruik)/(Δproductie) van de NIEUWE PV, i.p.v. het geblende %
+//                (dat door bestaande PV te gunstig oogde). Zelfverbruik-drempel is nu een parameter (b.pvDrempel),
+//                default 80% (was 90). Zonder bestaande PV: baseline 0 → marginaal == geblend (geen regressie).
 // Versie:        v15.50.0 (31-07): /api/groeipad geeft per stap `afname_mwh` (grid-afname uit r.kpi.totaal_afname_mwh)
 //                mee → de simulator berekent de loadfactor (KPI3) per groeistap client-side = afname/(8760×aansluiting),
 //                zelfde conventie als _kpiEngine. Voordien enkel de optimale stap een loadfactor.
@@ -2776,8 +2781,10 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
 
     (async () => {
       try {
-        const DREMPEL = 90;
-        if (job) job.runs_verwacht = 12;
+        // v15.51: zelfverbruik-drempel is nu een PARAMETER (b.pvDrempel), default 80% (was 90%). En de keuze rekent
+        // op de MARGINALE zelfconsumptie van de nieuwe PV (t.o.v. bestaand-only), niet op het geblende %.
+        const DREMPEL = Number(b.pvDrempel) > 0 ? Number(b.pvDrempel) : 80;
+        if (job) job.runs_verwacht = 13;
         // Investeringsconstanten voor een gegeven PV — IDENTIEK aan simulator.html:9437-9469.
         const _consts = (pvKwp) => {
           const kabeltrace = 15000 + (pvKwp > 0 ? 10000 : 0);   // L=0, batterij + PV (= _kabeltrace(true) zonder laadplein/override)
@@ -2807,7 +2814,16 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         // STAP 2 — EXTRA PV @ ≥90% zelfverbruik, met de OPTIMALE batterij (kOpt) VAST (= _pvSweepConfig).
         const pvMax = Math.max(0, Math.round(afnameJaarMwh));   // ~1 kWp per MWh verbruik (= _pvMaxKwp zonder laadplein)
         const pvKandidaten = []; for (let i = 1; i <= 4; i++) { const v = Math.round(pvMax * i / 4); if (v > 0 && pvKandidaten.indexOf(v) < 0) pvKandidaten.push(v); }
-        _jlog(job, 'start', `Extra PV dimensioneren op ≥${DREMPEL}% zelfverbruik (${pvKandidaten.length} stappen, ${kOpt}× batterij vast)…`, {});
+        _jlog(job, 'start', `Extra PV dimensioneren op ≥${DREMPEL}% MARGINAAL zelfverbruik (${pvKandidaten.length} stappen, ${kOpt}× batterij vast)…`, {});
+        // v15.51: NULPUNT-baseline = bestaande PV only (pv=0), zodat we de nieuwe PV op zijn marginale zelfconsumptie
+        // beoordelen i.p.v. het geblende % (dat door de bestaande PV te gunstig oogt).
+        const _cb = baseUi(); _cb.pv_kwp = 0; _cb.pvKwp = 0; _cb.geen_aansluiting_verhoging = true;
+        _cb.batterijId = 'CUSTOM'; _cb.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * BATT_UNIT_KW, kwh: kOpt * BATT_UNIT_KWH, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
+        const _rb = await _runSimulatorOnce(buildSimInput(_variantUi(_cb, 'sturing')));
+        if (job) job.runs = (job.runs || 0) + 1;
+        const _kb = (_rb && _rb.kpi) || {};
+        const _prod0 = Number(_kb.pv_potentiele_productie_mwh) || 0;
+        const _zelf0 = (Number(_kb.pv_direct_zelfverbruik_mwh) || 0) + (Number(_kb.pv_naar_batterij_mwh) || 0);
         let pvKwp = 0, pvZelf = null; const sweep = [];
         for (const pv of pvKandidaten) {
           const cfg = baseUi(); cfg.pv_kwp = pv; cfg.pvKwp = pv; cfg.geen_aansluiting_verhoging = true;
@@ -2817,9 +2833,10 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
           const kpi = (r && r.kpi) || {};
           const prodBruto = Number(kpi.pv_potentiele_productie_mwh) || (pv * 0.95);
           const zelf = (Number(kpi.pv_direct_zelfverbruik_mwh) || 0) + (Number(kpi.pv_naar_batterij_mwh) || 0);
-          const zc = (prodBruto > 0 && pv > 0) ? Math.round(zelf / prodBruto * 1000) / 10 : null;
-          sweep.push({ pv_kwp: pv, zelfconsumptie_pct: zc });
-          _jlog(job, 'opstelling', `PV ${pv} kWp → zelfverbruik ${zc != null ? zc + '%' : '?'}`, {});
+          const dProd = prodBruto - _prod0, dZelf = zelf - _zelf0;                       // nieuwe PV op eigen merites
+          const zc = (dProd > 0 && pv > 0) ? Math.round(dZelf / dProd * 1000) / 10 : null;   // MARGINAAL %
+          sweep.push({ pv_kwp: pv, zelfconsumptie_pct: zc, marginale_zelfconsumptie_pct: zc });
+          _jlog(job, 'opstelling', `PV ${pv} kWp → marginaal zelfverbruik ${zc != null ? zc + '%' : '?'}`, {});
           if (zc != null && zc >= DREMPEL && pv > pvKwp) { pvKwp = pv; pvZelf = zc; }
         }
         if (pvKwp === 0) { let best = null; sweep.forEach(s => { if (s.zelfconsumptie_pct != null && (!best || s.zelfconsumptie_pct > best.zelfconsumptie_pct)) best = s; });
@@ -3860,6 +3877,12 @@ app.post('/api/pv-sweep', async (req, res) => {
   if (!pvLijst.length) return res.status(400).json({ error: 'pv_kwp_lijst is verplicht' });
   try {
     const stappen = [];
+    // v15.51: MARGINALE zelfconsumptie. Bij bestaande PV telde het geblende % (bestaand + nieuw) de zelfconsumptie
+    // van de bestaande panelen mee, waardoor de nieuwe PV te gunstig oogde. We nemen nu het NULPUNT (pv=0 = enkel
+    // bestaande PV) als baseline en beoordelen de nieuwe PV op zijn EIGEN merites:
+    //   marginaal% = (zelfverbruik(pv) − zelfverbruik(bestaand-only)) / (productie(pv) − productie(bestaand-only)).
+    // Zonder bestaande PV is de baseline 0 → marginaal == geblend (geen regressie).
+    let _prod0 = null, _zelf0 = null;
     for (const pv of pvLijst) {
       const cfg = JSON.parse(JSON.stringify(input));
       cfg.aansluiting_kva = c; cfg.aansluitingKva = c; cfg.toegangsvermogen_kw = c;
@@ -3880,6 +3903,10 @@ app.post('/api/pv-sweep', async (req, res) => {
       // (direct + via batterij) / bruto productie. Bruto = potentiële productie (na curtailment-verlies).
       const _prodBruto = Number(kpi.pv_potentiele_productie_mwh) || (pv * 0.95);
       const _zelf = (Number(kpi.pv_direct_zelfverbruik_mwh) || 0) + (Number(kpi.pv_naar_batterij_mwh) || 0);
+      // v15.51: leg de baseline vast op pv=0 (enkel bestaande PV). pvLijst is oplopend gesorteerd, dus 0 komt eerst.
+      if (pv === 0) { _prod0 = _prodBruto; _zelf0 = _zelf; }
+      const _dProd = (_prod0 != null ? (_prodBruto - _prod0) : _prodBruto);   // productie van de NIEUWE PV alleen
+      const _dZelf = (_zelf0 != null ? (_zelf - _zelf0) : _zelf);             // extra zelfverbruik door de NIEUWE PV
       stappen.push({
         pv_kwp: pv,
         productie_mwh: Math.round((_prodBruto) * 10) / 10,             // bruto productie (KPI, of ~950 kWh/kWp)
@@ -3891,11 +3918,12 @@ app.post('/api/pv-sweep', async (req, res) => {
         pv_direct_mwh: Math.round((Number(kpi.pv_direct_zelfverbruik_mwh) || 0) * 10) / 10,
         pv_via_batterij_mwh: Math.round((Number(kpi.pv_naar_batterij_mwh) || 0) * 10) / 10,
         pv_injectie_mwh: Math.round((Number(kpi.pv_injectie_mwh) || 0) * 10) / 10,
-        zelfconsumptie_pct: (_prodBruto > 0 && pv > 0) ? Math.round(_zelf / _prodBruto * 1000) / 10 : null,
+        zelfconsumptie_pct: (_prodBruto > 0 && pv > 0) ? Math.round(_zelf / _prodBruto * 1000) / 10 : null,          // geblend (bestaand + nieuw) — voor de tabel/referentie
+        marginale_zelfconsumptie_pct: (_dProd > 0 && pv > 0) ? Math.round(_dZelf / _dProd * 1000) / 10 : null,       // v15.51: nieuwe PV op eigen merites → de keuze-drempel rekent hierop
       });
     }
     return res.json({ ok: true, aansluiting_kva: c, aantal_batterijen: k, pv_kwp_lijst: pvLijst, stappen,
-      _meta: { server_version: '15.38.0' } });
+      _meta: { server_version: '15.52.0' } });
   } catch (e) {
     console.error('[pv-sweep] fout:', e.message);
     return res.status(500).json({ error: 'pv-sweep gefaald: ' + e.message });
