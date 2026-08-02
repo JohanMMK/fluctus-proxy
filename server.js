@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.53.0 (01-08, Johan): /api/kamino/project-open geeft nu ook `rapporten.studies` mee (lijst tegels
+//                met een bewaard rapport) → Kamino toont per tegel een "bekijk vorig rapport"-knop bij een heropend
+//                project (i.p.v. enkel herrekenen). Rapport zelf komt uit /api/kamino/rapport-open.
 // Versie:        v15.52.0 (01-08, Johan): MARGINALE zelfconsumptie voor de extra-PV-dimensionering. /api/pv-sweep en
 //                /api/kamino/aansluiting nemen nu een NULPUNT-baseline (pv=0 = enkel bestaande PV) en geven/kiezen op
 //                `marginale_zelfconsumptie_pct` = (Δzelfverbruik)/(Δproductie) van de NIEUWE PV, i.p.v. het geblende %
@@ -2483,8 +2486,17 @@ app.post('/api/kamino/project-open', async (req, res) => {
     catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
     const mails = [ (rec.klant && rec.klant.email) || '', (rec.adviseur && rec.adviseur.email) || '' ].map(function (s) { return String(s).trim().toLowerCase(); }).filter(Boolean);
     if (mails.indexOf(email) < 0) return res.status(403).json({ error: 'Dit e-mailadres hoort niet bij dit project.' });
+    // v15.53: geef mee welke tegels een BEWAARD rapport hebben (rapporten/<pid>/kamino-<tegel>.json), zodat Kamino
+    // per tegel een "bekijk vorig rapport"-knop kan tonen bij een heropend project (niet enkel "herrekenen").
+    let studies = [];
+    try {
+      const lijst = await _bucketList(`rapporten/${veilig}/`);
+      for (const o of (Array.isArray(lijst) ? lijst : [])) {
+        if (o.name && /^kamino-.+\.json$/i.test(o.name)) studies.push(o.name.replace(/^kamino-/, '').replace(/\.json$/, ''));
+      }
+    } catch (e) { /* niet-blokkerend */ }
     console.log(`[kamino/project-open] ${id} geopend door ${email}`);
-    return res.json({ ok: true, project: rec });
+    return res.json({ ok: true, project: rec, rapporten: { studies } });
   } catch (e) {
     console.error('[kamino/project-open] faalde:', e.message);
     return res.status(500).json({ error: e.message });
