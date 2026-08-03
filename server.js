@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.54.0 (01-08, Johan): BATTERIJ-MODULE OP MAAT. Drie modules (5/10, 30/60, 120/260); de sizing-
+//                functies (_dimZet, _mixZoekVerzwaring, _dimensioneerMix, _opstellingUi, _batterijSweepGebouw, pv-sweep,
+//                /api/opstelling, /api/kamino/aansluiting) lezen de module via _buKw/_buKwh uit input.batt_module met
+//                FALLBACK op 120/260 (geen regressie). De client kiest de module op de trigger (tegel 3 = toegangs-
+//                vermogen; tegel 4 = +50% laadpleinvermogen) en stuurt ze mee; gebouw-sweep = veelvouden tot ≈ basis, max 6.
 // Versie:        v15.53.0 (01-08, Johan): /api/kamino/project-open geeft nu ook `rapporten.studies` mee (lijst tegels
 //                met een bewaard rapport) → Kamino toont per tegel een "bekijk vorig rapport"-knop bij een heropend
 //                project (i.p.v. enkel herrekenen). Rapport zelf komt uit /api/kamino/rapport-open.
@@ -2775,11 +2780,14 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
     const kva = +bc.aansluitVermogenKva || 100;
     const spanning = (bc.spanningsniveau === 'MS' || bc.spanningsniveau === 'LS') ? bc.spanningsniveau : (kva >= 100 ? 'MS' : 'LS');
     const postcode = String(bc.postcode || '').trim(), grd = bc.dnb || '';
+    // v15.54 (Johan): tegel 3 = trigger toegangsvermogen (geen laadplein) → batterij-module die kleiner is dan de
+    // aansluiting. Zo krijgt een kleine site een passende (kleine) batterij i.p.v. de vaste 120/260.
+    const _kaModule = _kiesBattModule(kva);
     const baseUi = () => ({
       project: bc.klantNaam || 'kamino', scenario: 'kamino_aansluiting',
       postcode, grd, spanning, profielNaam, jaarverbruik_mwh: volumeMwh,
       pv_curtailment: { actief: false }, bsp: { actief: false }, laadpleinen: [],
-      batterijId: null, batterijCustom: null,
+      batterijId: null, batterijCustom: null, batt_module: _kaModule,
       contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
         staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
         vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
@@ -2830,7 +2838,7 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         // v15.51: NULPUNT-baseline = bestaande PV only (pv=0), zodat we de nieuwe PV op zijn marginale zelfconsumptie
         // beoordelen i.p.v. het geblende % (dat door de bestaande PV te gunstig oogt).
         const _cb = baseUi(); _cb.pv_kwp = 0; _cb.pvKwp = 0; _cb.geen_aansluiting_verhoging = true;
-        _cb.batterijId = 'CUSTOM'; _cb.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * BATT_UNIT_KW, kwh: kOpt * BATT_UNIT_KWH, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
+        _cb.batterijId = 'CUSTOM'; _cb.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * _kaModule.kw, kwh: kOpt * _kaModule.kwh, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
         const _rb = await _runSimulatorOnce(buildSimInput(_variantUi(_cb, 'sturing')));
         if (job) job.runs = (job.runs || 0) + 1;
         const _kb = (_rb && _rb.kpi) || {};
@@ -2839,7 +2847,7 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         let pvKwp = 0, pvZelf = null; const sweep = [];
         for (const pv of pvKandidaten) {
           const cfg = baseUi(); cfg.pv_kwp = pv; cfg.pvKwp = pv; cfg.geen_aansluiting_verhoging = true;
-          cfg.batterijId = 'CUSTOM'; cfg.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * BATT_UNIT_KW, kwh: kOpt * BATT_UNIT_KWH, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
+          cfg.batterijId = 'CUSTOM'; cfg.batterijCustom = { naam: 'kamino-optimaal', kw: kOpt * _kaModule.kw, kwh: kOpt * _kaModule.kwh, aantal_batterijen: kOpt, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
           const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
           if (job) job.runs = (job.runs || 0) + 1;
           const kpi = (r && r.kpi) || {};
@@ -2872,7 +2880,7 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         const E_base = dagen > 0 ? (+bc.totaalExclBtw || 0) * (365 / dagen) : (+bc.totaalExclBtw || 0);
         const _volleFR = (a) => {
           const capex = +a.capex || 0, E = +a.jaarkost || 0;
-          const battKw = +a.kw || (BATT_UNIT_KW * (a.aantal_batterijen || 1));
+          const battKw = +a.kw || (_kaModule.kw * (a.aantal_batterijen || 1));
           const oh1 = pvKwp * 5 + battKw * 5, opex1 = oh1 + capex * 3.4 / 1000;
           const besparing = E_base - E, besparingNetto = besparing - opex1;
           const rend = capex > 0 ? (besparingNetto / capex * 100) : null;
@@ -2883,7 +2891,7 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         const fr1 = _volleFR(stap1), frOpt = _volleFR(optAlt);
         const out = {
           besparing_jaar: fr1.besparing, rendement_pct: fr1.rendement, terugverdientijd_jaar: fr1.tvt,
-          instap: { batterijen: stap1.aantal_batterijen || 1, kw: stap1.kw || BATT_UNIT_KW, kwh: stap1.kwh || BATT_UNIT_KWH,
+          instap: { batterijen: stap1.aantal_batterijen || 1, kw: stap1.kw || _kaModule.kw, kwh: stap1.kwh || _kaModule.kwh,
                     capex: fr1.capex, npv: (stap1.npv != null ? stap1.npv : null), factuur_jaar: fr1.E, vandaag_jaar: Math.round(E_base) },
           optimaal: { batterijen: opt.aantal_batterijen, kw: opt.kw, kwh: opt.kwh, capex: opt.capex, npv: opt.npv,
                       besparing_jaar: frOpt.besparing, rendement_pct: frOpt.rendement, terugverdientijd_jaar: frOpt.tvt },
@@ -3245,6 +3253,16 @@ const DIM_FIJN_ITER = 2;      // binaire verfijning tussen de laatste faal/succe
 const BATT_UNIT_KW  = 120;
 const BATT_UNIT_KWH = 260;
 const _MAX_BATT_UNITS_SRV = 40;   // veiligheidsplafond op de gebouw-batterij-sweep (v15.35.0)
+// v15.54 (Johan 01-08): batterij-MODULE schaalt mee met de site. Drie modules; de client kiest er één op basis van de
+// trigger (tegel 3 = toegangsvermogen; tegel 4 = toegangsvermogen + 50% laadpleinvermogen) en stuurt ze mee als
+// input.batt_module = {kw,kwh}. De sizing-functies lezen ze via _buKw/_buKwh met FALLBACK op 120/260 (oud gedrag →
+// geen regressie als de module ontbreekt). Keuze/veelvouden gebeuren client-side (max 6 stappen); de server sizet
+// gewoon op de meegegeven module. GEEN combinaties van modules in één simulatie.
+const BATT_MODULES = [ { kw: 5, kwh: 10 }, { kw: 30, kwh: 60 }, { kw: 120, kwh: 260 } ];
+function _buKw(x){ return (x && x.batt_module && +x.batt_module.kw > 0) ? +x.batt_module.kw : BATT_UNIT_KW; }
+function _buKwh(x){ return (x && x.batt_module && +x.batt_module.kwh > 0) ? +x.batt_module.kwh : BATT_UNIT_KWH; }
+// grootste module met kW < basisvermogen; onder 5 kW → de kleinste (5/10).
+function _kiesBattModule(baseKw){ let m = BATT_MODULES[0]; for (const mod of BATT_MODULES){ if (mod.kw < baseKw) m = mod; } return { kw: m.kw, kwh: m.kwh }; }
 // De zoeklus is opstelling-agnostisch: voor 'batterij' én 'mix' is de bepalende maat
 // de batterij-kWh. De tariefkaart ligt vast in de config (de LS/MS-poort, vooraf), niet
 // in de zoeklogica.
@@ -3272,9 +3290,10 @@ function _dimZet(cfg, opst, maat) {
   // op een geheel aantal fysieke eenheden (120 kW / 260 kWh) — minimaal 1 zodra er een
   // batterij nodig is. kw en kwh volgen het aantal eenheden, zodat de C-rate en de capex
   // per eenheid consistent blijven.
-  const eenheden = Math.max(1, Math.ceil(maat / BATT_UNIT_KWH));
-  const kwh = eenheden * BATT_UNIT_KWH;
-  const kw  = eenheden * BATT_UNIT_KW;
+  const _bkwh = _buKwh(cfg), _bkw = _buKw(cfg);   // v15.54: module-maat (fallback 120/260)
+  const eenheden = Math.max(1, Math.ceil(maat / _bkwh));
+  const kwh = eenheden * _bkwh;
+  const kw  = eenheden * _bkw;
   cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, { kwh, kw, aantal_batterijen: eenheden });
   return kwh;
 }
@@ -3442,8 +3461,9 @@ function _mixZetAansluiting(cfg, kva, huidig) {
 // De sim vertelt zelf hoeveel ze de aansluiting moest optrekken (toegangsvermogen_verhoogd_kw)
 // als de batterij te klein is — dus we springen daar meteen heen i.p.v. blind te groeien.
 async function _mixZoekVerzwaring(input, cap, k, job) {
+  const _bkw = _buKw(input), _bkwh = _buKwh(input);   // v15.54: module-maat (fallback 120/260)
   const cfg = _opstellingUi(input, 'batterij', cap);
-  cfg.batterijCustom = { naam: 'Mix-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH,
+  cfg.batterijCustom = { naam: 'Mix-batterij', kw: k * _bkw, kwh: k * _bkwh,
                          aantal_batterijen: k, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
   const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
   let kva = Math.max(5, Math.ceil(huidig / 5) * 5);
@@ -3463,11 +3483,12 @@ async function _mixZoekVerzwaring(input, cap, k, job) {
     h = _opstellingHaalbaar(r, 'batterij');
     iter++;
   }
-  return { k, kva, kwh: k * BATT_UNIT_KWH, kw: k * BATT_UNIT_KW, resultaat: r, factuur: _subJF(r),
+  return { k, kva, kwh: k * _bkwh, kw: k * _bkw, resultaat: r, factuur: _subJF(r),
            haalbaar: h.ok, cfg, runs, huidig };
 }
 async function _dimensioneerMix(input, cap, job) {
-  const N = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / BATT_UNIT_KWH));   // = batterijen van opstelling 2
+  const _bkw = _buKw(input), _bkwh = _buKwh(input);   // v15.54: module-maat (fallback 120/260)
+  const N = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / _bkwh));   // = batterijen van opstelling 2
   const K = Number(input._kpi_base_plus_creg);        // E_base + CREG (jaarbasis) — uit de frontend
   const capexVast = Number(input._kpi_capex_vast);    // laadpalen + PV + kabeltracé (excl cabine/batterij/verzwaring)
   const annf = Number(input._kpi_annfactor) || 1;     // factuurperiode → jaar (K is jaarbasis, factuur periode)
@@ -3491,11 +3512,11 @@ async function _dimensioneerMix(input, cap, job) {
     // realistisch netkosten-schema (identiek aan het financieel rapport, zie _tcoMeerjaar).
     // Cabine telt mee in de capex (LS→MS boven de grens). Onbalans blijft buiten (kers op de taart).
     const cabine = !!(z.cfg && z.cfg._spanning_omgezet) || (z.kva > LS_MAX_KVA);
-    const capexExcl = (Number.isFinite(capexVast) ? capexVast : 0) + k * BATT_UNIT_KWH * eurKwh + verzwaring * eurKva;
+    const capexExcl = (Number.isFinite(capexVast) ? capexVast : 0) + k * _bkwh * eurKwh + verzwaring * eurKva;
     const capex = capexExcl + (cabine ? cabineEur : 0);                     // capex INCL cabine
     const jaarkost = z.factuur * annf;                                      // factuur naar jaarbasis
     const netdeel = _distributieJF(z.resultaat) * annf;                     // netkosten (B+C+D), jaarbasis
-    const oh1 = ohVast + (k * BATT_UNIT_KW) * ohBatKw;                       // onderhoud jaar 1 (incl batterij)
+    const oh1 = ohVast + (k * _bkw) * ohBatKw;                       // onderhoud jaar 1 (incl batterij)
     const opex1 = oh1 + capex * (Number((tp && tp.verzekering_promille)) || 0) / 1000;   // opex jaar 1
     const rendement = (Number.isFinite(K) && capex > 0) ? ((K - jaarkost - opex1) / capex * 100) : null;  // netto
     const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);
@@ -3568,10 +3589,10 @@ function _opstellingUi(ui, opstelling, cap) {
     // v15.22.0: start meteen op een geheel aantal fysieke eenheden (120 kW / 260 kWh),
     // zodat de eerste proefdraai — en dus ook een direct geaccepteerde startmaat — al
     // op hele batterijen valt en 'aantal_batterijen' overal een integer is.
-    const _startEenheden = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / BATT_UNIT_KWH));
+    const _startEenheden = Math.max(1, Math.ceil((cap.advies_batterij_kwh || 0) / _buKwh(ui)));
     v.batterijCustom = {
       naam: 'Advies-batterij',
-      kw: _startEenheden * BATT_UNIT_KW, kwh: _startEenheden * BATT_UNIT_KWH,
+      kw: _startEenheden * _buKw(ui), kwh: _startEenheden * _buKwh(ui),
       aantal_batterijen: _startEenheden,
       dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
     };
@@ -3665,8 +3686,10 @@ function _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) {
 // aanbevolen, capex-arme instap (altijd het meest rendabel per geïnvesteerde euro).
 async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
   const _sub = r => _subJF(r);
+  const _bkw = _buKw(input), _bkwh = _buKwh(input);   // v15.54: module-maat (fallback 120/260)
   const P = Number(input.aansluiting_kva || input.aansluitingKva || input.toegangsvermogen_kw || 0) || 0;
-  const Nmax = Math.min(_MAX_BATT_UNITS_SRV, Math.max(1, Math.ceil((P + BATT_UNIT_KW) / BATT_UNIT_KW)));
+  // v15.54 (Johan): veelvouden van de gekozen module tot de cumulatieve kW ≈ het basisvermogen (P), max 6 stappen.
+  const Nmax = Math.min(6, Math.max(1, Math.floor(P / _bkw)));
   const annf = Number(input._kpi_annfactor) || 1;
   const eurKwh = Number((input._investering || {}).eur_per_kwh) || 0;
   const capexVast = Number(input._kpi_capex_vast) || 0;            // ~0 zonder laadplein (geen laadpalen/kabeltracé)
@@ -3687,23 +3710,23 @@ async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
   for (let k = 1; k <= Nmax; k++) {
     const cfg = JSON.parse(JSON.stringify(input));
     cfg.batterijId = 'CUSTOM';
-    cfg.batterijCustom = { naam: 'Batterij-sweep', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH,
+    cfg.batterijCustom = { naam: 'Batterij-sweep', kw: k * _bkw, kwh: k * _bkwh,
                            aantal_batterijen: k, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 };
-    _jlog(job, 'opstelling', `${k} batterij${k>1?'en':''} (${k*BATT_UNIT_KW} kW / ${k*BATT_UNIT_KWH} kWh) doorrekenen…`,
+    _jlog(job, 'opstelling', `${k} batterij${k>1?'en':''} (${k*_bkw} kW / ${k*_bkwh} kWh) doorrekenen…`,
           { maat: k, eenheid: 'batt' });
     const rS = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
     if (job) job.runs = (job.runs || 0) + 1;
     const jaarkost = _sub(rS) * annf;
     const netdeel = _distributieJF(rS) * annf;
-    const capex = (Number.isFinite(capexVast) ? capexVast : 0) + k * BATT_UNIT_KWH * eurKwh;
-    const oh1 = ohVast + (k * BATT_UNIT_KW) * ohBatKw;
+    const capex = (Number.isFinite(capexVast) ? capexVast : 0) + k * _bkwh * eurKwh;
+    const oh1 = ohVast + (k * _bkw) * ohBatKw;
     const opex1 = oh1 + capex * (Number((tp && tp.verzekering_promille)) || 0) / 1000;
     const besparingBruto = base0 - jaarkost;                        // > 0 = goedkoper dan Vandaag
     const besparingNet = base0Net - netdeel;
     const npv = (tp && capex > 0) ? _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) : null;
     const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);
     const rendement = (capex > 0) ? ((besparingBruto - opex1) / capex * 100) : null;   // netto jaar-1 rendement
-    punten.push({ k, kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, cfg, resultaat: rS,
+    punten.push({ k, kw: k * _bkw, kwh: k * _bkwh, cfg, resultaat: rS,
                   jaarkost, netdeel, capex, npv, tco, rendement, besparingBruto });
     _jlog(job, 'resultaat',
           `${k} batterij${k>1?'en':''}: factuur € ${Math.round(jaarkost).toLocaleString('nl-BE')}/jaar, ` +
@@ -3903,7 +3926,7 @@ app.post('/api/pv-sweep', async (req, res) => {
       if (k > 0) {
         cfg.batterijId = 'CUSTOM';
         cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
-          naam: 'PV-sweep-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, aantal_batterijen: k,
+          naam: 'PV-sweep-batterij', kw: k * _buKw(input), kwh: k * _buKwh(input), aantal_batterijen: k,   // v15.54: module-maat (fallback 120/260)
           dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
         });
       } else { cfg.batterijId = ''; cfg.batterijCustom = null; }
@@ -3961,7 +3984,7 @@ app.post('/api/opstelling', async (req, res) => {
     if (k > 0) {
       cfg.batterijId = 'CUSTOM';
       cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
-        naam: 'Groeistap-batterij', kw: k * BATT_UNIT_KW, kwh: k * BATT_UNIT_KWH, aantal_batterijen: k,
+        naam: 'Groeistap-batterij', kw: k * _buKw(input), kwh: k * _buKwh(input), aantal_batterijen: k,   // v15.54: module-maat (fallback 120/260)
         dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
       });
     } else { cfg.batterijId = ''; cfg.batterijCustom = null; }
@@ -3985,12 +4008,12 @@ app.post('/api/opstelling', async (req, res) => {
       },
       dimensionering: {
         haalbaar: true, iteraties: 0, beoordeeld_op: 'sturing', stappen: [], start_maat: null,
-        gekozen_maat: k > 0 ? k * BATT_UNIT_KWH : null, eenheid: k > 0 ? 'kWh' : null,
+        gekozen_maat: k > 0 ? k * _buKwh(input) : null, eenheid: k > 0 ? 'kWh' : null,
         verloren_dagen: 0, totaal_dagen: null,
       },
     },
     _ijk: _bouwIjk('opstelling-batterij','kost',
-      { aansluiting_kva:c, aantal_batterijen:k, batterij_kwh:k>0?k*BATT_UNIT_KWH:null,
+      { aansluiting_kva:c, aantal_batterijen:k, batterij_kwh:k>0?k*_buKwh(input):null,
         pv_kwp:+(cfg.pv_kwp||cfg.pvKwp||0)||null, profiel:cfg.profielNaam||cfg.profiel_naam||null,
         jaarverbruik_mwh:+(cfg.jaarverbruik||0)||null, laadpleinen:(cfg.laadpleinen||[]).length },
       { paper_capture_rate:0.018, forecast_modus:(cfg.bsp&&cfg.bsp.forecast_modus)||'realistic', kalibratie:1.0 },
