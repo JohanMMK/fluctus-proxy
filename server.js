@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.57.0 (03-08, Johan): CARRYOVER-FIX. /api/kamino/project whitelist nu het 'profiel'-veld in het
+//                projectrecord, zodat het gekozen verbruiksprofiel bewaard blijft en correct terugkomt bij de manager-
+//                open in de interactieve simulator (voorheen ontbrak het → default-profiel → verkeerde dispatch/cijfers).
+//                Alleen deze whitelist-regel; geen sim-logica gewijzigd.
 // Versie:        v15.56.0 (01-08, Johan): GROEIPAD STAPT MET DE GEBRUIKTE MODULE. /api/groeipad hardcodede nog k×120/260
 //                (over het hoofd gezien in v15.54); nu leest het input.batt_module via _buKw/_buKwh (fallback 120/260).
 //                Een kleine site groeit dus in 5/10- of 30/60-stappen i.p.v. altijd 120/260 — consistent met de sizing,
@@ -2471,6 +2475,7 @@ app.post('/api/kamino/project', async (req, res) => {
       adviseur: b.adviseur || bestaand.adviseur || {},
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
+      profiel: b.profiel || bestaand.profiel || null,                        // v15.57 (Johan 03-08): gekozen verbruiksprofiel — nodig voor carryover naar de interactieve simulator (manager-open)
       pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
       aangemaakt: bestaand.aangemaakt || new Date().toISOString(),
