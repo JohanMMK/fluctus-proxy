@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.56.0 (01-08, Johan): GROEIPAD STAPT MET DE GEBRUIKTE MODULE. /api/groeipad hardcodede nog k×120/260
+//                (over het hoofd gezien in v15.54); nu leest het input.batt_module via _buKw/_buKwh (fallback 120/260).
+//                Een kleine site groeit dus in 5/10- of 30/60-stappen i.p.v. altijd 120/260 — consistent met de sizing,
+//                de pv-sweep en /api/opstelling. Client stuurt batt_module al mee (simulator ≥ v1.63.34).
 // Versie:        v15.55.0 (01-08, Johan): KABELTRACÉ per batterij-module (KABEL_BATT_TRACE 5→1.500/30→4.000/120→15.000,
 //                was vast €15.000). /api/kamino/aansluiting rekent het batterij-kabeltracé nu op de gekozen module. De
 //                client (_kpi_capex_vast via _kabeltrace) doet hetzelfde voor de nominatie-sim-3-sweep. Zo wordt een
@@ -3855,6 +3859,9 @@ app.post('/api/groeipad', async (req, res) => {
   aansluitingen = [...new Set(aansluitingen.map((v) => Math.round(v)))].sort((a, b) => a - b);   // dedupe + oplopend
   const maxBatt = Math.max(1, Math.min(20, Math.round(Number(input.max_batterijen || 0)) || 1));
   if (!aansluitingen.length) return res.status(400).json({ error: 'aansluiting_kva of aansluitingen_kva (vast) is verplicht' });
+  // v15.56 (Johan 01-08): het groeipad stapt nu met de GEBRUIKTE batterijmodule (input.batt_module) i.p.v. de vaste
+  // 120/260. Zo groeit een kleine site in 5/10- of 30/60-stappen — consistent met de sizing/pv-sweep/opstelling.
+  const _gpKw = _buKw(input), _gpKwh = _buKwh(input);
   try {
     // Gevraagde laadenergie uit de input (Σ per plein), zodat we het % kunnen berekenen.
     const pleinen = Array.isArray(input.laadpleinen) ? input.laadpleinen : [];
@@ -3870,7 +3877,7 @@ app.post('/api/groeipad', async (req, res) => {
         cfg.geen_aansluiting_verhoging = true;   // v15.29.0: aansluiting mag NIET verhoogd worden → clip + tekort
         cfg.batterijId = 'CUSTOM';
         cfg.batterijCustom = Object.assign({}, cfg.batterijCustom || {}, {
-          naam: 'Groeipad-batterij', kw: k * 120, kwh: k * 260, aantal_batterijen: k,
+          naam: 'Groeipad-batterij', kw: k * _gpKw, kwh: k * _gpKwh, aantal_batterijen: k,   // v15.56: module-maat (fallback 120/260)
           dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000,
         });
         const r = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
@@ -3881,7 +3888,7 @@ app.post('/api/groeipad', async (req, res) => {
         const pct = gevraagdMwhTot > 0 ? Math.min(100, Math.round(geladenMwh / gevraagdMwhTot * 1000) / 10) : null;
         stappen.push({
           aansluiting_kva: c,   // v15.32.0: welke vaste aansluiting deze stap draaide
-          aantal_batterijen: k, kw: k * 120, kwh: k * 260,
+          aantal_batterijen: k, kw: k * _gpKw, kwh: k * _gpKwh,   // v15.56: module-maat (fallback 120/260)
           gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10,
           geladen_mwh: Math.round(geladenMwh * 10) / 10,
           geleverd_pct: pct,
@@ -3896,7 +3903,8 @@ app.post('/api/groeipad', async (req, res) => {
     return res.json({ ok: true, aansluiting_kva: aansluitingen[aansluitingen.length - 1],
       aansluitingen_kva: aansluitingen, max_batterijen: maxBatt,
       gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10, stappen,
-      _meta: { server_version: '15.32.0' } });
+      batt_module: { kw: _gpKw, kwh: _gpKwh },   // v15.56: welke module dit groeipad stapte
+      _meta: { server_version: '15.56.0' } });
   } catch (e) {
     console.error('[groeipad] fout:', e.message);
     return res.status(500).json({ error: 'groeipad gefaald: ' + e.message });
