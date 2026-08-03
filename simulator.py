@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.11.0 (base 'sturing' arbitrage-case piek-bewust: nieuwe lp_dispatch_month_arb draait
+#                spot-arbitrage + PIEKSHAVING + zelfconsumptie op kalendermaand-niveau. De maandpiek-term
+#                (maandpiek_B/12 + transport_maandpiek_D) verhuist piekshaving van de onbalans-windfall (B)
+#                naar de gegarandeerde base case (A). Vervangt per-dag stacked voor de base case; vlag
+#                piekshaving_arbitrage (default aan) valt terug op legacy stacked. ENKEL energy arbitrage +
+#                imbalance settlement — geen ander verdienmodel.)
+# Wijziging v1.11.0 vs v1.10.3: (1) nieuwe functie lp_dispatch_month_arb — maand-scope spot-arbitrage-LP
+#   met één monthly_peak-variabele + c_per_maand_kw-kost (identieke tarief-basis als lp_dispatch_month_bsp),
+#   SoC cascadeert per maand, GEEN nominatie/deviation/onbalans-machinerie. (2) Dispatch-routing: de base
+#   sturing (niet-BSP, niet-geen_arbitrage, batterij aanwezig) gaat nu per kalendermaand via deze functie
+#   i.p.v. per-dag lp_dispatch_day_stacked. Zelfconsumptie zat al inherent in de power-balance; piekshaving
+#   is nieuw in de base case. onbalans-pad (lp_dispatch_month_bsp) ONGEWIJZIGD.
 # Versie:        v1.10.3 (bestaande PV in de LP-run: aanvullingen['pv_zelfverbruik'] telt de netto-afname
 #                gross-up terug op de zonvorm — bruto-demand + totale PV in de dispatch, facturatie neutraal)
 # Wijziging v1.10.3 vs v1.10.2: build_consumption_profile ondersteunt een derde aanvulling 'pv_zelfverbruik'
@@ -1151,6 +1163,175 @@ def lp_dispatch_day(
         # van de cap zou in v1.6 niet meer mogelijk moeten zijn na clip.
         'over_afn_hard': [0.0] * H,
         'over_inj_hard': [0.0] * H,
+        'lp_status': status_str,
+    }
+
+
+def lp_dispatch_month_arb(
+    consumption_kw: list,         # H kwartieren — H = n_dagen × 96 voor één maand
+    pv_kw: list,                  # H kwartieren
+    spot_eur_mwh: list,           # H kwartieren (forecast voor dispatch-beslissing)
+    soc_start_kwh: float,         # SoC bij start van de maand
+    batterij: dict,               # kw, kwh, dod_pct, rte_pct, capex, max_cycli
+    aansluiting: dict,
+    contract: dict,
+    cyclus_kost_eur_per_kwh: float,
+    netbeheer_tarieven: dict,     # v1.11: maandpiek-kost in objective (piekshaving)
+    imb_eur_mwh: list = None,     # optioneel: IMB-prijs voor dispatch (None = spot)
+) -> dict:
+    """
+    v1.11 — Maand-niveau ARBITRAGE-LP met piekshaving + zelfconsumptie.
+
+    Zelfde economische kern als lp_dispatch_day (spot-arbitrage, cyclus-kost,
+    zachte overschrijdings-penalties), maar:
+      * H = n_dagen × 96 (hele kalendermaand) i.p.v. 96 → SoC cascadeert over de
+        maand en zelfconsumptie mag over dag-grenzen heen geschoven worden.
+      * één monthly_peak-variabele, bound door alle grid_in[t], met kost-term
+        c_per_maand_kw × monthly_peak in de objective → de LP shaaft de maandpiek
+        waar dat de gefactureerde capaciteitskost (maandpiek B + transport-maandpiek
+        D) verlaagt. Zo verhuist piekshaving van de onbalans-windfall (B) naar de
+        gegarandeerde base case (A).
+
+    GEEN nominatie/deviation/onbalans-machinerie (dat is lp_dispatch_month_bsp).
+    Zuivere day-ahead spot-arbitrage + passieve piekshaving/zelfconsumptie.
+
+    Returns: { p_charge[H], p_discharge[H], grid_in[H], grid_out[H], soc[H+1],
+               over_afn_zacht[H], over_inj_zacht[H], over_afn_hard[H],
+               over_inj_hard[H], monthly_peak, lp_status }
+    """
+    H = len(consumption_kw)
+    dt_h = 0.25
+
+    kw_batt = batterij['kw']
+    kwh_batt = batterij['kwh']
+    dod = batterij['dod_pct'] / 100.0 if batterij['dod_pct'] > 1.5 else batterij['dod_pct']
+    rte = batterij['rte_pct'] / 100.0 if batterij['rte_pct'] > 1.5 else batterij['rte_pct']
+    eta = math.sqrt(rte)
+
+    soc_min = 0.0
+    soc_max = kwh_batt * dod
+
+    tar_afname_kw = aansluiting.get('tarief_overschrijding_afname_eur_per_kw_jaar', 62.47)
+    tar_injectie_kw = aansluiting.get('tarief_overschrijding_injectie_eur_per_kw_jaar', 1.0)
+    pen_afname_zacht = tar_afname_kw / 12.0
+    pen_injectie_zacht = tar_injectie_kw / 12.0
+
+    max_afname_zacht = aansluiting.get('max_afname_kw_zacht', 1e9)
+    max_afname_hard = aansluiting.get('max_afname_kw_hard', 1e9)
+    max_injectie_zacht = aansluiting.get('max_injectie_kw_zacht', 1e9)
+    max_injectie_hard = aansluiting.get('max_injectie_kw_hard', 1e9)
+
+    injectie_toegelaten = contract.get('injectie_toegelaten', True)
+    if not injectie_toegelaten:
+        max_injectie_zacht = 0.0
+        max_injectie_hard = 0.0
+
+    # Contract-pricing (staffel) — zelfde als lp_dispatch_day
+    jaarverbruik_voor_pricing = contract.get('jaarverbruik_mwh', 0.0)
+    if not jaarverbruik_voor_pricing:
+        n_dagen_m = max(1, H // 96)
+        jaarverbruik_voor_pricing = sum(consumption_kw) * 0.25 * 365 / n_dagen_m / 1000.0
+    pricing = resolve_contract_pricing(contract, jaarverbruik_voor_pricing)
+    if pricing['modus'] == 'forfaitair':
+        markup_per_mwh = pricing['markup_imb']
+        markdown_per_mwh = pricing['markdown_imb']
+    else:
+        markup_per_mwh = pricing['markup_dam']
+        markdown_per_mwh = pricing['markdown_dam']
+    vergroening = pricing['vergroening']
+    gsc = pricing['gsc']
+    wkk = pricing['wkk']
+
+    dispatch_prijs = imb_eur_mwh if imb_eur_mwh is not None else spot_eur_mwh
+
+    # v1.11: piekshaving-prikkel op de GEREALISEERDE maandpiek. Identiek aan
+    # lp_dispatch_month_bsp: enkel de op de piek gefactureerde capaciteitstermen
+    # (maandpiek B / 12 + transport-maandpiek D) — toegangs/beschikbaar vermogen
+    # zijn sunk (op contract) en zitten hier NIET in, zodat de LP de reeds-betaalde
+    # kop-ruimte tot het toegangsvermogen vrij voor arbitrage gebruikt en de piek
+    # enkel shaaft waar dat de maandpiek-kost écht verlaagt.
+    _tar_maandpiek_B    = (netbeheer_tarieven or {}).get('maandpiek_eur_kw_jaar', 0.0)
+    _tar_tr_maandpiek_D = (netbeheer_tarieven or {}).get('transport_maandpiek_eur_kw_mnd', 0.0)
+    c_per_maand_kw = (_tar_maandpiek_B / 12.0) + _tar_tr_maandpiek_D
+
+    prob = pulp.LpProblem('battery_dispatch_month_arb', pulp.LpMinimize)
+
+    # v1.8.4-analoog: grid_in nooit boven de natuurlijke lastpiek (geen piek-inflatie
+    # door arbitrage). Piekshaving eronder blijft mogelijk.
+    _gin_cap = _gin_cap_normaal(consumption_kw, pv_kw, max_afname_hard)
+
+    p_ch = [pulp.LpVariable(f'pch_{t}', 0, kw_batt) for t in range(H)]
+    p_dis = [pulp.LpVariable(f'pdis_{t}', 0, kw_batt) for t in range(H)]
+    grid_in = [pulp.LpVariable(f'gin_{t}', 0, _gin_cap) for t in range(H)]
+    grid_out = [pulp.LpVariable(f'gout_{t}', 0, max_injectie_hard) for t in range(H)]
+    soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
+    over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
+    over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+
+    # v1.11: één monthly_peak over de hele maand, bound door alle grid_in[t].
+    monthly_peak = pulp.LpVariable('monthly_peak', 0, _gin_cap)
+
+    prob += soc[0] == soc_start_kwh
+
+    for t in range(H):
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] == consumption_kw[t]
+        prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
+        prob += monthly_peak >= grid_in[t]  # v1.11 piekshaving
+        prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
+        prob += over_inj_zacht[t] >= grid_out[t] - max_injectie_zacht
+        prob += p_ch[t] + p_dis[t] <= kw_batt
+
+    obj_terms = []
+    eps_penalty = 1.0 / 1000.0
+    for t in range(H):
+        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
+        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh) / 1000.0
+        obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
+        obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
+        obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
+        obj_terms.append(pen_afname_zacht * over_afn_zacht[t])
+        obj_terms.append(pen_injectie_zacht * over_inj_zacht[t])
+        obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
+    # v1.11: piekshaving-kost op de gerealiseerde maandpiek
+    obj_terms.append(c_per_maand_kw * monthly_peak)
+
+    prob += pulp.lpSum(obj_terms)
+
+    # Maand-LP (arbitrage) is groter dan dag-LP maar veel lichter dan het BSP-maand-
+    # LP (geen nominatie/deviation-variabelen). 30s timeLimit is ruime marge.
+    solver = pulp.PULP_CBC_CMD(msg=0, timeLimit=30)
+    status = prob.solve(solver)
+    status_str = pulp.LpStatus[status]
+    if status_str != 'Optimal':
+        log.warning(f"Maand-arbitrage-LP non-optimal: {status_str} — output kan onnauwkeurig zijn")
+
+    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
+    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
+    grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
+    soc_vals = [pulp.value(v) or 0.0 for v in soc]
+
+    _tol = 0.01
+    if grid_in_vals and max(grid_in_vals) > max_afname_hard + _tol:
+        grid_in_vals = [min(v, max_afname_hard) for v in grid_in_vals]
+    if grid_out_vals and max(grid_out_vals) > max_injectie_hard + _tol:
+        grid_out_vals = [min(v, max_injectie_hard) for v in grid_out_vals]
+    if p_ch_vals and max(p_ch_vals) > kw_batt + _tol:
+        p_ch_vals = [min(v, kw_batt) for v in p_ch_vals]
+    if p_dis_vals and max(p_dis_vals) > kw_batt + _tol:
+        p_dis_vals = [min(v, kw_batt) for v in p_dis_vals]
+
+    return {
+        'p_charge': p_ch_vals,
+        'p_discharge': p_dis_vals,
+        'grid_in': grid_in_vals,
+        'grid_out': grid_out_vals,
+        'soc': soc_vals,
+        'over_afn_zacht': [pulp.value(v) or 0.0 for v in over_afn_zacht],
+        'over_inj_zacht': [pulp.value(v) or 0.0 for v in over_inj_zacht],
+        'over_afn_hard': [0.0] * H,
+        'over_inj_hard': [0.0] * H,
+        'monthly_peak': pulp.value(monthly_peak) or 0.0,
         'lp_status': status_str,
     }
 
@@ -2789,7 +2970,16 @@ def run_simulation(inp: dict) -> dict:
     if geen_arbitrage:
         stacked_modus = False
         bsp_actief = False
-    
+
+    # v1.11: BASE arbitrage-case (sturing) piek-bewust maken. De maand-arbitrage-LP
+    # (lp_dispatch_month_arb) doet spot-arbitrage + piekshaving + zelfconsumptie op
+    # kalendermaand-niveau. Ze vervangt de per-dag stacked-dispatch voor de base case
+    # (piekshaving vereist maand-scope). Vlag piekshaving_arbitrage default aan; op
+    # False valt de sturing terug op de legacy per-dag stacked-LP (geen piekshaving).
+    _piek_arb = bool(inp.get('piekshaving_arbitrage', True))
+    if _piek_arb and not bsp_actief and not geen_arbitrage and batt['kwh'] > 0 and batt['kw'] > 0:
+        stacked_modus = False  # maand-arbitrage supersedes per-dag stacked
+
     # === SNELLE PAD 1: geen batterij EN geen PV → geen LP nodig ===
     skip_lp = (batt['kwh'] <= 0 or batt['kw'] <= 0) and (max(pv_kw) if pv_kw else 0) <= 0
     # === SNELLE PAD 2: geen batterij MAAR wel PV → geen LP nodig (PV is passief) ===
@@ -2990,21 +3180,13 @@ def run_simulation(inp: dict) -> dict:
                     f"  BSP-maand {_maand_label} ({_n_dagen_maand} dagen) klaar: "
                     f"monthly_peak={_mp:.1f} kW, status={result.get('lp_status', '?')}"
                 )
-        else:
+        elif stacked_modus:
+            # v1.5 stacked DAM+IMB-arbitrage: per-dag LP (nominatie op DAM,
+            # deviatie op IMB). Blijft per-dag (geen maandpiek-term).
             for d in range(n_dagen):
                 i0 = d * 96
                 i1 = i0 + 96
-                result = lp_dispatch_day(
-                    consumption_forecast[i0:i1],
-                    pv_forecast[i0:i1],
-                    spot_forecast[i0:i1],
-                    soc_kwh,
-                    batt,
-                    inp['aansluiting'],
-                    inp['contract'],
-                    cyclus_kost,
-                    imb_eur_mwh=None,
-                ) if not stacked_modus else lp_dispatch_day_stacked(
+                result = lp_dispatch_day_stacked(
                     consumption_forecast[i0:i1],
                     pv_forecast[i0:i1],
                     spot_forecast[i0:i1],
@@ -3015,15 +3197,13 @@ def run_simulation(inp: dict) -> dict:
                     inp['contract'],
                     cyclus_kost,
                 )
-                if stacked_modus:
-                    nom_grid_in_all.extend(result['nom_grid_in'])
-                    nom_grid_out_all.extend(result['nom_grid_out'])
+                nom_grid_in_all.extend(result['nom_grid_in'])
+                nom_grid_out_all.extend(result['nom_grid_out'])
                 grid_in_all.extend(result['grid_in'])
                 grid_out_all.extend(result['grid_out'])
                 p_dis_all.extend(result['p_discharge'])
                 p_ch_all.extend(result['p_charge'])
                 soc_all.extend(result['soc'][1:])
-                # v1.6 wijziging F: SoC-cascade sanity check
                 _new_soc = result['soc'][-1] if result['soc'] else None
                 _soc_max = batt['kwh'] * dod
                 if _new_soc is None or _new_soc < -0.01 or _new_soc > _soc_max + 0.01:
@@ -3032,10 +3212,6 @@ def run_simulation(inp: dict) -> dict:
                     )
                     _new_soc = _soc_max * 0.5
                 soc_kwh = max(0.0, min(_soc_max, _new_soc))
-                # v1.6 wijziging G: lp_diagnostics teller. lp_dispatch_day en
-                # _stacked hebben geen retry-ladder, dus elke niet-Optimal-dag
-                # zit in een eigen verloren_dagen-bucket-equivalent (we
-                # registreren ze als verloren wanneer status != Optimal).
                 _lp_status = result.get('lp_status', 'Optimal')
                 if _lp_status == 'Optimal':
                     lp_optimal_count += 1
@@ -3045,9 +3221,76 @@ def run_simulation(inp: dict) -> dict:
                 over_afn_hard_all.extend(result['over_afn_hard'])
                 over_inj_zacht_all.extend(result['over_inj_zacht'])
                 over_inj_hard_all.extend(result['over_inj_hard'])
-
                 if (d + 1) % 30 == 0:
-                    log.info(f"  LP-dispatch dag {d+1}/{n_dagen}…")
+                    log.info(f"  LP-dispatch (stacked) dag {d+1}/{n_dagen}…")
+        else:
+            # === v1.11: BASE 'sturing' = maand-niveau spot-arbitrage MET piekshaving ===
+            # Per kalendermaand één LP (lp_dispatch_month_arb) i.p.v. per dag. Dit
+            # brengt piekshaving (maandpiek-term) + cross-dag-zelfconsumptie in de
+            # base case A, zonder onbalans/nominatie. SoC cascadeert per maand.
+            _netbeheer_arb = inp.get('netbeheer', {}).get('tarieven', {})
+            _mgrenzen = []
+            if sim_timestamps:
+                _st = 0
+                _cy = sim_timestamps[0].year
+                _cm = sim_timestamps[0].month
+                for _i, _ts in enumerate(sim_timestamps):
+                    if _ts.year != _cy or _ts.month != _cm:
+                        _mgrenzen.append((_st, _i))
+                        _st = _i
+                        _cy = _ts.year
+                        _cm = _ts.month
+                _mgrenzen.append((_st, N))
+            else:
+                _mgrenzen = [(0, N)]
+            log.info(f"Base sturing (arbitrage): {len(_mgrenzen)} kalendermaand-LP('s) met piekshaving")
+            for (i0, i1) in _mgrenzen:
+                _Hm = i1 - i0
+                if _Hm <= 0:
+                    continue
+                _nd = max(1, _Hm // 96)
+                result = lp_dispatch_month_arb(
+                    consumption_forecast[i0:i1],
+                    pv_forecast[i0:i1],
+                    spot_forecast[i0:i1],
+                    soc_kwh,
+                    batt,
+                    inp['aansluiting'],
+                    inp['contract'],
+                    cyclus_kost,
+                    _netbeheer_arb,
+                    imb_eur_mwh=None,
+                )
+                grid_in_all.extend(result['grid_in'])
+                grid_out_all.extend(result['grid_out'])
+                p_dis_all.extend(result['p_discharge'])
+                p_ch_all.extend(result['p_charge'])
+                soc_all.extend(result['soc'][1:])
+                _new_soc = result['soc'][-1] if result['soc'] else None
+                _soc_max = batt['kwh'] * dod
+                if _new_soc is None or _new_soc < -0.01 or _new_soc > _soc_max + 0.01:
+                    log.warning(
+                        f"SoC cascade-defect maand-arb [{i0}:{i1}]: soc[-1]={_new_soc}, reset naar 0.5 × soc_max"
+                    )
+                    _new_soc = _soc_max * 0.5
+                soc_kwh = max(0.0, min(_soc_max, _new_soc))
+                _lp_status = result.get('lp_status', 'Optimal')
+                if _lp_status == 'Optimal':
+                    lp_optimal_count += _nd
+                else:
+                    for _d in range(_nd):
+                        _idx = i0 + _d * 96
+                        if _idx < N:
+                            lp_verloren_dagen.append(sim_timestamps[_idx].date().isoformat())
+                over_afn_zacht_all.extend(result['over_afn_zacht'])
+                over_afn_hard_all.extend(result['over_afn_hard'])
+                over_inj_zacht_all.extend(result['over_inj_zacht'])
+                over_inj_hard_all.extend(result['over_inj_hard'])
+                _mp = result.get('monthly_peak', 0.0)
+                log.info(
+                    f"  Arbitrage-maand [{i0}:{i1}] ({_nd} dagen) klaar: "
+                    f"monthly_peak={_mp:.1f} kW, status={_lp_status}"
+                )
 
     log.info(
         f"LP-dispatch klaar: {n_dagen} dagen, eind-SoC = {soc_kwh:.1f} kWh "
