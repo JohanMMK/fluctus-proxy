@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.55.0 (01-08, Johan): KABELTRACÉ per batterij-module (KABEL_BATT_TRACE 5→1.500/30→4.000/120→15.000,
+//                was vast €15.000). /api/kamino/aansluiting rekent het batterij-kabeltracé nu op de gekozen module. De
+//                client (_kpi_capex_vast via _kabeltrace) doet hetzelfde voor de nominatie-sim-3-sweep. Zo wordt een
+//                kleine batterij (bv. 30/60) rendabel i.p.v. door een vast €15k-tracé onder de 10% gedrukt te worden.
 // Versie:        v15.54.0 (01-08, Johan): BATTERIJ-MODULE OP MAAT. Drie modules (5/10, 30/60, 120/260); de sizing-
 //                functies (_dimZet, _mixZoekVerzwaring, _dimensioneerMix, _opstellingUi, _batterijSweepGebouw, pv-sweep,
 //                /api/opstelling, /api/kamino/aansluiting) lezen de module via _buKw/_buKwh uit input.batt_module met
@@ -2807,7 +2811,8 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         if (job) job.runs_verwacht = 13;
         // Investeringsconstanten voor een gegeven PV — IDENTIEK aan simulator.html:9437-9469.
         const _consts = (pvKwp) => {
-          const kabeltrace = 15000 + (pvKwp > 0 ? 10000 : 0);   // L=0, batterij + PV (= _kabeltrace(true) zonder laadplein/override)
+          const kabeltrace = _kabelBattTrace(_kaModule) + (pvKwp > 0 ? 10000 : 0);   // v15.55: batterij-kabeltracé per module (5→1.500,30→4.000,120→15.000) + PV
+
           const baseNet = dagen > 0 ? (+bc.totaalDistributieExclBtw || 0) * (365 / dagen) : null;
           return {
             _investering: { cabine_eur: 90000, eur_per_kva: 100, eur_per_kwh: 350, kabel_pct: 0.20, horizon_jaar: 15 },
@@ -3259,6 +3264,9 @@ const _MAX_BATT_UNITS_SRV = 40;   // veiligheidsplafond op de gebouw-batterij-sw
 // geen regressie als de module ontbreekt). Keuze/veelvouden gebeuren client-side (max 6 stappen); de server sizet
 // gewoon op de meegegeven module. GEEN combinaties van modules in één simulatie.
 const BATT_MODULES = [ { kw: 5, kwh: 10 }, { kw: 30, kwh: 60 }, { kw: 120, kwh: 260 } ];
+// v15.55 (Johan 01-08): kabeltracé voor de batterij schaalt mee met de module (was vast €15.000). Gekeyed op module-kW.
+const KABEL_BATT_TRACE = { 5: 1500, 30: 4000, 120: 15000 };
+function _kabelBattTrace(mod){ const k = (mod && +mod.kw) || BATT_UNIT_KW; return (KABEL_BATT_TRACE[k] != null) ? KABEL_BATT_TRACE[k] : 15000; }
 function _buKw(x){ return (x && x.batt_module && +x.batt_module.kw > 0) ? +x.batt_module.kw : BATT_UNIT_KW; }
 function _buKwh(x){ return (x && x.batt_module && +x.batt_module.kwh > 0) ? +x.batt_module.kwh : BATT_UNIT_KWH; }
 // grootste module met kW < basisvermogen; onder 5 kW → de kleinste (5/10).
