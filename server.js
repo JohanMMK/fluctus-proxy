@@ -464,7 +464,7 @@ app.use(compression());
 app.use(express.json({ limit: '20mb' }));
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   // v15.15.1 hotfix: Authorization toegestaan voor FluctusAppAuth-calls
   // (app-access/check, activity/log, scenario-routes met Bearer-token).
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -1300,6 +1300,11 @@ const PROJECTEN_DB = new Set();
 const SUPABASE_URL         = (process.env.SUPABASE_URL || '').replace(/\/+$/, '');
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 const SUPABASE_OK          = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
+// Academy-backend (fluctus-academy-backend) voor de uitnodigingsmail (Brevo).
+// De proxy maakt zelf het profiel aan (service-role) en TRIGGERT enkel de mail
+// bij de academy; Brevo-config blijft ongewijzigd op de academy-backend.
+// Zonder deze env wordt het profiel wél aangemaakt maar de mail overgeslagen.
+const ACADEMY_BACKEND_URL  = (process.env.ACADEMY_BACKEND_URL || '').replace(/\/+$/, '');
 // Rollback-schakelaar: FLUCTUS_AUTH_ENFORCE=false schakelt scenario-gating
 // uit zonder redeploy van code. Zonder Supabase-env automatisch uit.
 const AUTH_ENFORCE = SUPABASE_OK && (process.env.FLUCTUS_AUTH_ENFORCE || 'true') === 'true';
@@ -1512,6 +1517,163 @@ app.get('/api/manager/activity', async (req, res) => {
     });
   } catch (e) {
     console.error(`[manager/activity] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+//  USER MANAGEMENT (manager-only) — toegang tot de portal-tools beheren.
+//  Bouwt voort op het bestaande 9a-model (profiles + user_app_access). Geen
+//  nieuwe tabellen. Alle endpoints: manager-only via resolveUser + _isManager.
+//  user_app_access.user_id == profiles.auth_uid == auth.users.id.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Kleine guard: retourneert manager-user of null (response al verstuurd bij null).
+async function _managerGuard(req, res) {
+  if (!SUPABASE_OK) { res.status(503).json({ error: 'auth_niet_geconfigureerd' }); return null; }
+  const u = await resolveUser(req);
+  if (!u) { res.status(401).json({ error: 'niet ingelogd' }); return null; }
+  if (!_isManager(u)) { res.status(403).json({ error: 'alleen voor managers' }); return null; }
+  return u;
+}
+
+// GET /api/manager/users
+// → { users:[{ auth_uid, email, name, company, role, status, apps:[app_id] }] }
+// Toont alle profielen + de per-gebruiker toegekende apps. Gebruikers zonder
+// auth_uid (uitgenodigd maar nog nooit ingelogd) hebben auth_uid=null → app-
+// toegang kan pas toegekend worden zodra ze één keer ingelogd zijn.
+app.get('/api/manager/users', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const profs = await _sbRest('profiles?select=auth_uid,email,name,company,role,status&order=email.asc');
+    let grants = [];
+    try { grants = await _sbRest('user_app_access?select=user_id,app_id'); }
+    catch (e) { console.warn(`[manager/users] grants-lookup faalde: ${e.message}`); }
+    const perUser = {};
+    for (const g of (grants || [])) {
+      if (!g.user_id) continue;
+      (perUser[g.user_id] = perUser[g.user_id] || []).push(g.app_id);
+    }
+    const users = (profs || []).map(p => ({
+      auth_uid: p.auth_uid || null,
+      email: p.email || '',
+      name: p.name || p.naam || p.full_name || '',
+      company: p.company || '',
+      role: p.role || 'seller',
+      status: p.status || 'active',
+      apps: p.auth_uid ? (perUser[p.auth_uid] || []) : [],
+    }));
+    return res.json({ users });
+  } catch (e) {
+    console.error(`[manager/users] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/manager/app-access   { user_id, app_id }   → toegang toekennen
+app.post('/api/manager/app-access', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  const b = req.body || {};
+  const userId = b.user_id, appId = b.app_id;
+  if (!userId || !appId) return res.status(400).json({ error: 'user_id en app_id verplicht' });
+  try {
+    await _sbRest('user_app_access?on_conflict=user_id,app_id', {
+      method: 'POST',
+      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
+      body: { user_id: userId, app_id: appId },
+    });
+    return res.json({ ok: true, user_id: userId, app_id: appId, toegang: true });
+  } catch (e) {
+    console.error(`[manager/app-access grant] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// DELETE /api/manager/app-access  { user_id, app_id }  (of ?user_id=&app_id=)
+app.delete('/api/manager/app-access', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  const src = Object.assign({}, req.query || {}, req.body || {});
+  const userId = src.user_id, appId = src.app_id;
+  if (!userId || !appId) return res.status(400).json({ error: 'user_id en app_id verplicht' });
+  try {
+    await _sbRest(
+      `user_app_access?user_id=eq.${encodeURIComponent(userId)}&app_id=eq.${encodeURIComponent(appId)}`,
+      { method: 'DELETE', headers: { 'Prefer': 'return=minimal' } });
+    return res.json({ ok: true, user_id: userId, app_id: appId, toegang: false });
+  } catch (e) {
+    console.error(`[manager/app-access revoke] fout: ${e.message}`);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// POST /api/manager/user   { action, ... }
+//   action='invite'  { email, name?, company? } → profiel (role seller,
+//                      status invited) aanmaken + academy-mail triggeren.
+//                      Bestaat het profiel al → 409 (gebruik rol/status/toegang).
+//   action='role'    { email, role: 'manager'|'seller' }
+//   action='status'  { email, status: 'active'|'inactive'|'invited' }
+app.post('/api/manager/user', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  const b = req.body || {};
+  const action = String(b.action || '').toLowerCase();
+  try {
+    if (action === 'invite') {
+      const email = String(b.email || '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'geldig e-mailadres verplicht' });
+      // Bestaat het profiel al? Dan NIET overschrijven (geen downgrade van rol/status).
+      const bestaand = await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}&select=email`);
+      if (Array.isArray(bestaand) && bestaand.length) {
+        return res.status(409).json({ error: 'bestaat_al', melding: 'Deze gebruiker bestaat al. Gebruik rol/status/toegang.' });
+      }
+      // 1) Profiel aanmaken (service-role) — gegarandeerd, ook als de mail faalt.
+      await _sbRest('profiles', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=minimal' },
+        body: { email, name: b.name || '', company: b.company || '', role: 'seller', status: 'invited' },
+      });
+      // 2) Academy-mail triggeren (Brevo blijft op de academy-backend).
+      let mail = { sent: false, reden: 'academy_url_niet_geconfigureerd' };
+      if (ACADEMY_BACKEND_URL) {
+        try {
+          const r = await fetch(`${ACADEMY_BACKEND_URL}/api/invite`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': req.headers['authorization'] || '' },
+            body: JSON.stringify({ email, name: b.name || '', company: b.company || '' }),
+          });
+          const j = await r.json().catch(() => ({}));
+          mail = r.ok ? { sent: true, queued: !!j.emailQueued } : { sent: false, reden: (j.error || ('http_' + r.status)) };
+        } catch (e) { mail = { sent: false, reden: e.message }; }
+      }
+      return res.json({ ok: true, email, profiel: 'aangemaakt', mail });
+    }
+
+    if (action === 'role') {
+      const email = String(b.email || '').trim().toLowerCase();
+      const role = String(b.role || '').toLowerCase();
+      if (!email) return res.status(400).json({ error: 'email verplicht' });
+      if (role !== 'manager' && role !== 'seller') return res.status(400).json({ error: "role moet 'manager' of 'seller' zijn" });
+      await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}`, {
+        method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: { role },
+      });
+      _AUTH_CACHE.clear(); // rol-wijziging meteen laten doorwerken
+      return res.json({ ok: true, email, role });
+    }
+
+    if (action === 'status') {
+      const email = String(b.email || '').trim().toLowerCase();
+      const status = String(b.status || '').toLowerCase();
+      if (!email) return res.status(400).json({ error: 'email verplicht' });
+      if (!['active', 'inactive', 'invited'].includes(status)) return res.status(400).json({ error: "status moet 'active', 'inactive' of 'invited' zijn" });
+      await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}`, {
+        method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: { status },
+      });
+      _AUTH_CACHE.clear(); // status-wijziging meteen laten doorwerken
+      return res.json({ ok: true, email, status });
+    }
+
+    return res.status(400).json({ error: "onbekende action (invite|role|status)" });
+  } catch (e) {
+    console.error(`[manager/user ${action}] fout: ${e.message}`);
     return res.status(500).json({ error: e.message });
   }
 });
