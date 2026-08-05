@@ -1409,7 +1409,11 @@ function _isManager(u) {
 }
 
 async function _heeftAppToegang(u, appId) {
-  if (!u || u.status !== 'active') return false;
+  // Enkel een gedeactiveerde gebruiker wordt geblokkeerd. 'invited' (uitgenodigd,
+  // nog niet geactiveerd) én 'active' krijgen toegang volgens hun toekenningen —
+  // zo werkt een toegekende tool meteen zodra de verkoper voor het eerst inlogt.
+  // 'Deactiveren' (status inactive) is de blokkeer-schakelaar.
+  if (!u || u.status === 'inactive') return false;
   if (_isManager(u)) return true; // managers impliciet alle apps
   try {
     const rows = await _sbRest(
