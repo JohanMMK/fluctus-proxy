@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.60.0 (08-08, Johan): APP-TOEGANG TOEKENNEN FIX. POST /api/manager/app-access gaf HTTP 500 bij
+//                het aanzetten van een app voor een actieve verkoper (bv. supervision@directmarket.energy): de insert
+//                gebruikte `on_conflict=user_id,app_id`, wat een unique-constraint op (user_id,app_id) in
+//                user_app_access vereist — ontbreekt die, dan faalt PostgREST (42P10) en springt het vinkje in de UI
+//                terug. Nu idempotent zónder on_conflict (bestaanscheck → INSERT indien nodig): geen constraint meer
+//                nodig, dubbel toekennen faalt niet. Gebruikers.html (v1.1) toont de exacte serverfout nu in een alert.
 // Versie:        v15.59.0 (08-08, Johan): PARALLELLE DISPATCH-RUNS (snelheid sim-3/groeipad/pv-sweep). De sim-3-
 //                zoektocht bestaat uit ONAFHANKELIJKE _runSimulatorOnce-spawns: de mix-zoeklus (k=1..N), de
 //                batterij-sweep, de drie opstellingen (verhogen/batterij/mix), elke opstelling z'n drie sturingen,
@@ -1633,11 +1639,21 @@ app.post('/api/manager/app-access', async (req, res) => {
   const userId = b.user_id, appId = b.app_id;
   if (!userId || !appId) return res.status(400).json({ error: 'user_id en app_id verplicht' });
   try {
-    await _sbRest('user_app_access?on_conflict=user_id,app_id', {
-      method: 'POST',
-      headers: { 'Prefer': 'resolution=merge-duplicates,return=minimal' },
-      body: { user_id: userId, app_id: appId },
-    });
+    // v15.60.0: IDEMPOTENT ZONDER on_conflict. De vorige versie gebruikte
+    // `on_conflict=user_id,app_id` + merge-duplicates; dat VEREIST een unique-constraint op
+    // (user_id, app_id) in user_app_access. Ontbreekt die, dan geeft PostgREST HTTP 500 (42P10:
+    // "no unique or exclusion constraint matching the ON CONFLICT specification") en springt het
+    // vinkje in de UI terug. We doen nu eerst een bestaanscheck en INSERTen enkel indien nodig →
+    // geen constraint meer nodig, en dubbel toekennen faalt niet meer.
+    const bestaand = await _sbRest(
+      `user_app_access?select=app_id&user_id=eq.${encodeURIComponent(userId)}&app_id=eq.${encodeURIComponent(appId)}&limit=1`);
+    if (!Array.isArray(bestaand) || bestaand.length === 0) {
+      await _sbRest('user_app_access', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=minimal' },
+        body: { user_id: userId, app_id: appId },
+      });
+    }
     return res.json({ ok: true, user_id: userId, app_id: appId, toegang: true });
   } catch (e) {
     console.error(`[manager/app-access grant] fout: ${e.message}`);
