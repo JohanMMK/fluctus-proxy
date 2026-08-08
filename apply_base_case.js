@@ -1,43 +1,39 @@
 // ============================================================================
 // FLUCTUS — applyBaseCaseToWizard (canonical reference)
-// Versie:        v1.17 (Maak-Voorstel + BESS-Custom — sessie 5b, header-only bump)
-// Geproduceerd:  2026-05-13 21:00 UTC
+// Versie:        v1.18 (Per-dag-vermogen vangnet — YUSO/Luminus-presentatie)
+// Geproduceerd:  2026-08-07
 // Doelomgeving:  Referentie-bestand (canonical) in JohanMMK/fluctus-proxy.
-//                Geïnlined in Simulator.txt v1.17.0 voor productie in Odoo.
+//                Geïnlined in Simulator.txt voor productie in Odoo.
 // Repo:          JohanMMK/fluctus-proxy
-// Vereist:       server.js v15.12.0+ (BESS-CUSTOM detect + batch-bewaren endpoint)
-//                Simulator.txt v1.17.0+ (Maak-Voorstel-flow + BESS-Custom UI)
 // ----------------------------------------------------------------------------
-// Wijzigingen v1.17 vs v1.16:
-//   - HEADER-ONLY BUMP. Geen logica-wijzigingen.
-//   - state.klantBtw, state.leveringsadres en state.scenarioActie='nieuw' (uit
-//     v1.16) zijn de fundering voor de "Maak voorstel"-flow in sessie 5b. Deze
-//     velden worden door Simulator.txt v1.17.0 gelezen om Sc2/Sc3/Sc4 op te
-//     bouwen, maar de mapping zelf in deze functie blijft 1-op-1 hetzelfde.
-//   - Anti-regressie: validate_v2.py hoeft niet aangepast want geen logica-
-//     wijziging. Alle bestaande tests (Smartunit, Steylaert, Advario, Vema)
-//     produceren identieke {status, reasons, state, gotoStep} output.
+// Wijzigingen v1.18 vs v1.17:
+//   - PER-DAG-VERMOGEN VANGNET. Sommige leveranciers (bevestigd: YUSO; wellicht
+//     Luminus) tonen de VERMOGENS-posten (toegangsvermogen, maandpiek,
+//     overschrijding) als "kW × aantal dagen", met eenheidsprijs = maandtarief/
+//     dagen. Het BEDRAG klopt, maar de afgelezen kW is ~dagen× te hoog
+//     (bv. 7.500 "kW" toegangsvermogen op een periode van 30 dagen = 250 kW echt;
+//     6.641 "kW" maandpiek = 221 kW). Zonder correctie leest de simulator een
+//     absurde aansluiting/piek → aansluiting-/batterij-sizing, piekshaving en
+//     load factor 30× fout. Dit speelt ENKEL bij de kW-posten, niet bij kWh.
+//   - Fix (defensief, zelf-consistent): detecteer een onmogelijk lage load factor
+//     op aansluitVermogenKva over de factuurperiode; is die < 2% én na deling door
+//     het aantal dagen weer plausibel (≤ 100%), dan is het een per-dag-presentatie
+//     → deel door het aantal dagen. Nieuwe reason-code W7 (WAARSCHUWING).
+//   - Helpers _dagenTussen() en _perDagVermogen() toegevoegd (+ in _internal voor tests).
+//   - LET OP: dit is een VANGNET in de mapper. De ROBUUSTE fix (Methode A:
+//     echte_kW = bedrag ÷ maandtarief-per-kW uit de tariefkaart; ratio ≈ dagen ⇒
+//     per-dag) hoort in de EXTRACTIE-laag die `bc` bouwt (server-side), waar de
+//     rauwe kW-postregels (volume/eenheidsprijs/bedrag) én de maandpiek zitten.
+//     Deze mapper ziet enkel bc.aansluitVermogenKva.
 // ----------------------------------------------------------------------------
+// Eerdere wijzigingen v1.17 vs v1.16:
+//   - HEADER-ONLY BUMP. Geen logica-wijzigingen. (Maak-Voorstel + BESS-Custom.)
+//   - state.klantBtw, state.leveringsadres en state.scenarioActie='nieuw' als
+//     fundering voor de "Maak voorstel"-flow (sessie 5b).
 // Eerdere wijzigingen v1.16 vs v1.15:
-//   - state.klantBtw en state.leveringsadres expliciet als top-level velden
-//     gemarkeerd (zaten al impliciet in state.baseCase). Wordt door sessie 5b
-//     "Maak voorstel"-flow gebruikt om in scenario 4 (commerciële basis)
-//     meteen het BTW-nummer + leveringsadres beschikbaar te hebben.
-//   - state.scenarioActie='nieuw' geset zodat de Simulator.txt PDF-CTA-logica
-//     weet dat dit een nieuw project is (vs. 'staand' bij scenario-load).
-//   - state.project en state.scenario blijven RUW (klantnaam + "base case <nr>").
-//     De Simulator.txt v1.16+ _fmodApplyToState overschrijft deze met de
-//     clean+scenario1-naam variant. Voor backwards-compat met sessie-3 tests
-//     van applyBaseCaseToWizard zelf blijven de oude waardes hier staan.
-//
+//   - state.klantBtw / state.leveringsadres expliciet top-level; scenarioActie='nieuw'.
 // Eerdere wijzigingen v1.15 vs v1.14:
-//   - gotoStep nu standaard 7 (= stap 8 PERIODE) zodat verkoper de groene
-//     "📎 Periode komt uit factuur" badge visueel kan verifiëren vóór hij
-//     doorklikt naar resultaat. Bij ontbrekend kVA blijft 6 (= stap 7 aansluiting).
-//   - state object uitgebreid met Simulator.txt-compatibele veldnamen:
-//     jaar='specifiek', periodeVan, periodeTot, baseCaseLoskoppeld=false.
-//     Oude velden (periode, kVA, jaarverbruikMWh, profiel) blijven beschikbaar
-//     voor backwards-compat met sessie 3 tests.
+//   - gotoStep standaard 7 (stap 8 PERIODE); Simulator.txt-compatibele veldnamen.
 // ============================================================================
 
 (function (root) {
@@ -69,6 +65,31 @@
       if (m && adresUpper.indexOf(m[1].toUpperCase()) !== -1) return gemeenten[j];
     }
     return gemeenten[0];
+  }
+
+  // v1.18: aantal dagen van de factuurperiode (inclusief begin- en einddag).
+  // Aanvaardt 'YYYY-MM-DD' of Date-parseable strings. Geeft null bij ontbrekend/onzinnig.
+  function _dagenTussen(van, tot) {
+    if (!van || !tot) return null;
+    var d1 = new Date(van), d2 = new Date(tot);
+    if (isNaN(d1.getTime()) || isNaN(d2.getTime())) return null;
+    var d = Math.round((d2.getTime() - d1.getTime()) / 86400000) + 1; // +1 = inclusief einddag
+    return (d > 0 && d < 400) ? d : null;
+  }
+
+  // v1.18: detecteer een "kW × dagen"-presentatie van het vermogen (YUSO-stijl).
+  // Retourneert { kva, corr, dagen, lfRaw, lfCorr }. Enkel corrigeren als de rauwe
+  // load factor fysiek onmogelijk laag is (<2%) én na deling door de dagen weer
+  // plausibel (≤100%). Zo blijft een correct-geparste aansluiting ongemoeid.
+  function _perDagVermogen(kva, dagen, afnameKwh) {
+    if (!(kva > 0) || !(dagen > 1) || !(afnameKwh > 0)) return { kva: kva, corr: false };
+    var uren = dagen * 24;
+    var lfRaw = afnameKwh / (kva * uren);            // load factor met de rauwe kW
+    var lfCorr = lfRaw * dagen;                        // load factor na ÷ dagen
+    if (lfRaw < 0.02 && lfCorr <= 1.0) {
+      return { kva: kva / dagen, corr: true, dagen: dagen, lfRaw: lfRaw, lfCorr: lfCorr };
+    }
+    return { kva: kva, corr: false, dagen: dagen, lfRaw: lfRaw };
   }
 
   function applyBaseCaseToWizard(baseCase, options) {
@@ -115,6 +136,25 @@
 
     if (reasons.some(function (r) { return r.severity === 'BLOKKEER'; })) {
       return { status: 'BLOKKEER', reasons: reasons, state: null, gotoStep: null };
+    }
+
+    // ===== v1.18: PER-DAG-VERMOGEN VANGNET =====
+    // Vóór de aansluiting-checks: reken een per-dag-gepresenteerd toegangsvermogen
+    // terug naar de echte kW, zodat aansluitOntbreekt/kVA en alles downstream de
+    // juiste waarde gebruiken. Corrigeert bc.aansluitVermogenKva in-place.
+    var _dagen = _dagenTussen(bc.periodeVan, bc.periodeTot);
+    var _pd = _perDagVermogen(bc.aansluitVermogenKva, _dagen, afname);
+    if (_pd.corr) {
+      bc.aansluitVermogenKva = _pd.kva;
+      reasons.push({
+        code: 'W7', severity: 'WAARSCHUWING',
+        message: 'Toegangsvermogen leek per dag gepresenteerd (kW × ' + _dagen +
+          ' dagen — leverancier-stijl, bv. YUSO). Automatisch teruggerekend naar ' +
+          Math.round(_pd.kva) + ' kW. Controleer tegen de factuur.',
+        _detail: { rauwe_kva: Math.round(_pd.kva * _dagen), dagen: _dagen,
+                   load_factor_rauw: Math.round(_pd.lfRaw * 10000) / 100 + '%',
+                   load_factor_gecorrigeerd: Math.round(_pd.lfCorr * 10000) / 100 + '%' }
+      });
     }
 
     // ===== WAARSCHUWING / INFO checks =====
@@ -231,12 +271,9 @@
       periodeTot: bc.periodeTot,
       baseCaseLoskoppeld: false,      // reset bij elke nieuwe factuur-apply
       // v1.16 sessie 5a: expliciete top-level velden voor "Maak voorstel"-flow.
-      // baseCase bevat ze ook (state.baseCase.klantBtw / leveringsadres) maar
-      // top-level versie is handiger voor directe scenario-bewaring.
       klantBtw: bc.klantBtw || null,
       leveringsadres: bc.leveringsadres || null,
-      // v1.16 sessie 5a: markeer dat dit een nieuw project is. Simulator.txt
-      // gebruikt dit om PDF-CTA-zichtbaarheid op stap 1 te bepalen.
+      // v1.16 sessie 5a: markeer dat dit een nieuw project is.
       scenarioActie: 'nieuw'
     };
 
@@ -251,7 +288,10 @@
   if (typeof module !== 'undefined' && module.exports) {
     module.exports = {
       applyBaseCaseToWizard: applyBaseCaseToWizard,
-      _internal: { extractPostcode: extractPostcode, roundUp5: roundUp5, pickGemeente: pickGemeente }
+      _internal: {
+        extractPostcode: extractPostcode, roundUp5: roundUp5, pickGemeente: pickGemeente,
+        dagenTussen: _dagenTussen, perDagVermogen: _perDagVermogen
+      }
     };
   } else {
     root.applyBaseCaseToWizard = applyBaseCaseToWizard;

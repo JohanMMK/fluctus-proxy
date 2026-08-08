@@ -1,6 +1,24 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.59.0 (08-08, Johan): PARALLELLE DISPATCH-RUNS (snelheid sim-3/groeipad/pv-sweep). De sim-3-
+//                zoektocht bestaat uit ONAFHANKELIJKE _runSimulatorOnce-spawns: de mix-zoeklus (k=1..N), de
+//                batterij-sweep, de drie opstellingen (verhogen/batterij/mix), elke opstelling z'n drie sturingen,
+//                en de groeipad/pv-sweep-stappen. Die draaien nu via _pmap parallel, begrensd door een globale
+//                semafoor SIM_MAX_PARALLEL (env, default 1 = EXACT het oude sequentiële gedrag → geen regressie).
+//                Cap = min(env, #cores) zodat CBC z'n per-solve timeLimit niet mist (oversubscriptie → time-out →
+//                suboptimaal → cent-drift). Elke run is deterministisch en leest enkel z'n stdin ⇒ parallel geeft
+//                IDENTIEKE cijfers, enkel sneller. Zet SIM_MAX_PARALLEL=4 (of #cores) op fluctus-proxy om aan te
+//                zetten; terug op 1 = instant rollback. VEREIST een live smoke-test na het verhogen van de flag.
+// Versie:        v15.58.0 (07-08, Johan): PER-DAG-VERMOGEN VANGNET. Sommige leveranciers (bevestigd YUSO; wellicht
+//                Luminus) tonen de kW-posten (toegangsvermogen/maandpiek/overschrijding) als "kW × aantal dagen"
+//                met eenheidsprijs = maandtarief/dagen. Het bedrag klopt, maar de afgelezen kW is ~dagen× te hoog
+//                (bv. 7.500 "kW" op 30 dagen = 250 kW echt). /api/factuur-extract normaliseert nu bc.aansluitVermogenKva
+//                via de load factor over de factuurperiode (LF < 2% én na ÷dagen weer plausibel → per-dag → ÷dagen),
+//                met flag bc._perDagVermogenCorrectie. Beschermt ALLE consumers (kamino-aansluiting leidt toegangs-
+//                vermogen af uit aansluitVermogenKva×0.9). Bron-fix (Methode A, tariefkaart-ratio, incl. maandpiek
+//                als apart veld) hoort in factuur/extract.js naast de CAPACITEIT_DUBBEL-correctie. apply_base_case.js
+//                v1.18 houdt hetzelfde vangnet als tweede net op het wizard-pad.
 // Versie:        v15.57.0 (03-08, Johan): CARRYOVER-FIX. /api/kamino/project whitelist nu het 'profiel'-veld in het
 //                projectrecord, zodat het gekozen verbruiksprofiel bewaard blijft en correct terugkomt bij de manager-
 //                open in de interactieve simulator (voorheen ontbrak het → default-profiel → verkeerde dispatch/cijfers).
@@ -453,8 +471,42 @@ const compression = require('compression');
 const { spawn, execFileSync } = require('child_process');
 const path        = require('path');
 const fs          = require('fs');
+const os          = require('os');
 const factuurExtract = require('./factuur/extract');
 const { projectJaarverbruik } = require('./project_jaarverbruik.js');
+
+// ─── v15.59.0 — OPTIONELE PARALLELLE DISPATCH-RUNS (flag-gated, default = oud gedrag) ─────────
+// De sim-3-zoektocht (mix-zoeklus k=1..N, batterij-sweep, groeipad/pv-sweep, de drie opstellingen)
+// bestaat uit ONAFHANKELIJKE _runSimulatorOnce-spawns. Elke spawn is een verse, deterministische
+// python-run die enkel z'n eigen stdin leest → ze parallel draaien geeft IDENTIEKE cijfers, enkel
+// sneller. SIM_MAX_PARALLEL (env, default 1) is de globale bovengrens op gelijktijdige python-
+// processen. Cap op #cores: oversubscriptie zou CBC z'n per-solve timeLimit doen missen
+// (time-out → suboptimaal → cent-drift). SIM_MAX_PARALLEL=1 ⇒ alle _pmap-lussen serialiseren in
+// submissievolgorde → byte-identiek aan de sequentiële versie. Rollback = env terug op 1 (of weg).
+const SIM_MAX_PARALLEL = Math.max(1, Math.min(
+  parseInt(process.env.SIM_MAX_PARALLEL || '1', 10) || 1,
+  Math.max(1, (os.cpus() || [{}]).length)
+));
+let _simBezet = 0;
+const _simWachtrij = [];
+function _simSlot() {
+  return new Promise(res => {
+    if (_simBezet < SIM_MAX_PARALLEL) { _simBezet++; res(); }
+    else _simWachtrij.push(res);
+  });
+}
+function _simSlotVrij() {
+  _simBezet--;
+  const volgende = _simWachtrij.shift();
+  if (volgende) { _simBezet++; volgende(); }
+}
+// Bounded-parallel map met FIFO-slots. Bij SIM_MAX_PARALLEL=1 draait alles strikt op volgorde
+// (identiek aan de oude for-await-lus); >1 laat tot N runs overlappen. Resultaat = oorspronkelijke
+// itemvolgorde, zodat de assemblage downstream ongewijzigd blijft.
+function _pmap(items, fn) {
+  return Promise.all(items.map((it, i) => fn(it, i)));
+}
+if (SIM_MAX_PARALLEL > 1) console.log(`[sim] parallelle dispatch aan: max ${SIM_MAX_PARALLEL} gelijktijdige runs`);
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -2427,6 +2479,34 @@ app.post('/api/factuur-extract', async (req, res) => {
     // BEST-EFFORT: een opslagfout mag een geslaagde extractie nooit laten mislukken.
     const _bc = result.baseCase || (result.baseCase = {});
     _bc.factuur_bestanden = [];
+
+    // v15.58.0: PER-DAG-VERMOGEN VANGNET (YUSO/Luminus). Reken een "kW × dagen"-gepresenteerd
+    // toegangsvermogen terug naar de echte kW vóór het naar de wizard/simulator gaat. Detectie via
+    // de load factor: onmogelijk laag (<2%) én na ÷dagen weer plausibel (≤100%) ⇒ per-dag ⇒ ÷dagen.
+    // Enkel op de kW-vermogenspost; de €-bedragen en kWh-posten blijven ongemoeid.
+    try {
+      const _pdDate = (s) => { if (!s) return null;
+        const m = String(s).match(/(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/);
+        if (m) return new Date(+m[3], +m[2]-1, +m[1]);
+        const d = new Date(s); return isNaN(d.getTime()) ? null : d; };
+      const _a = _pdDate(_bc.periodeVan), _b = _pdDate(_bc.periodeTot);
+      const dgn = (_a && _b) ? Math.max(1, Math.round((_b - _a)/86400000) + 1) : null;
+      const kw = +_bc.aansluitVermogenKva || 0, afn = +_bc.afnameKwh || 0;
+      if (kw > 0 && dgn && dgn > 1 && afn > 0) {
+        const lfRaw = afn / (kw * dgn * 24);
+        if (lfRaw < 0.02 && (lfRaw * dgn) <= 1.0) {
+          const echt = Math.round(kw / dgn);
+          _bc._perDagVermogenCorrectie = {
+            rauw_kva: Math.round(kw), dagen: dgn, gecorrigeerd_kva: echt,
+            load_factor_rauw_pct: Math.round(lfRaw * 10000) / 100,
+            load_factor_gecorrigeerd_pct: Math.round(lfRaw * dgn * 10000) / 100
+          };
+          _bc.aansluitVermogenKva = echt;
+          console.warn(`[factuur-extract] per-dag-vermogen: ${Math.round(kw)} kW → ${echt} kW (${dgn} dagen, LF ${(lfRaw*100).toFixed(2)}%)`);
+        }
+      }
+    } catch (e) { console.warn('[factuur-extract] per-dag-vermogen-check faalde (niet-blokkerend):', e.message); }
+
     if (SUPABASE_OK) {
       for (const f of files) {
         try {
@@ -3256,7 +3336,16 @@ app.post('/api/nominatie-sim', (req, res) => {
 // simulator.py blijft ONGEWIJZIGD: we spawnen 'm 3× met per-variant aangepaste
 // input. buildSimInput leidt de sturing af uit bsp.actief / pv_curtailment.actief
 // / batterijId / pvInjStrategie, dus we hoeven enkel die vlaggen te zetten.
-function _runSimulatorOnce(simInput) {
+// v15.59.0: globale semafoor rond elke spawn. Bij SIM_MAX_PARALLEL=1 is dit een no-op (1 slot,
+// FIFO) → exact sequentieel. Bij >1 begrenst het het totaal aantal gelijktijdige python-processen
+// over ALLE call-sites heen (mix-lus + opstellingen + sweeps kunnen samen lopen zonder de box te
+// oversubscriben). De await/finally garandeert dat een slot altijd vrijkomt, ook bij een fout.
+async function _runSimulatorOnce(simInput) {
+  await _simSlot();
+  try { return await _runSimulatorRaw(simInput); }
+  finally { _simSlotVrij(); }
+}
+function _runSimulatorRaw(simInput) {
   return new Promise((resolve, reject) => {
     const simulatorPath = path.join(__dirname, 'simulator.py');
     const t0 = Date.now();
@@ -3684,12 +3773,15 @@ async function _dimensioneerMix(input, cap, job) {
   const ohVast = Number((tp && tp.onderhoud_vast)) || 0;                           // PV + laadpalen onderhoud (jaar 1)
   const baseNet = Number((tp && tp.base_net));                                     // v15.31.0: netkosten opstelling 0 (jaarbasis) → NPV
   const huidig = Number(input.aansluiting_kva || input.aansluitingKva || 0) || 0;
-  const punten = [];
-  for (let k = 1; k <= N; k++) {
+  // v15.59.0: de k-lus is onafhankelijk per batterij-aantal (elke _mixZoekVerzwaring start vers uit
+  // input/cap/k) → parallelliseerbaar. _pmap behoudt de k-volgorde; filter(Boolean) laat de niet-
+  // haalbare k's weg net als de oude `continue`.
+  const _mixKs = Array.from({ length: N }, (_, i) => i + 1);
+  const _mixResultaten = await _pmap(_mixKs, async (k) => {
     _jlog(job, 'opstelling', `Mix: ${k} batterij${k>1?'en':''} — welke verzwaring is dan nodig?`,
           { opstelling: 'mix', maat: k, eenheid: 'batt' });
     const z = await _mixZoekVerzwaring(input, cap, k, job);
-    if (!z.haalbaar) { _jlog(job, 'faal', `Mix ${k} batt: geen werkende verzwaring gevonden — overgeslagen`); continue; }
+    if (!z.haalbaar) { _jlog(job, 'faal', `Mix ${k} batt: geen werkende verzwaring gevonden — overgeslagen`); return null; }
     const verzwaring = Math.max(0, z.kva - huidig);
     // v15.28.0: keuze op de LAAGSTE meerjarige TCO incl. cabine, onderhoud, verzekering én het
     // realistisch netkosten-schema (identiek aan het financieel rapport, zie _tcoMeerjaar).
@@ -3708,13 +3800,15 @@ async function _dimensioneerMix(input, cap, job) {
     const besparingBruto = (Number.isFinite(K)) ? (K - jaarkost) : null;
     const besparingNet = (Number.isFinite(baseNet) && besparingBruto != null) ? (baseNet - netdeel) : null;
     const npv = (tp && besparingBruto != null) ? _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) : null;
-    punten.push({ k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, tco, npv, cabine, z });
+    const _punt = { k, kva: z.kva, kwh: z.kwh, factuur: z.factuur, capex, rendement, tco, npv, cabine, z };
     _jlog(job, 'resultaat',
           `Mix ${k} batt + ${z.kva} kVA${cabine?' (MS+cabine)':''}: factuur € ${Math.round(z.factuur).toLocaleString('nl-BE')}/jaar` +
           (npv != null ? `, NPV € ${Math.round(npv).toLocaleString('nl-BE')}` : `, TCO € ${Math.round(tco).toLocaleString('nl-BE')}`) +
           (rendement != null ? `, rendement ${rendement.toFixed(1)}%` : ''),
           { opstelling: 'mix', kva: z.kva, kwh: z.kwh });
-  }
+    return _punt;
+  });
+  const punten = _mixResultaten.filter(Boolean);
   if (!punten.length) return null;
   let beste;
   if (punten.every(p => p.npv != null)) {
@@ -3889,8 +3983,10 @@ async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
         { nmax: Nmax });
   if (job) job.runs_verwacht = Nmax + 2;
 
-  const punten = [];
-  for (let k = 1; k <= Nmax; k++) {
+  // v15.59.0: elke batterij-stap k is een onafhankelijke sturing-run → parallelliseerbaar (_pmap
+  // behoudt de k-volgorde, identiek aan de oude push-lus).
+  const _sweepKs = Array.from({ length: Nmax }, (_, i) => i + 1);
+  const punten = await _pmap(_sweepKs, async (k) => {
     const cfg = JSON.parse(JSON.stringify(input));
     cfg.batterijId = 'CUSTOM';
     cfg.batterijCustom = { naam: 'Batterij-sweep', kw: k * _bkw, kwh: k * _bkwh,
@@ -3909,15 +4005,15 @@ async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
     const npv = (tp && capex > 0) ? _npvMeerjaar(tp, capex, besparingBruto, besparingNet, oh1) : null;
     const tco = tp ? _tcoMeerjaar(tp, capex, jaarkost, netdeel, oh1) : (capex + jaarkost * horizon);
     const rendement = (capex > 0) ? ((besparingBruto - opex1) / capex * 100) : null;   // netto jaar-1 rendement
-    punten.push({ k, kw: k * _bkw, kwh: k * _bkwh, cfg, resultaat: rS,
-                  jaarkost, netdeel, capex, npv, tco, rendement, besparingBruto });
     _jlog(job, 'resultaat',
           `${k} batterij${k>1?'en':''}: factuur € ${Math.round(jaarkost).toLocaleString('nl-BE')}/jaar, ` +
           `besparing € ${Math.round(besparingBruto).toLocaleString('nl-BE')}/jaar` +
           (npv != null ? `, NPV € ${Math.round(npv).toLocaleString('nl-BE')}` : '') +
           (rendement != null ? `, rendement ${rendement.toFixed(1)}%` : ''),
           { maat: k });
-  }
+    return { k, kw: k * _bkw, kwh: k * _bkwh, cfg, resultaat: rS,
+             jaarkost, netdeel, capex, npv, tco, rendement, besparingBruto };
+  });
   if (!punten.length) return null;
 
   // Optimaal = hoogste NPV; terugval op laagste TCO, dan hoogste besparing.
@@ -4038,9 +4134,12 @@ app.post('/api/groeipad', async (req, res) => {
     const pleinen = Array.isArray(input.laadpleinen) ? input.laadpleinen : [];
     const gevraagdMwhTot = pleinen.reduce((s, p) =>
       s + (Number(p.aantal) || 0) * (Number(p.km_per_jaar) || 0) * (Number(p.kwh_per_km) || 0) / 1000, 0);
-    const stappen = [];
-    for (const c of aansluitingen) {
-      for (let k = 1; k <= maxBatt; k++) {
+    // v15.59.0: elke (aansluiting c × batterij k)-stap is een onafhankelijke sturing-run →
+    // parallelliseerbaar. Combos in dezelfde nestvolgorde (c buiten, k binnen) zodat de
+    // stappen-volgorde identiek blijft aan de oude dubbele lus.
+    const _combos = [];
+    for (const c of aansluitingen) for (let k = 1; k <= maxBatt; k++) _combos.push({ c, k });
+    const stappen = await _pmap(_combos, async ({ c, k }) => {
         const cfg = JSON.parse(JSON.stringify(input));
         // Aansluiting VAST op de kandidaat-aansluiting; batterij = k eenheden.
         cfg.aansluiting_kva = c; cfg.aansluitingKva = c;
@@ -4057,7 +4156,7 @@ app.post('/api/groeipad', async (req, res) => {
           ? lp.pleinen.reduce((s, p) => s + (Number(p.geladen_mwh) || 0), 0)
           : (Number(lp.ev_last_mwh) || 0);
         const pct = gevraagdMwhTot > 0 ? Math.min(100, Math.round(geladenMwh / gevraagdMwhTot * 1000) / 10) : null;
-        stappen.push({
+        return {
           aansluiting_kva: c,   // v15.32.0: welke vaste aansluiting deze stap draaide
           aantal_batterijen: k, kw: k * _gpKw, kwh: k * _gpKwh,   // v15.56: module-maat (fallback 120/260)
           gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10,
@@ -4068,9 +4167,8 @@ app.post('/api/groeipad', async (req, res) => {
           distributie_eur: Math.round(_distributieJF(r)),   // v15.30.0: netkosten (B+C+D) → cumulatieve besparing frontend
           afname_mwh: Math.round((Number((r.kpi || {}).totaal_afname_mwh) || 0) * 10) / 10,   // v15.50.0: grid-afname → loadfactor per stap (KPI3) client-side = afname/(8760×aansluiting)
           factuur_detail: _frCompJF(r),   // v15.33.0: componenten voor de groeipad-detailfactuur per stap
-        });
-      }
-    }
+        };
+    });
     return res.json({ ok: true, aansluiting_kva: aansluitingen[aansluitingen.length - 1],
       aansluitingen_kva: aansluitingen, max_batterijen: maxBatt,
       gevraagd_mwh: Math.round(gevraagdMwhTot * 10) / 10, stappen,
@@ -4104,8 +4202,11 @@ app.post('/api/pv-sweep', async (req, res) => {
     // bestaande PV) als baseline en beoordelen de nieuwe PV op zijn EIGEN merites:
     //   marginaal% = (zelfverbruik(pv) − zelfverbruik(bestaand-only)) / (productie(pv) − productie(bestaand-only)).
     // Zonder bestaande PV is de baseline 0 → marginaal == geblend (geen regressie).
+    // v15.59.0: elke pv-stap is een onafhankelijke sturing-run → parallel draaien en dan de
+    // marginale-baseline (pv=0) in een tweede pass toepassen. De deltas hangen af van het pv=0-punt,
+    // dat we dus ná het verzamelen bepalen (niet meer tijdens de lus). Volgorde = pvLijst (oplopend).
     let _prod0 = null, _zelf0 = null;
-    for (const pv of pvLijst) {
+    const _ruw = await _pmap(pvLijst, async (pv) => {
       const cfg = JSON.parse(JSON.stringify(input));
       cfg.aansluiting_kva = c; cfg.aansluitingKva = c; cfg.toegangsvermogen_kw = c;
       cfg.geen_aansluiting_verhoging = true;         // aansluiting blijft vast (net als het groeipad)
@@ -4125,8 +4226,11 @@ app.post('/api/pv-sweep', async (req, res) => {
       // (direct + via batterij) / bruto productie. Bruto = potentiële productie (na curtailment-verlies).
       const _prodBruto = Number(kpi.pv_potentiele_productie_mwh) || (pv * 0.95);
       const _zelf = (Number(kpi.pv_direct_zelfverbruik_mwh) || 0) + (Number(kpi.pv_naar_batterij_mwh) || 0);
-      // v15.51: leg de baseline vast op pv=0 (enkel bestaande PV). pvLijst is oplopend gesorteerd, dus 0 komt eerst.
-      if (pv === 0) { _prod0 = _prodBruto; _zelf0 = _zelf; }
+      return { pv, r, jf, grC, kpi, _prodBruto, _zelf };
+    });
+    // v15.51: baseline op pv=0 (enkel bestaande PV). pvLijst is oplopend gesorteerd, dus 0 komt eerst.
+    for (const x of _ruw) { if (x.pv === 0) { _prod0 = x._prodBruto; _zelf0 = x._zelf; } }
+    for (const { pv, r, jf, grC, kpi, _prodBruto, _zelf } of _ruw) {
       const _dProd = (_prod0 != null ? (_prodBruto - _prod0) : _prodBruto);   // productie van de NIEUWE PV alleen
       const _dZelf = (_zelf0 != null ? (_zelf - _zelf0) : _zelf);             // extra zelfverbruik door de NIEUWE PV
       stappen.push({
@@ -4298,11 +4402,12 @@ async function _draaiSim3(input, job) {
 
     // ── Laadplein zonder batterij en aansluiting volstaat → normale 3-sturingen (enkel) ──
     if (!heeftLaadplein || (cap.voldoende && !_heeftBatt)) {
-      const varianten = { geen: probe };
-      varianten.sturing = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing')));
-      varianten.onbalans = heeftFlex
-        ? await _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans')))
-        : varianten.sturing;
+      // v15.59.0: sturing + onbalans zijn onafhankelijke runs op dezelfde config → parallel.
+      const [_stEnk, _onbEnk] = await Promise.all([
+        _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing'))),
+        heeftFlex ? _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans'))) : Promise.resolve(null),
+      ]);
+      const varianten = { geen: probe, sturing: _stEnk, onbalans: heeftFlex ? _onbEnk : _stEnk };
       const kpi_sturing = _kpi(varianten, !heeftFlex);
       _jlog(job, 'klaar', `Aansluiting volstaat — geen opstellingen nodig (${Math.round((Date.now()-startTime)/1000)}s)`);
       return { ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap,
@@ -4314,9 +4419,12 @@ async function _draaiSim3(input, job) {
     // De batterij is dan puur voor arbitrage + goedkope eigen km. Vandaag (opstelling 0) bouwt de
     // frontend zelf uit de basisfactuur + CREG-km. Zo verschijnt de volle analyse óók als het al past.
     if (cap.voldoende) {
-      const v = { geen: probe };
-      v.sturing  = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing')));
-      v.onbalans = heeftFlex ? await _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans'))) : v.sturing;
+      // v15.59.0: sturing + onbalans onafhankelijk → parallel.
+      const [_stTwee, _onbTwee] = await Promise.all([
+        _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing'))),
+        heeftFlex ? _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans'))) : Promise.resolve(null),
+      ]);
+      const v = { geen: probe, sturing: _stTwee, onbalans: heeftFlex ? _onbTwee : _stTwee };
       const _battKwh = (input.batterijCustom && Number(input.batterijCustom.kwh)) || null;
       const opstellingen = { batterij: {
         varianten: v, kpi_sturing: _kpi(v, !heeftFlex),
@@ -4361,20 +4469,28 @@ async function _draaiSim3(input, job) {
                           'op de huidige tariefkaart.');
     if (job) job.runs_verwacht = 22;
     const opstellingen = {};
-    for (const opst of OPSTELLINGEN) {
+    // v15.59.0: de drie opstellingen (verhogen / batterij / mix) zijn onafhankelijke zoektochten
+    // → parallelliseerbaar. Elke tak bouwt haar eigen cfg/dimensionering vers uit `input`+`cap` en
+    // raakt geen gedeelde state (enkel _jlog/job.runs, cosmetisch). Binnen elke tak lopen de drie
+    // sturingen (geen/sturing/onbalans) óók parallel. _pmap behoudt de OPSTELLINGEN-volgorde; de
+    // globale semafoor begrenst het totaal aantal gelijktijdige python-processen. Bij
+    // SIM_MAX_PARALLEL=1 valt dit terug op exact de oude sequentiële volgorde.
+    const _opstResultaten = await _pmap(OPSTELLINGEN, async (opst) => {
       _jlog(job, 'opstelling', OPSTELLING_LABEL[opst], { opstelling: opst });
       // ── mix: eigen zoeklus over de mengverhoudingen ──
       if (opst === 'mix') {
         const m = await _dimensioneerMix(input, cap, job);
-        if (!m) { _jlog(job, 'waarschuwing', 'Geen werkende mix gevonden — opstelling 3 overgeslagen.'); continue; }
+        if (!m) { _jlog(job, 'waarschuwing', 'Geen werkende mix gevonden — opstelling 3 overgeslagen.'); return null; }
         const cfgM = m.cfg;
-        const vm = {};
         _jlog(job, 'run', `${OPSTELLING_LABEL.mix}: de drie sturingen doorrekenen…`, { opstelling: 'mix' });
-        vm.geen     = await _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'geen')));
-        vm.sturing  = m.dim.resultaat;
-        vm.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'onbalans')));
+        // geen + onbalans onafhankelijk; sturing komt uit de dimensioneringsrun.
+        const [_vmg, _vmo] = await Promise.all([
+          _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'geen'))),
+          _runSimulatorOnce(buildSimInput(_variantUi(cfgM, 'onbalans'))),
+        ]);
+        const vm = { geen: _vmg, sturing: m.dim.resultaat, onbalans: _vmo };
         if (job) job.runs = (job.runs || 0) + 2;
-        opstellingen.mix = {
+        const _mixObj = {
           varianten: vm, kpi_sturing: _kpi(vm, false),
           config: {
             spanning: cfgM.spanning || input.spanning || 'LS',
@@ -4398,7 +4514,7 @@ async function _draaiSim3(input, job) {
               `${OPSTELLING_LABEL.mix}: € ${Math.round(_sub(vm.sturing)).toLocaleString('nl-BE')}/jaar ` +
               `op sturing 2 (${m.kva} kVA + ${m.kwh} kWh)`,
               { opstelling: 'mix', subtotaal: Math.round(_sub(vm.sturing)) });
-        continue;
+        return ['mix', _mixObj];
       }
       let cfg = _opstellingUi(input, opst, cap);
       // v15.19: ITERATIEVE DIMENSIONERING — voor BEIDE opstellingen.
@@ -4411,16 +4527,19 @@ async function _draaiSim3(input, job) {
       // Daarom: groeien tot de dispatch zelf 0 verloren dagen meldt.
       const dim = await _dimensioneerTotHaalbaar(cfg, opst, cap, job);
       cfg = dim.cfg;
-      const v = {};
       _jlog(job, 'run', `${OPSTELLING_LABEL[opst]}: de drie sturingen doorrekenen…`, { opstelling: opst });
-      v.geen     = dim.variant === 'geen'    ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen')));
-      v.sturing  = dim.variant === 'sturing' ? dim.resultaat : await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing')));
-      v.onbalans = await _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans')));
+      // v15.59.0: de nog-niet-gedraaide sturingen parallel; de reeds gedimensioneerde variant hergebruikt.
+      const [_vg, _vs, _vo] = await Promise.all([
+        dim.variant === 'geen'    ? Promise.resolve(dim.resultaat) : _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'geen'))),
+        dim.variant === 'sturing' ? Promise.resolve(dim.resultaat) : _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'sturing'))),
+        _runSimulatorOnce(buildSimInput(_variantUi(cfg, 'onbalans'))),
+      ]);
+      const v = { geen: _vg, sturing: _vs, onbalans: _vo };
       if (job) job.runs = (job.runs || 0) + 2;
       // v15.18: geef de gebruikte configuratie mee terug — vooral de spanning, want
       // opstelling 1 kan naar MS zijn omgezet (>100 kVA). Zonder dit ziet de verkoper
       // niet dat hij twee verschillende tariefkaarten vergelijkt.
-      opstellingen[opst] = {
+      const _opstObj = {
         varianten: v, kpi_sturing: _kpi(v, false),
         config: {
           spanning: cfg.spanning || input.spanning || 'LS',
@@ -4445,7 +4564,9 @@ async function _draaiSim3(input, job) {
             `${OPSTELLING_LABEL[opst]}: € ${Math.round(_sub(v.sturing)).toLocaleString('nl-BE')}/jaar ` +
             `op sturing 2 (${cfg.spanning || 'LS'})`,
             { opstelling: opst, subtotaal: Math.round(_sub(v.sturing)), spanning: cfg.spanning || 'LS' });
-    }
+      return [opst, _opstObj];
+    });
+    for (const _r of _opstResultaten) { if (_r) opstellingen[_r[0]] = _r[1]; }
     // Besparing t.o.v. opstelling 1 (verzwaren = het ijkpunt), per sturing.
     // v15.20: modus heet nog 'twee_opstellingen' voor backwards-compat met de UI-check;
     // het aantal opstellingen lees je uit Object.keys(opstellingen).
