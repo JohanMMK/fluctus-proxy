@@ -4,8 +4,22 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4.5 (juli 2026)
+ * Versie: 1.4.6 (juli 2026)
  *
+ * Wijziging v1.4.5 → v1.4.6 (PER-DAG-VERMOGEN — YUSO/Luminus-presentatiestijl):
+ *   Sommige leveranciers presenteren de kW-posten (toegangsvermogen / maandpiek /
+ *   overschrijding) als "kW × aantal dagen", met eenheidsprijs = maandtarief / dagen.
+ *   Dan klopt aantal × eenheidsprijs = bedrag (regelcontrole vlagt niets), maar de
+ *   afgelezen kW is ~dagen× te hoog (bv. 7.500 "kW" op 30 dagen = 250 kW echte piek).
+ *   FIX: corrigeerPerDagVermogen() detecteert dit met Methode A (tariefkaart):
+ *   impliciete kW = bedrag / (maandpiek_eur_kw_jaar × dagen/365). Is de getoonde kW
+ *   ~dagen× groter dan die impliciete kW → per-dag → deel door dagen. De correctie
+ *   (÷ dagen) is tarief-ONAFHANKELIJK; het maandtarief is enkel schaal-referentie, dus
+ *   een LS/MS-mismatch (±factor 2) verstoort de detectie niet. Fallback zonder tarief:
+ *   load factor (< 2% én na ÷dagen plausibel). Toegepast op _aansluitvermogenBron
+ *   (toegang/maandpiek/capaciteit), aansluitVermogenKva én de rauwe _factuurRegels-aantallen,
+ *   VÓÓR de aansluitvermogen-consolidatie. Vlag: _provider_flags 'per_dag_vermogen:<posten>',
+ *   detail in parsed._perDagVermogen. Enkel €/kW-posten (LS); €/kWh blijft ongemoeid.
  * Wijziging v1.4.1 → v1.4.3 (BUG: capaciteit-dubbeltelling — foute onderhandelingsmarge):
  *   ROOT CAUSE: prompt en frontend hanteerden TEGENSTRIJDIGE contracten. De prompt zei
  *   "distributie = nettarieven EXCL capaciteit" (→ totaal = e+d+c+h), terwijl de
@@ -549,6 +563,81 @@ function dagenTussen(vanStr, totStr) {
   return Math.round(ms / 86400000) + 1;
 }
 
+// v1.4.6: PER-DAG-VERMOGEN-CORRECTIE (YUSO/Luminus).
+// Sommige leveranciers tonen de kW-posten (toegangsvermogen/maandpiek/overschrijding) als
+// "kW × aantal dagen" met eenheidsprijs = maandtarief/dagen. Dan klopt aantal × eenheidsprijs = bedrag
+// (dus regelsCheck vlagt niets), maar de afgelezen kW is ~dagen× te hoog (bv. 7.500 "kW" op 30 dagen
+// = 250 kW). Detectie = Methode A (tariefkaart): impliciete kW = bedrag / (maandtarief_eur_kw_jaar ×
+// dagen/365). Is de getoonde kW ~dagen× groter dan die impliciete kW → per-dag → deel door dagen.
+// De correctie (÷ dagen) is tarief-ONAFHANKELIJK; het maandtarief dient enkel als schaal-referentie,
+// dus een LS/MS-tariefmismatch (±factor 2) verstoort de detectie niet (de ×dagen-factor ~30 domineert).
+// Fallback zonder tarief: load factor (< 2% én na ÷dagen plausibel).
+function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
+  const dagen = dagenTussen(parsed.periodeVan, parsed.periodeTot);
+  if (!(dagen > 1)) return null;
+  const tk = dnbTariefKey ? (tarieven[dnbTariefKey + '|LS'] || tarieven[dnbTariefKey + '|MS']) : null;
+  const T = tk ? Number(tk.maandpiek_eur_kw_jaar) : null;   // €/kW/jaar — schaal-referentie
+  const regels = Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [];
+  const afname = Number(parsed.afnameKwh) || 0;
+  const info = { dagen, methode: null, gecorrigeerd: [] };
+
+  function bedragVoor(keywords) {
+    let som = 0, gevonden = false;
+    for (const r of regels) {
+      if (!r || r.is_capaciteit !== true) continue;
+      const o = String(r.omschrijving || '').toLowerCase();
+      const e = String(r.eenheid || '').toLowerCase();
+      if ((e.indexOf('kw') === 0 || e.indexOf('kva') === 0) && keywords.some(k => o.indexOf(k) !== -1)) {
+        const b = Number(r.bedrag_excl); if (isFinite(b) && b > 0) { som += b; gevonden = true; }
+      }
+    }
+    return gevonden ? som : null;
+  }
+  function isPerDag(kw, bedrag) {
+    if (!(kw > 0)) return false;
+    if (T > 0 && bedrag > 0) {                              // Methode A — tariefkaart
+      const impl = bedrag / (T * dagen / 365);
+      if (impl > 0 && (kw / impl) > dagen * 0.5) { info.methode = info.methode || 'tariefkaart'; return true; }
+      if (impl > 0 && (kw / impl) < 2.5) return false;     // duidelijk normaal → nooit corrigeren
+    }
+    if (afname > 0) {                                       // fallback — load factor
+      const lf = afname / (kw * dagen * 24);
+      if (lf < 0.02 && lf * dagen <= 1.0) { info.methode = info.methode || 'load_factor'; return true; }
+    }
+    return false;
+  }
+  function corr(kw, keywords, label) {
+    if (!(typeof kw === 'number' && kw > 0)) return kw;
+    if (isPerDag(kw, bedragVoor(keywords))) {
+      const echt = Math.round(kw / dagen);
+      info.gecorrigeerd.push({ post: label, rauw_kw: Math.round(kw), gecorrigeerd_kw: echt });
+      return echt;
+    }
+    return kw;
+  }
+
+  if (bron) {
+    if (typeof bron.toegangsvermogenKw === 'number') bron.toegangsvermogenKw = corr(bron.toegangsvermogenKw, ['toegang'], 'toegangsvermogen');
+    if (typeof bron.maandpiekKw === 'number')        bron.maandpiekKw        = corr(bron.maandpiekKw, ['maandpiek', 'piek'], 'maandpiek');
+    if (typeof bron.capaciteitKw === 'number')       bron.capaciteitKw       = corr(bron.capaciteitKw, ['capaciteit', 'vermogen'], 'capaciteit');
+  }
+  if (typeof parsed.aansluitVermogenKva === 'number')
+    parsed.aansluitVermogenKva = corr(parsed.aansluitVermogenKva, ['toegang', 'aansluit', 'vermogen'], 'aansluitVermogenKva');
+
+  // Ook de rauwe kW/kVA-capaciteitsregels normaliseren (consistentie + weergave).
+  if (info.gecorrigeerd.length) {
+    for (const r of regels) {
+      if (!r || r.is_capaciteit !== true) continue;
+      const e = String(r.eenheid || '').toLowerCase();
+      const a = Number(r.aantal), b = Number(r.bedrag_excl);
+      if ((e.indexOf('kw') === 0 || e.indexOf('kva') === 0) && a > 0 && isPerDag(a, isFinite(b) ? b : 0)) {
+        r._aantal_rauw = a; r.aantal = Math.round(a / dagen); r._perdag = true;
+      }
+    }
+  }
+  return info.gecorrigeerd.length ? info : null;
+}
+
 // LS reverse engineering — geeft 'high' (<2%), 'medium' (<5%), of 'low'
 function runLsReverseEngineering(capRegels, dnbTariefKey, tarieven, gekozenKw) {
   if (!capRegels || capRegels.length === 0 || !dnbTariefKey || !gekozenKw) return 'low';
@@ -883,6 +972,13 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       bron[k] = isNaN(n) ? null : n;
     }
   });
+  // v1.4.6: per-dag-vermogen-correctie VÓÓR de consolidatie, zodat de gekozen kW/kVA klopt.
+  const _pdTariefKey = dnbFinal ? DNB_TO_TARIEF_KEY[dnbFinal] : null;
+  const _pdInfo = corrigeerPerDagVermogen(parsed, bron, _pdTariefKey, tarieven);
+  if (_pdInfo) {
+    parsed._perDagVermogen = _pdInfo;
+    _provider_flags.push('per_dag_vermogen:' + _pdInfo.gecorrigeerd.map(g => g.post).join(','));
+  }
   const kandidaten = [bron.toegangsvermogenKw, bron.maandpiekKw, bron.capaciteitKw]
     .filter(v => typeof v === 'number' && v > 0);
   let gekozenKw = null;
