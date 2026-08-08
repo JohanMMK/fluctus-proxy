@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.65.0 (08-08, Johan): PARALLELLE-DISPATCH-ZICHTBAARHEID. GET / (en /health) tonen nu
+//                sim_max_parallel (effectieve bovengrens), piek_gelijktijdig (hoeveel runs er ECHT tegelijk liepen
+//                sinds start = wat er effectief benut werd), runs_totaal en cpus_gerapporteerd. Startup logt dit ook
+//                altijd (ook bij =1). LET OP: Node's os.cpus() rapporteert meestal het HOST-aantal cores, niet je
+//                Railway-plan-quota; het echte vCPU-quota lees je in Railway → service → Metrics/Settings.
 // Versie:        v15.64.0 (08-08, Johan): PREVIEW (DRY-RUN) VOOR VERWIJDEREN. POST /api/manager/user action='delete'
 //                met dry_run:true verzamelt de info + telt wat er ZOU herlinken/verwijderen en geeft diagnostiek terug
 //                (doel gevonden?, GitHub-token aanwezig?, Brevo geconfigureerd?, bucket-list OK?), MAAR wijzigt, mailt
@@ -518,17 +523,19 @@ const SIM_MAX_PARALLEL = Math.max(1, Math.min(
   Math.max(1, (os.cpus() || [{}]).length)
 ));
 let _simBezet = 0;
+let _simPiek = 0;                 // v15.65.0: hoogste aantal gelijktijdige runs ooit bereikt (zichtbaar in GET /)
+let _simRunsTotaal = 0;           // v15.65.0: totaal aantal spawns sinds start
 const _simWachtrij = [];
 function _simSlot() {
   return new Promise(res => {
-    if (_simBezet < SIM_MAX_PARALLEL) { _simBezet++; res(); }
+    if (_simBezet < SIM_MAX_PARALLEL) { _simBezet++; _simRunsTotaal++; if (_simBezet > _simPiek) _simPiek = _simBezet; res(); }
     else _simWachtrij.push(res);
   });
 }
 function _simSlotVrij() {
   _simBezet--;
   const volgende = _simWachtrij.shift();
-  if (volgende) { _simBezet++; volgende(); }
+  if (volgende) { _simBezet++; _simRunsTotaal++; if (_simBezet > _simPiek) _simPiek = _simBezet; volgende(); }
 }
 // Bounded-parallel map met FIFO-slots. Bij SIM_MAX_PARALLEL=1 draait alles strikt op volgorde
 // (identiek aan de oude for-await-lus); >1 laat tot N runs overlappen. Resultaat = oorspronkelijke
@@ -536,7 +543,8 @@ function _simSlotVrij() {
 function _pmap(items, fn) {
   return Promise.all(items.map((it, i) => fn(it, i)));
 }
-if (SIM_MAX_PARALLEL > 1) console.log(`[sim] parallelle dispatch aan: max ${SIM_MAX_PARALLEL} gelijktijdige runs`);
+// v15.65.0: altijd loggen (ook bij =1) zodat je in de Railway-logs ziet wat effectief actief is.
+console.log(`[sim] parallelle dispatch: SIM_MAX_PARALLEL=${SIM_MAX_PARALLEL} · env=${process.env.SIM_MAX_PARALLEL || '(niet gezet → 1)'} · cores gerapporteerd door Node=${(os.cpus() || []).length} (let op: dit is meestal het HOST-aantal, niet je Railway-plan-quota)`);
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -2114,9 +2122,21 @@ app.get('/',       (req, res) => res.json({
     repo: MARKET_DATA_REPO,
     path: MARKET_DATA_PATH,
     has_token: !!GITHUB_TOKEN
+  },
+  // v15.65.0: parallelle-dispatch-status. sim_max_parallel = effectieve bovengrens op gelijktijdige
+  // sim-runs; piek_gelijktijdig = hoogste aantal dat sinds start ECHT tegelijk liep (dus hoeveel er
+  // effectief benut werd); cpus_gerapporteerd = wat Node ziet (meestal HOST-cores, NIET je plan-quota).
+  sim_parallel: {
+    sim_max_parallel: SIM_MAX_PARALLEL,
+    env: process.env.SIM_MAX_PARALLEL || '(niet gezet → 1)',
+    piek_gelijktijdig: _simPiek,
+    runs_totaal: _simRunsTotaal,
+    nu_bezig: _simBezet,
+    cpus_gerapporteerd: (os.cpus() || []).length
   }
 }));
-app.get('/health', (req, res) => res.json({ status:'ok', markt_status: MARKT_STATUS }));
+app.get('/health', (req, res) => res.json({ status:'ok', markt_status: MARKT_STATUS,
+  sim_max_parallel: SIM_MAX_PARALLEL, sim_piek_gelijktijdig: _simPiek })); // v15.65.0
 
 // v15.14.1: handmatige markt-reload endpoint. Forceert een nieuwe laadpoging
 // zonder Railway-redeploy. Idempotent: geen effect als al aan het laden.
