@@ -1,6 +1,30 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.64.0 (08-08, Johan): PREVIEW (DRY-RUN) VOOR VERWIJDEREN. POST /api/manager/user action='delete'
+//                met dry_run:true verzamelt de info + telt wat er ZOU herlinken/verwijderen en geeft diagnostiek terug
+//                (doel gevonden?, GitHub-token aanwezig?, Brevo geconfigureerd?, bucket-list OK?), MAAR wijzigt, mailt
+//                en verwijdert niets. Zo kan je de hele keten op een bestaand account testen zonder een wegwerp-account
+//                te maken. Gebruikers.html v1.5 heeft een "Preview"-knop per rij die de preview-export ook downloadt.
+// Versie:        v15.63.0 (08-08, Johan): PROJECTEN HERLINKEN BIJ VERWIJDEREN. Bij action='delete' worden de gelinkte
+//                projecten niet langer verweesd achtergelaten maar herstempeld naar AUDIT_MAIL_TO (oekene@gmail.com):
+//                scenario's in fluctus-scenarios (owner_uid → oekene's auth_uid) en Kamino-projectrecords in de bucket
+//                (adviseur-email → oekene). Gebeurt vóór het verwijderen; aantallen staan in de export/mail en in het
+//                antwoord (herlink.scenarios / herlink.kamino). Zo blijven de projecten in het systeem en zichtbaar bij
+//                de manager, en komt het e-mailadres tóch vrij voor een verse onboarding.
+// Versie:        v15.62.0 (08-08, Johan): VERKOPER VERWIJDEREN + AUDIT-EXPORT. POST /api/manager/user action='delete'
+//                verzamelt eerst alle gelogde info van de gebruiker (profiel + app-toegangen + activiteitslog +
+//                certificaten) in een .txt, mailt die naar AUDIT_MAIL_TO (default oekene@gmail.com) met onderwerp
+//                "<naam> verwijderd op YYYYMMDD uu:mm" via Brevo (gated op BREVO_API_KEY), en verwijdert dan logs →
+//                grants → profiel → auth-user. Zo komt het e-mailadres weer vrij voor een verse onboarding. De UI
+//                (gebruikers.html v1.3) downloadt de .txt óók lokaal als vangnet, ook als de mail niet verstuurd is.
+//                Zelf-verwijderen is geblokkeerd. NIEUWE ENV (optioneel): BREVO_API_KEY, BREVO_SENDER, AUDIT_MAIL_TO.
+// Versie:        v15.61.0 (08-08, Johan): APP-CATALOGUS AUTO-PROVISION. POST /api/manager/app-access maakt een
+//                ontbrekende app-rij nu automatisch aan in `apps` (naam meegestuurd vanuit de UI, fallback = id),
+//                vóór de grant. Oorzaak was een FK-violation (23503): kamino/jacops/gemeenteplan stonden in de UI
+//                maar niet als rij in `apps` (enkel simulator/congestie/energiemarkt geseed in 9a). Nu heelt de
+//                endpoint dat zelf → een nieuwe app toekennen werkt zonder handmatige SQL-seed. Gebruikers.html v1.2
+//                stuurt app_naam mee. (Blijft compatibel: zónder app_naam valt de naam terug op het id.)
 // Versie:        v15.60.0 (08-08, Johan): APP-TOEGANG TOEKENNEN FIX. POST /api/manager/app-access gaf HTTP 500 bij
 //                het aanzetten van een app voor een actieve verkoper (bv. supervision@directmarket.energy): de insert
 //                gebruikte `on_conflict=user_id,app_id`, wat een unique-constraint op (user_id,app_id) in
@@ -1363,6 +1387,165 @@ const SUPABASE_OK          = !!(SUPABASE_URL && SUPABASE_SERVICE_KEY);
 // bij de academy; Brevo-config blijft ongewijzigd op de academy-backend.
 // Zonder deze env wordt het profiel wél aangemaakt maar de mail overgeslagen.
 const ACADEMY_BACKEND_URL  = (process.env.ACADEMY_BACKEND_URL || '').replace(/\/+$/, '');
+
+// ─── v15.62.0 — VERKOPER VERWIJDEREN + AUDIT-EXPORT PER MAIL ──────────────────────────────────
+// Bij het verwijderen van een gebruiker verzamelen we eerst al z'n gelogde info (profiel + app-
+// toegangen + activiteitslog + certificaten) in een .txt en mailen die naar de audit-mailbox, met
+// als onderwerp "<naam> verwijderd op YYYYMMDD uu:mm". Mail loopt via Brevo (transactioneel), gated
+// op BREVO_API_KEY op de proxy; zonder key wordt de mail overgeslagen (de UI downloadt de .txt dan
+// als vangnet). AUDIT_MAIL_TO default oekene@gmail.com; BREVO_SENDER = een in Brevo geverifieerde
+// afzender (zelfde als de Academy gebruikt).
+const BREVO_API_KEY = process.env.BREVO_API_KEY || '';
+const BREVO_SENDER  = process.env.BREVO_SENDER  || 'no-reply@fluctus.net';
+const AUDIT_MAIL_TO = process.env.AUDIT_MAIL_TO || 'oekene@gmail.com';
+function _nuBrussel() {
+  const d = new Date();
+  try {
+    const fmt = new Intl.DateTimeFormat('nl-BE', { timeZone: 'Europe/Brussels',
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+    const p = {}; for (const x of fmt.formatToParts(d)) p[x.type] = x.value;
+    return { stempel: `${p.year}${p.month}${p.day} ${p.hour}:${p.minute}`, iso: d.toISOString() };
+  } catch (e) {
+    const iso = d.toISOString();
+    return { stempel: iso.slice(0, 16).replace('T', ' ').replace(/-/g, '').replace(' ', ' '), iso };
+  }
+}
+async function _verzendAuditMail(onderwerp, txtInhoud, bestandsnaam) {
+  if (!BREVO_API_KEY) return { sent: false, reden: 'BREVO_API_KEY niet gezet op de proxy' };
+  try {
+    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'accept': 'application/json' },
+      body: JSON.stringify({
+        sender: { name: 'Fluctus Gebruikersbeheer', email: BREVO_SENDER },
+        to: [{ email: AUDIT_MAIL_TO }],
+        subject: onderwerp,
+        textContent: `Bijgevoegd de volledige export van de verwijderde gebruiker.\n\n${onderwerp}`,
+        attachment: [{ content: Buffer.from(txtInhoud, 'utf8').toString('base64'), name: bestandsnaam }],
+      }),
+    });
+    if (!r.ok) { const t = await r.text(); return { sent: false, reden: `Brevo HTTP ${r.status} ${t.slice(0, 200)}` }; }
+    return { sent: true, naar: AUDIT_MAIL_TO };
+  } catch (e) { return { sent: false, reden: e.message }; }
+}
+function _bouwVerwijderExport(prof, authUid, grants, logs, certs, nu, mgr, herlink) {
+  const L = [];
+  L.push('FLUCTUS — EXPORT BIJ VERWIJDERING VAN GEBRUIKER');
+  L.push('='.repeat(62));
+  L.push(`Verwijderd op   : ${nu.stempel} (Europe/Brussels)  [${nu.iso}]`);
+  L.push(`Uitgevoerd door : ${(mgr && (mgr.email || mgr.id)) || '?'}`);
+  L.push('');
+  L.push('PROFIEL'); L.push('-'.repeat(62));
+  L.push(`E-mail       : ${prof.email || ''}`);
+  L.push(`Naam         : ${prof.name || prof.naam || prof.full_name || ''}`);
+  L.push(`Bedrijf      : ${prof.company || ''}`);
+  L.push(`Rol          : ${prof.role || ''}`);
+  L.push(`Status       : ${prof.status || ''}`);
+  L.push(`auth_uid     : ${authUid || '(nooit ingelogd)'}`);
+  L.push(`Aangemaakt   : ${prof.created_at || prof.aangemaakt_op || '?'}`);
+  L.push('');
+  L.push(`APP-TOEGANGEN (${grants.length})`); L.push('-'.repeat(62));
+  if (!grants.length) L.push('(geen)');
+  else grants.forEach(g => L.push(`- ${g.app_id}${g.toegekend_op ? ('  · toegekend ' + g.toegekend_op) : ''}${g.toegekend_door ? (' door ' + g.toegekend_door) : ''}`));
+  L.push('');
+  L.push(`ACTIVITEITSLOG (${logs.length})`); L.push('-'.repeat(62));
+  if (!logs.length) L.push('(geen)');
+  else logs.forEach(r => {
+    const det = (r.details && typeof r.details === 'object' && Object.keys(r.details).length) ? ('  ' + JSON.stringify(r.details)) : '';
+    L.push(`[${r.ts || '?'}] ${r.app_id || '?'} · ${r.actie || '?'}${r.klant_naam ? (' · klant: ' + r.klant_naam) : ''}${r.klant_btw ? (' (' + r.klant_btw + ')') : ''}${det}`);
+  });
+  L.push('');
+  L.push(`CERTIFICATEN (${certs.length})`); L.push('-'.repeat(62));
+  if (!certs.length) L.push('(geen)');
+  else certs.forEach(c => L.push(`- ${c.training_title || c.training_id || '?'} · score ${c.score != null ? c.score : '?'}/${c.total != null ? c.total : '?'} · ${c.issued_at || ''}${c.revoked ? ' (INGETROKKEN)' : ''}`));
+  if (herlink) {
+    L.push(''); L.push('HERLINK PROJECTEN'); L.push('-'.repeat(62));
+    L.push(`Doel                : ${herlink.doel || '?'}`);
+    const s = herlink.scenarios || {}, k = herlink.kamino || {};
+    L.push(`Scenario's herlinkt : ${s.herlinkt || 0} van ${s.onderzocht || 0} onderzocht${s.fout ? (' — ' + s.fout) : ''}${s.fouten ? (' (' + s.fouten + ' fouten)') : ''}`);
+    L.push(`Kamino herlinkt     : ${k.herlinkt || 0} van ${k.onderzocht || 0} onderzocht${k.fout ? (' — ' + k.fout) : ''}${k.fouten ? (' (' + k.fouten + ' fouten)') : ''}`);
+  }
+  L.push(''); L.push('EINDE EXPORT');
+  return L.join('\n');
+}
+
+// v15.63.0: herlink alle scenario's (fluctus-scenarios repo) van owner_uid vanUid → naarUid.
+// v15.64.0: dryRun=true telt enkel wat er ZOU herlinken (geen schrijfactie).
+async function _herlinkScenarios(vanUid, naarUid, naarNaam, dryRun) {
+  const res = { onderzocht: 0, herlinkt: 0, fouten: 0, dry: !!dryRun };
+  if (!vanUid || !naarUid) { res.fout = 'uid ontbreekt'; return res; }
+  try {
+    const apiUrl = `https://api.github.com/repos/${SCENARIOS_REPO_OWNER}/${SCENARIOS_REPO_NAME}/contents/${SCENARIOS_PATH_PREFIX}`;
+    const headers = { 'User-Agent': 'fluctus-proxy', 'Accept': 'application/vnd.github.v3+json' };
+    if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+    const r = await fetch(apiUrl, { headers });
+    if (r.status === 404) return res;
+    if (!r.ok) throw new Error(`projecten-lijst HTTP ${r.status}`);
+    const entries = await r.json();
+    const projecten = (entries || []).filter(e => e.type === 'dir').map(e => e.name);
+    for (const project of projecten) {
+      let namen = [];
+      try { namen = await _scenariosGithubListProject(project); } catch (e) { continue; }
+      for (const naam of namen) {
+        res.onderzocht++;
+        const pad = _scenarioPad(project, naam);
+        try {
+          const { data, sha } = await _scenariosGithubRead(pad);
+          if (data && data.owner_uid === vanUid) {
+            if (!dryRun) {
+              const nieuw = Object.assign({}, data, {
+                owner_uid: naarUid, owner_naam: naarNaam || data.owner_naam,
+                _owner_herlinkt_op: new Date().toISOString(), _owner_herlinkt_van: vanUid,
+              });
+              await _scenariosGithubWrite(pad, nieuw, sha);
+            }
+            res.herlinkt++;
+          }
+        } catch (e) { res.fouten++; }
+      }
+    }
+  } catch (e) { res.fout = e.message; }
+  return res;
+}
+
+// v15.63.0: herlink alle Kamino-projectrecords (bucket kamino/*.json) van adviseur-email vanEmail → naarEmail.
+// v15.64.0: dryRun=true telt enkel wat er ZOU herlinken (geen schrijfactie).
+async function _herlinkKamino(vanEmail, naarNaam, naarEmail, dryRun) {
+  const res = { onderzocht: 0, herlinkt: 0, fouten: 0, dry: !!dryRun };
+  const doel = String(vanEmail || '').toLowerCase();
+  if (!doel) { res.fout = 'email ontbreekt'; return res; }
+  try {
+    const url = `${SUPABASE_URL}/storage/v1/object/list/${FACTUREN_BUCKET}`;
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'apikey': SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: 'kamino/', limit: 1000, sortBy: { column: 'name', order: 'asc' } }),
+    });
+    if (!r.ok) { res.fout = `list HTTP ${r.status}`; return res; }
+    const objs = await r.json();
+    for (const o of (objs || [])) {
+      const naam = o && o.name;
+      if (!naam || !/\.json$/i.test(naam)) continue;
+      res.onderzocht++;
+      const pad = `kamino/${naam}`;
+      try {
+        const rec = JSON.parse(await _factuurDownload(pad));
+        const adv = (rec && rec.adviseur) || {};
+        if (String(adv.email || '').toLowerCase() === doel) {
+          if (!dryRun) {
+            rec.adviseur = Object.assign({}, adv, { naam: naarNaam || adv.naam, email: naarEmail });
+            rec._adviseur_herlinkt_op = new Date().toISOString();
+            rec._adviseur_herlinkt_van = doel;
+            rec.bijgewerkt = new Date().toISOString();
+            await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', pad);
+          }
+          res.herlinkt++;
+        }
+      } catch (e) { res.fouten++; }
+    }
+  } catch (e) { res.fout = e.message; }
+  return res;
+}
 // Rollback-schakelaar: FLUCTUS_AUTH_ENFORCE=false schakelt scenario-gating
 // uit zonder redeploy van code. Zonder Supabase-env automatisch uit.
 const AUTH_ENFORCE = SUPABASE_OK && (process.env.FLUCTUS_AUTH_ENFORCE || 'true') === 'true';
@@ -1639,6 +1822,21 @@ app.post('/api/manager/app-access', async (req, res) => {
   const userId = b.user_id, appId = b.app_id;
   if (!userId || !appId) return res.status(400).json({ error: 'user_id en app_id verplicht' });
   try {
+    // v15.61.0: AUTO-PROVISION van de app in de catalogus. user_app_access.app_id heeft een FK naar
+    // apps.id; staat een app wél in de UI maar nog niet als rij in `apps` (bv. kamino/jacops die na de
+    // 9a-seed zijn toegevoegd), dan faalt toekennen met 23503. We maken de ontbrekende app-rij nu
+    // idempotent aan met de naam die de UI meestuurt (fallback = id), zodat een nieuwe app nooit meer
+    // handmatig geseed hoeft te worden. Bestaanscheck → INSERT (geen on_conflict nodig).
+    const appNaam = (b.app_naam && String(b.app_naam).trim()) || appId;
+    const appBestaat = await _sbRest(`apps?select=id&id=eq.${encodeURIComponent(appId)}&limit=1`);
+    if (!Array.isArray(appBestaat) || appBestaat.length === 0) {
+      await _sbRest('apps', {
+        method: 'POST',
+        headers: { 'Prefer': 'return=minimal' },
+        body: { id: appId, naam: appNaam, beschrijving: appNaam, actief: true },
+      });
+      console.log(`[manager/app-access] app '${appId}' ontbrak in de catalogus → aangemaakt ('${appNaam}')`);
+    }
     // v15.60.0: IDEMPOTENT ZONDER on_conflict. De vorige versie gebruikte
     // `on_conflict=user_id,app_id` + merge-duplicates; dat VEREIST een unique-constraint op
     // (user_id, app_id) in user_app_access. Ontbreekt die, dan geeft PostgREST HTTP 500 (42P10:
@@ -1743,7 +1941,86 @@ app.post('/api/manager/user', async (req, res) => {
       return res.json({ ok: true, email, status });
     }
 
-    return res.status(400).json({ error: "onbekende action (invite|role|status)" });
+    if (action === 'delete') {
+      const email = String(b.email || '').trim().toLowerCase();
+      const dryRun = !!(b.dry_run || b.preview);   // v15.64.0: preview → verzamelt + telt herlink, MAAR wijzigt/verwijdert/maildt niets
+      if (!email) return res.status(400).json({ error: 'email verplicht' });
+      // Zelf-verwijderen blokkeren (bij een echte delete; preview mag altijd).
+      if (!dryRun && u.email && u.email.toLowerCase() === email) return res.status(400).json({ error: 'Je kan je eigen account niet verwijderen.' });
+      // Doelprofiel ophalen
+      const profs = await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}&select=*`);
+      const prof = (Array.isArray(profs) && profs.length) ? profs[0] : null;
+      if (!prof) return res.status(404).json({ error: 'gebruiker niet gevonden' });
+      const authUid = prof.auth_uid || null;
+      const naam = prof.name || prof.naam || prof.full_name || email;
+
+      // 1) Alle gelogde info verzamelen (best-effort per bron)
+      let grants = [], logs = [], certs = [];
+      if (authUid) {
+        try { grants = (await _sbRest(`user_app_access?user_id=eq.${encodeURIComponent(authUid)}&select=*`)) || []; } catch (e) {}
+        try { logs = (await _sbRest(`app_activity_log?user_id=eq.${encodeURIComponent(authUid)}&select=*&order=ts.asc&limit=10000`)) || []; } catch (e) {}
+      }
+      try { certs = (await _sbRest(`certificates?email=eq.${encodeURIComponent(email)}&select=*`)) || []; } catch (e) {}
+
+      // 2) Projecten HERLINKEN naar oekene@gmail.com (= AUDIT_MAIL_TO) i.p.v. verweesd achterlaten.
+      //    Doel opgezocht via profiles; scenario's (owner_uid) + Kamino-records (adviseur-email) herstempeld.
+      let doelProf = null;
+      try {
+        const dp = await _sbRest(`profiles?email=eq.${encodeURIComponent(AUDIT_MAIL_TO)}&select=auth_uid,email,name,naam,full_name`);
+        if (Array.isArray(dp) && dp.length) doelProf = dp[0];
+      } catch (e) {}
+      const doelUid = (doelProf && doelProf.auth_uid) || null;
+      const doelNaam = (doelProf && (doelProf.name || doelProf.naam || doelProf.full_name)) || AUDIT_MAIL_TO;
+      const doelEmail = (doelProf && doelProf.email) || AUDIT_MAIL_TO;
+      const scenarioHerlink = doelUid ? await _herlinkScenarios(authUid, doelUid, doelNaam, dryRun)
+                                      : { onderzocht: 0, herlinkt: 0, fouten: 0, fout: `doel-uid voor ${AUDIT_MAIL_TO} niet gevonden` };
+      const kaminoHerlink = await _herlinkKamino(email, doelNaam, doelEmail, dryRun);
+      const herlink = { doel: doelEmail, scenarios: scenarioHerlink, kamino: kaminoHerlink };
+
+      const nu = _nuBrussel();
+
+      // v15.64.0: PREVIEW (dry-run) → toon wat er zou gebeuren, wijzig/verwijder/mail NIETS.
+      if (dryRun) {
+        const onderwerpP = `[PREVIEW] ${naam} — zou verwijderd worden op ${nu.stempel}`;
+        const txtP = _bouwVerwijderExport(prof, authUid, grants, logs, certs, nu, u, herlink);
+        const bestandsnaamP = `preview_${email.replace(/[^a-z0-9]+/gi, '_')}_${nu.stempel.replace(/[^0-9]/g, '')}.txt`;
+        return res.json({ ok: true, dry_run: true, email, naam, onderwerp: onderwerpP, bestandsnaam: bestandsnaamP, txt: txtP, herlink,
+          diagnostiek: {
+            doel_gevonden: !!doelUid, doel_email: doelEmail,
+            github_token: !!GITHUB_TOKEN, brevo_key_gezet: !!BREVO_API_KEY, brevo_sender: BREVO_SENDER, audit_naar: AUDIT_MAIL_TO,
+          },
+          zou_verwijderen: { grants: grants.length, logs: logs.length, certificaten: certs.length, auth_user: !!authUid } });
+      }
+
+      const onderwerp = `${naam} verwijderd op ${nu.stempel}`;
+      const txt = _bouwVerwijderExport(prof, authUid, grants, logs, certs, nu, u, herlink);
+      const bestandsnaam = `verwijderd_${email.replace(/[^a-z0-9]+/gi, '_')}_${nu.stempel.replace(/[^0-9]/g, '')}.txt`;
+
+      // 3) Export mailen (best-effort — blokkeert de verwijdering niet)
+      const mail = await _verzendAuditMail(onderwerp, txt, bestandsnaam);
+
+      // 4) Verwijderen: logs → grants → profiel → auth-user (in deze volgorde i.v.m. FK's)
+      if (authUid) {
+        try { await _sbRest(`app_activity_log?user_id=eq.${encodeURIComponent(authUid)}`, { method: 'DELETE', headers: { 'Prefer': 'return=minimal' } }); } catch (e) {}
+        try { await _sbRest(`user_app_access?user_id=eq.${encodeURIComponent(authUid)}`, { method: 'DELETE', headers: { 'Prefer': 'return=minimal' } }); } catch (e) {}
+      }
+      await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}`, { method: 'DELETE', headers: { 'Prefer': 'return=minimal' } });
+      let authVerwijderd = false, authReden = null;
+      if (authUid) {
+        try {
+          const r = await fetch(`${SUPABASE_URL}/auth/v1/admin/users/${encodeURIComponent(authUid)}`, {
+            method: 'DELETE', headers: { 'apikey': SUPABASE_SERVICE_KEY, 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}` },
+          });
+          authVerwijderd = r.ok; if (!r.ok) authReden = `HTTP ${r.status} ${(await r.text()).slice(0, 150)}`;
+        } catch (e) { authReden = e.message; }
+      }
+      _AUTH_CACHE.clear();
+      console.log(`[manager/user delete] ${email} verwijderd (auth:${authVerwijderd}) mail:${mail.sent} · herlink scen:${scenarioHerlink.herlinkt} kamino:${kaminoHerlink.herlinkt} → ${doelEmail}`);
+      return res.json({ ok: true, email, naam, onderwerp, bestandsnaam, txt, mail, herlink,
+        verwijderd: { profiel: true, grants: grants.length, logs: logs.length, certificaten: certs.length, auth_user: authVerwijderd, auth_reden: authReden } });
+    }
+
+    return res.status(400).json({ error: "onbekende action (invite|role|status|delete)" });
   } catch (e) {
     console.error(`[manager/user ${action}] fout: ${e.message}`);
     return res.status(500).json({ error: e.message });
