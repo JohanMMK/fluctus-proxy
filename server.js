@@ -1,6 +1,28 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.68.0 (08-08, Johan): PROFIEL-ANALYSES MANAGER-ONLY. Het opgeladen Fluvius-profiel wordt nu enkel
+//                in de analyse gebruikt wanneer de aanvrager een MANAGER is (_isManagerReq → input._mgr_ok). Sellers/
+//                adviseurs blijven altijd op het standaardprofiel (eenvoud + geen verwarring). Toegepast op
+//                nominatie-sim-3, groeipad, pv-sweep, opstelling, kamino/onderhandel (+ toegangsvermogen_advies),
+//                kamino/productie, kamino/aansluiting. Fallback ongewijzigd: geen manager / geen profiel / fout →
+//                standaardprofiel. (Upload was al manager-only sinds v15.66.)
+// Versie:        v15.67.0 (08-08, Johan): OPGELADEN PROFIEL IN DE ANALYSE (FASE 2/3/5). Een opgeladen Fluvius-afname-
+//                profiel (fase 1) wordt nu, wanneer het request een geldig FLX-project_id draagt, in de analyse gebruikt
+//                i.p.v. het standaardprofiel: _opgeladenProfiel() laadt het CSV uit de bucket, normaliseert het naar de
+//                35040-vorm (som=1, 2025-kalenderindex, dubbele kwartieren gemiddeld) en buildSimInput geeft het
+//                voorrang (ui._opgeladen_profiel_kwartier) — fallback = standaard bij eender welke fout (geen regressie).
+//                Toegepast op nominatie-sim-3, groeipad, pv-sweep, opstelling, kamino/onderhandel, kamino/productie,
+//                kamino/aansluiting. FASE 3: kamino/onderhandel geeft nu een toegangsvermogen_advies (maandpiek 12 mnd
+//                < gecontracteerd toegangsvermogen → verlaagbaar + indicatieve besparing). Resultaten dragen
+//                profiel_bron/_meta.profiel als label (fase 5). Nog te doen: tegel-2 injectie-curtailment/onbalans op
+//                het injectieprofiel + labels in de simulator-rapporten.
+// Versie:        v15.66.0 (08-08, Johan): FLUVIUS-PROFIEL UPLOAD (FASE 1). Nieuwe manager-only endpoint
+//                POST /api/kamino/profiel-upload slaat een door de converter gemaakt kwartier-CSV (afname/injectie)
+//                op in de bucket als profielen/<projectID>_<EAN>_<klant>_<type>.csv en registreert de meta in het
+//                projectrecord (rec.profielen[type]) — zo gedeeld over de 4 tegels. /api/kamino/project whitelist nu
+//                'profielen' zodat het bij elke save behouden blijft. FASE 2 (gebruik in de analyse i.p.v. het
+//                standaardprofiel, toegangsvermogen-check, tegel-2 injectie-curtailment/onbalans, rapport-labels) volgt.
 // Versie:        v15.65.0 (08-08, Johan): PARALLELLE-DISPATCH-ZICHTBAARHEID. GET / (en /health) tonen nu
 //                sim_max_parallel (effectieve bovengrens), piek_gelijktijdig (hoeveel runs er ECHT tegelijk liepen
 //                sinds start = wat er effectief benut werd), runs_totaal en cpus_gerapporteerd. Startup logt dit ook
@@ -3037,6 +3059,7 @@ app.post('/api/kamino/project', async (req, res) => {
       profiel: b.profiel || bestaand.profiel || null,                        // v15.57 (Johan 03-08): gekozen verbruiksprofiel — nodig voor carryover naar de interactieve simulator (manager-open)
       pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
+      profielen: Object.assign({}, bestaand.profielen || {}, b.profielen || {}),   // v15.66: opgeladen Fluvius-profielen (afname/injectie) — behouden bij elke save
       aangemaakt: bestaand.aangemaakt || new Date().toISOString(),
       bijgewerkt: new Date().toISOString(), door: u.name || u.id || null
     };
@@ -3044,6 +3067,54 @@ app.post('/api/kamino/project', async (req, res) => {
     return res.json({ ok: true, id });
   } catch (e) {
     console.error('[kamino/project] bewaren faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.66.0 — FLUVIUS-PROFIEL UPLOAD (MANAGER-ONLY) ────────────────────────────────────────
+// POST /api/kamino/profiel-upload { project_id, type:'afname'|'injectie', csv, ean?, klant?, meta? }
+// Slaat het door de converter gemaakte kwartier-CSV op in de factuur-bucket onder de naam
+// profielen/<projectID>_<EAN>_<klant>_<type>.csv en registreert de meta in het projectrecord
+// (rec.profielen[type]). Enkel voor managers. Het profiel is zo gedeeld over de 4 tegels van
+// hetzelfde project. (FASE 1: opslaan + delen; het gebruik in de analyse volgt in fase 2.)
+app.post('/api/kamino/profiel-upload', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;   // manager-only
+  const b = req.body || {};
+  const pid = String(b.project_id || '').trim().toUpperCase();
+  const type = String(b.type || '').toLowerCase();
+  if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(pid)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+  if (type !== 'afname' && type !== 'injectie') return res.status(400).json({ error: "type moet 'afname' of 'injectie' zijn" });
+  if (!b.csv || typeof b.csv !== 'string') return res.status(400).json({ error: 'csv verplicht' });
+  if (b.csv.length > 12 * 1024 * 1024) return res.status(413).json({ error: 'CSV te groot (max ~12 MB)' });
+  try {
+    const veilig = (s, fb) => String(s || fb).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 60);
+    const ean = veilig(b.ean, 'geenEAN');
+    const klant = veilig(b.klant, 'klant');
+    const veiligPid = pid.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const bestand = `profielen/${veiligPid}_${ean}_${klant}_${type}.csv`;
+    await _factuurUpload(Buffer.from(b.csv, 'utf8').toString('base64'), 'text/csv', bestand);
+
+    // Projectrecord bijwerken met de profiel-meta (behouden via de whitelist in /api/kamino/project).
+    let rec = {};
+    try { rec = JSON.parse(await _factuurDownload(`kamino/${veiligPid}.json`)); } catch (e) {}
+    rec.id = rec.id || pid;
+    rec.profielen = rec.profielen || {};
+    const m = b.meta || {};
+    rec.profielen[type] = {
+      bestand, ean: b.ean || null, klant: b.klant || null,
+      mwh: (m.mwh != null ? Number(m.mwh) : null),
+      piek_kw: (m.piek_kw != null ? Number(m.piek_kw) : null),
+      van: m.van || null, tot: m.tot || null, n_kwartier: (m.n != null ? Number(m.n) : null),
+      door: u.email || u.id || null, op: new Date().toISOString(),
+    };
+    rec.bijgewerkt = new Date().toISOString();
+    try { await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veiligPid}.json`); } catch (e) {
+      console.warn('[kamino/profiel-upload] projectrecord bijwerken faalde (niet-blokkerend):', e.message);
+    }
+    console.log(`[kamino/profiel-upload] ${type}-profiel bewaard: ${bestand} (${rec.profielen[type].mwh} MWh, piek ${rec.profielen[type].piek_kw} kW)`);
+    return res.json({ ok: true, type, bestand, profielen: rec.profielen });
+  } catch (e) {
+    console.error('[kamino/profiel-upload] fout:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
@@ -3209,8 +3280,11 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
         vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
       aansluiting_kva: kva, toegangsvermogen_kw: Math.max(1, Math.round(kva * 0.9)),
       max_injectie_kw: 0, jaar: 'specifiek', periodeVan: pVan, periodeTot: pTot,
-      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' }
+      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' },
+      project_id: b.project_id || null,   // v15.67: voor het opgeladen afname-profiel
+      _mgr_ok: await _isManagerReq(req)    // v15.68: profiel-analyse enkel voor managers
     };
+    const _pInfo = await _pasOpgeladenAfnameToe(ui);   // v15.67: opgeladen profiel (fallback = standaard)
     const simInput = buildSimInput(ui);
     const result = await _runSimulatorOnce(simInput);
     const jf = result.jaarfactuur || result.factuur || {}; const gr = jf.groepen || {};
@@ -3226,6 +3300,29 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
       energiekost_dyn_mwh: volumeMwh > 0 ? Math.round(energie_dyn / volumeMwh) : null,
       volume_mwh: +volumeMwh.toFixed(1), dagen, profiel: profielNaam
     };
+    // v15.67 (fase 2): label of met het opgeladen profiel gerekend is.
+    if (_pInfo) out.profiel_bron = { bron: 'opgeladen_afname', ean: _pInfo.ean, mwh: _pInfo.mwh, maanden: _pInfo.maanden, van: _pInfo.van, tot: _pInfo.tot };
+    // v15.67 (fase 3): TOEGANGSVERMOGEN-CHECK. Ligt de echte maandpiek over 12 maanden onder het
+    // gecontracteerde toegangsvermogen, dan kan dat in het nieuwe/optimale contract lager → extra besparing.
+    try {
+      const op = ui._mgr_ok ? await _opgeladenProfiel(b.project_id, 'afname') : null;
+      const toegangKw = Number(bc.toegangsvermogenKw || bc.toegangsvermogen_kw || 0) || Math.round((+bc.aansluitVermogenKva || 0) * 0.9);
+      if (op && op.maandpiek_kw > 0 && toegangKw > 0 && (op.maanden || 0) >= 6) {
+        const piek = op.maandpiek_kw;
+        const kaart = _kiesTarieven(bc.dnb || '', spanning) || {};
+        const eurKwJaar = Number(kaart.maandpiek_eur_kw_jaar) || Number(kaart.toegangsvermogen_eur_kw_jaar) || Number(kaart.capaciteit_eur_kw_jaar) || 0;
+        if (piek < toegangKw * 0.95) {
+          const nieuw = Math.max(5, Math.ceil(piek / 5) * 5);   // ronde marge net boven de echte piek
+          out.toegangsvermogen_advies = {
+            verlaagbaar: true, huidig_kw: toegangKw, maandpiek_12m_kw: piek, verlaagbaar_naar_kw: nieuw,
+            besparing_indicatie_eur_jaar: eurKwJaar > 0 ? Math.round((toegangKw - nieuw) * eurKwJaar) : null,
+            maanden: op.maanden, bron: 'opgeladen_afname',
+          };
+        } else {
+          out.toegangsvermogen_advies = { verlaagbaar: false, huidig_kw: toegangKw, maandpiek_12m_kw: piek, maanden: op.maanden, bron: 'opgeladen_afname' };
+        }
+      }
+    } catch (e) { console.warn('[kamino/onderhandel] toegangsvermogen-check faalde (niet-blokkerend):', e.message); }
     // diagnose: welk geprojecteerd jaarverbruik + staffelschijf gebruikte de sim? (zo is een profiel-mismatch zichtbaar)
     try {
       const pk = _laadProfielKwartier(profielNaam);
@@ -3291,7 +3388,10 @@ app.post('/api/kamino/productie', async (req, res) => {
     const kva = +bc.aansluitVermogenKva || 100;
     const inverter_kva = +b.inverter_kva || pv_kwp;              // standaard: inverter ≈ PV-vermogen
     const piek_kw = +b.piek_kw || Math.max(1, Math.round(kva * 0.9)); // standaard: uit de aansluiting
-    const profiel_kwartier = _laadProfielKwartier(profielNaam);
+    let profiel_kwartier = _laadProfielKwartier(profielNaam);
+    // v15.67 (fase 2): opgeladen afname-profiel gebruiken voor de zelfconsumptie-berekening (fallback = standaard).
+    let _pbron = null;
+    try { const _mgrOk = await _isManagerReq(req); const op = _mgrOk ? await _opgeladenProfiel(b.project_id, 'afname') : null; if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) { profiel_kwartier = op.kwartier; _pbron = { bron: 'opgeladen_afname', ean: op.ean, mwh: op.mwh, maanden: op.maanden }; } } catch (e) {}
     const a = _analyseerInjectieOptimalisatie(MARKT, {
       pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: afnameJaarMwh,
       injectie_mwh_jaar, injectie_mwh_maand: 0, injectie_maand: 0,
@@ -3306,7 +3406,8 @@ app.post('/api/kamino/productie', async (req, res) => {
       pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: Math.round(afnameJaarMwh*10)/10, profiel: profielNaam,
       _debug: { opbrengst_jaar: o, payback: pb, energie_jaar: e, sturing: a.sturing }
     };
-    console.log(`[kamino/productie] extra=${out.extra_opbrengst_jaar} netto=${out.netto_jaar} tvt=${out.terugverdientijd_jaar} (pv=${pv_kwp} inj=${injectie_mwh_jaar} profiel=${profielNaam})`);
+    if (_pbron) out.profiel_bron = _pbron;   // v15.67 (fase 2): label
+    console.log(`[kamino/productie] extra=${out.extra_opbrengst_jaar} netto=${out.netto_jaar} tvt=${out.terugverdientijd_jaar} (pv=${pv_kwp} inj=${injectie_mwh_jaar} profiel=${profielNaam}${_pbron?' · opgeladen':''})`);
     return res.json(out);
   } catch (e) {
     console.error('[kamino/productie] fout:', e.message);
@@ -3355,7 +3456,11 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
     // v15.54 (Johan): tegel 3 = trigger toegangsvermogen (geen laadplein) → batterij-module die kleiner is dan de
     // aansluiting. Zo krijgt een kleine site een passende (kleine) batterij i.p.v. de vaste 120/260.
     const _kaModule = _kiesBattModule(kva);
-    const baseUi = () => ({
+    // v15.67 (fase 2): opgeladen afname-profiel één keer resolven; elke ui/cfg uit baseUi erft het (fallback = standaard).
+    // v15.68: enkel voor managers.
+    const _kaMgrOk = await _isManagerReq(req);
+    const _kaProfiel = _kaMgrOk ? await _opgeladenProfiel(b.project_id, 'afname').catch(function(){ return null; }) : null;
+    const baseUi = () => Object.assign({
       project: bc.klantNaam || 'kamino', scenario: 'kamino_aansluiting',
       postcode, grd, spanning, profielNaam, jaarverbruik_mwh: volumeMwh,
       pv_curtailment: { actief: false }, bsp: { actief: false }, laadpleinen: [],
@@ -3365,8 +3470,10 @@ app.post('/api/kamino/aansluiting', async (req, res) => {
         vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
       aansluiting_kva: kva, toegangsvermogen_kw: Math.max(1, Math.round(kva * 0.9)),
       max_injectie_kw: 0, jaar: 'specifiek', periodeVan: pVan, periodeTot: pTot,
-      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' }
-    });
+      simulatieperiode: { van: pVan, tot: pTot, type: 'specifiek' },
+      project_id: b.project_id || null
+    }, (_kaProfiel && Array.isArray(_kaProfiel.kwartier) && _kaProfiel.kwartier.length === 35040)
+        ? { _opgeladen_profiel_kwartier: _kaProfiel.kwartier, _profiel_bron: 'opgeladen_afname' } : {});
 
     const job = _jobNieuw();
     res.json({ ok: true, async: true, job_id: job.id });
@@ -4390,6 +4497,7 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
   const simulatorPath = path.join(__dirname, 'simulator.py');
   if (!fs.existsSync(simulatorPath))
     return res.status(500).json({ error:'simulator.py niet gevonden' });
+  input._mgr_ok = await _isManagerReq(req);   // v15.68: opgeladen profiel enkel voor managers
 
   // v15.20: async-modus. De UI zet _async:true, krijgt meteen een job_id en pollt
   // /api/sim-voortgang/:id. Zonder _async blijft alles exact zoals vroeger — oude
@@ -4398,7 +4506,7 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
     const job = _jobNieuw();
     res.json({ ok: true, async: true, job_id: job.id });
     _draaiSim3(input, job)
-      .then(r => { _verrijkIjk(r, input); job.resultaat = r; job.status = 'klaar';
+      .then(r => { _verrijkIjk(r, input); if (input._profiel_info && r && r._meta) r._meta.profiel = input._profiel_info; job.resultaat = r; job.status = 'klaar';
                    _jlog(job, 'klaar', 'Simulatie afgerond.'); })
       .catch(e => { job.fout = e.message; job.status = 'fout';
                     _jlog(job, 'fout', 'Simulatie gefaald: ' + e.message);
@@ -4408,6 +4516,7 @@ app.post('/api/nominatie-sim-3', async (req, res) => {
   try {
     const r = await _draaiSim3(input, null);
     _verrijkIjk(r, input);
+    if (input._profiel_info && r && r._meta) r._meta.profiel = input._profiel_info;   // v15.67: profiel-label
     return res.json(r);
   } catch (e) {
     console.error('[sim-3] fout:', e.message);
@@ -4442,6 +4551,8 @@ app.post('/api/groeipad', async (req, res) => {
   // v15.56 (Johan 01-08): het groeipad stapt nu met de GEBRUIKTE batterijmodule (input.batt_module) i.p.v. de vaste
   // 120/260. Zo groeit een kleine site in 5/10- of 30/60-stappen — consistent met de sizing/pv-sweep/opstelling.
   const _gpKw = _buKw(input), _gpKwh = _buKwh(input);
+  input._mgr_ok = await _isManagerReq(req);   // v15.68: manager-only
+  await _pasOpgeladenAfnameToe(input);   // v15.67: opgeladen afname-profiel (fallback = standaard). cfg-clones erven het.
   try {
     // Gevraagde laadenergie uit de input (Σ per plein), zodat we het % kunnen berekenen.
     const pleinen = Array.isArray(input.laadpleinen) ? input.laadpleinen : [];
@@ -4508,6 +4619,8 @@ app.post('/api/pv-sweep', async (req, res) => {
   pvLijst = [...new Set(pvLijst.map((v) => Math.round(v)))].sort((a, b) => a - b);   // dedupe + oplopend
   if (!(c > 0)) return res.status(400).json({ error: 'aansluiting_kva (vast) is verplicht' });
   if (!pvLijst.length) return res.status(400).json({ error: 'pv_kwp_lijst is verplicht' });
+  input._mgr_ok = await _isManagerReq(req);   // v15.68: manager-only
+  await _pasOpgeladenAfnameToe(input);   // v15.67: opgeladen afname-profiel (fallback = standaard)
   try {
     const stappen = [];
     // v15.51: MARGINALE zelfconsumptie. Bij bestaande PV telde het geblende % (bestaand + nieuw) de zelfconsumptie
@@ -4581,6 +4694,8 @@ app.post('/api/opstelling', async (req, res) => {
   const c = Number(input.aansluiting_kva || input.aansluitingKva || 0);
   const k = Math.max(0, Math.round(Number(input.aantal_batterijen || 0)));
   if (!(c > 0)) return res.status(400).json({ error: 'aansluiting_kva is verplicht' });
+  input._mgr_ok = await _isManagerReq(req);   // v15.68: manager-only
+  await _pasOpgeladenAfnameToe(input);   // v15.67: opgeladen afname-profiel (fallback = standaard)
   try {
     const cfg = JSON.parse(JSON.stringify(input));
     cfg.aansluiting_kva = c; cfg.aansluitingKva = c; cfg.toegangsvermogen_kw = c;
@@ -4684,6 +4799,10 @@ app.get('/api/sim-voortgang/:id', (req, res) => {
 
 async function _draaiSim3(input, job) {
   const startTime = Date.now();
+  // v15.67: opgeladen afname-profiel toepassen (fallback = standaard). Eén keer resolven; buildSimInput
+  // (via _variantUi-clone) neemt het over voor álle runs van deze studie.
+  const _profielInfo = await _pasOpgeladenAfnameToe(input);
+  if (_profielInfo) { input._profiel_info = _profielInfo; _jlog(job, 'start', `Gerekend met opgeladen afname-profiel (EAN ${_profielInfo.ean || '?'}, ${_profielInfo.mwh} MWh, ${_profielInfo.maanden} maanden).`, { profiel_bron: 'opgeladen_afname' }); }
   {
     const _sub = r => (r && r.jaarfactuur) ? (r.jaarfactuur.subtotaal_excl_btw || 0) : 0;
     const _kpi = (v, onbalansNvt) => {
@@ -4909,6 +5028,89 @@ async function _draaiSim3(input, job) {
 }
 
 // ─── BUILD SIM INPUT ─────────────────────────────────────────────────────────
+// ─── v15.67.0 — OPGELADEN FLUVIUS-PROFIEL (FASE 2): CSV → genormaliseerde 35040-vorm ─────────────
+// Zet het door de converter opgeslagen kwartier-CSV (Date;kWh, ~13 maanden) om naar de vorm die
+// simulator.py verwacht: een 35040-array die op de 2025-kalender is geïndexeerd (dag-van-jaar×96 +
+// kwartier-van-dag) en genormaliseerd is tot som=1.0. Dubbele kwartieren (13e maand-overlap) worden
+// gemiddeld. Berekent meteen de echte maandpiek over de laatste 12 maanden (voor de toegangsvermogen-
+// check, fase 3). Bij eender welke fout → null → de analyse valt terug op het standaardprofiel.
+const _OPGELADEN_CACHE = new Map();   // pid|type|bestand → { val, exp }
+const _CUMDAY_2025 = [0,31,59,90,120,151,181,212,243,273,304,334];   // dag-van-jaar-start per maand (2025, geen schrikkeljaar)
+function _parseProfielCsv(csv) {
+  if (!csv || typeof csv !== 'string') return null;
+  const lines = csv.split('\n');
+  const acc = new Array(35040).fill(0), cnt = new Array(35040).fill(0);
+  const maandMax = {};
+  let tot = 0, n = 0, van = null, totS = null;
+  for (let i = 1; i < lines.length; i++) {
+    const ln = lines[i].trim(); if (!ln) continue;
+    const p = ln.split(';'); if (p.length < 2) continue;
+    const ds = p[0].trim();
+    const v = parseFloat(String(p[1] || '').replace(',', '.'));
+    if (isNaN(v)) continue;
+    const m = ds.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})/); if (!m) continue;
+    let d = +m[1], mo = +m[2]; const y = +m[3], hh = +m[4], mi = +m[5];
+    if (van === null) van = ds; totS = ds; tot += v; n++;
+    const mk = y + '-' + String(mo).padStart(2, '0'); const kw = v * 4;
+    if (!(mk in maandMax) || kw > maandMax[mk]) maandMax[mk] = kw;
+    if (mo === 2 && d === 29) d = 28;   // 2025 kent geen 29 feb
+    if (mo < 1 || mo > 12) continue;
+    const doy = _CUMDAY_2025[mo - 1] + (d - 1);
+    if (doy < 0 || doy > 364) continue;
+    const q = hh * 4 + Math.floor(mi / 15);
+    if (q < 0 || q > 95) continue;
+    const idx = doy * 96 + q;
+    acc[idx] += v; cnt[idx]++;
+  }
+  if (n === 0) return null;
+  let som = 0;
+  for (let i = 0; i < 35040; i++) { if (cnt[i] > 0) acc[i] = acc[i] / cnt[i]; som += acc[i]; }
+  if (!(som > 0)) return null;
+  for (let i = 0; i < 35040; i++) acc[i] = acc[i] / som;
+  const mks = Object.keys(maandMax).sort();
+  const laatste12 = mks.slice(-12);
+  let maandpiek = 0; laatste12.forEach(k => { if (maandMax[k] > maandpiek) maandpiek = maandMax[k]; });
+  return { kwartier: acc, maandpiek_kw: Math.round(maandpiek), mwh: Math.round(tot / 1000), van, tot: totS, aantal: n, maanden: mks.length };
+}
+async function _opgeladenProfiel(projectId, type) {
+  if (!SUPABASE_OK || !projectId) return null;
+  const pid = String(projectId).trim().toUpperCase();
+  if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(pid)) return null;
+  const veiligPid = pid.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+  let rec = null;
+  try { rec = JSON.parse(await _factuurDownload(`kamino/${veiligPid}.json`)); } catch (e) { return null; }
+  const meta = rec && rec.profielen && rec.profielen[type];
+  if (!meta || !meta.bestand) return null;
+  const ck = pid + '|' + type + '|' + meta.bestand;
+  const hit = _OPGELADEN_CACHE.get(ck);
+  if (hit && hit.exp > Date.now()) return hit.val;
+  let csv = null;
+  try { csv = await _factuurDownload(meta.bestand); } catch (e) { return null; }
+  const val = _parseProfielCsv(csv);
+  if (val) { val.bestand = meta.bestand; val.ean = meta.ean || null; val.type = type; }
+  _OPGELADEN_CACHE.set(ck, { val, exp: Date.now() + 10 * 60 * 1000 });
+  return val;
+}
+// v15.68: profiel-analyses zijn MANAGER-ONLY (Johan). Sellers/adviseurs blijven op het standaardprofiel
+// → veel eenvoudiger + geen verwarring. Non-blocking role-check (fout → false → standaardprofiel).
+async function _isManagerReq(req) {
+  try { const u = await resolveUser(req); return !!(u && _isManager(u)); } catch (e) { return false; }
+}
+// Attach het opgeladen afname-profiel aan een sim-input (mutatie), fallback-safe + MANAGER-ONLY.
+// De caller zet input._mgr_ok = true (via _isManagerReq) wanneer de aanvrager een manager is.
+async function _pasOpgeladenAfnameToe(input) {
+  try {
+    if (!input || !input.project_id || !input._mgr_ok) return null;
+    const op = await _opgeladenProfiel(input.project_id, 'afname');
+    if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) {
+      input._opgeladen_profiel_kwartier = op.kwartier;
+      input._profiel_bron = 'opgeladen_afname';
+      return { bron: 'opgeladen_afname', ean: op.ean, mwh: op.mwh, van: op.van, tot: op.tot, maandpiek_kw: op.maandpiek_kw, maanden: op.maanden, bestand: op.bestand };
+    }
+  } catch (e) { console.warn('[opgeladen-profiel] toepassen faalde (val terug op standaard):', e.message); }
+  return null;
+}
+
 function buildSimInput(ui) {
   const grd     = ui.grd || 'Fluvius West';
   const spanning = ui.spanning || 'LS';
@@ -5084,6 +5286,10 @@ function buildSimInput(ui) {
   // blijft als bovengrens voor de LP staan zodat ZEER hoge BSP-laad-pieken alsnog
   // worden afgeremd. De combinatie pakt de meeste maandpiek-shaving op.
   const profielKwartier = (() => {
+    // v15.67: OPGELADEN Fluvius-profiel heeft voorrang (fallback = standaard/named/MARKT → geen regressie).
+    if (Array.isArray(ui._opgeladen_profiel_kwartier) && ui._opgeladen_profiel_kwartier.length === 35040) {
+      return ui._opgeladen_profiel_kwartier;
+    }
     const pNaam = ui.profielNaam || ui.profiel_naam || 'Slager';
     const profielDir = path.join(__dirname, 'data', 'profielen');
     if (fs.existsSync(profielDir)) {
