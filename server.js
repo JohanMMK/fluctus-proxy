@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.69.0 (09-08, Johan): FASE 4 — TEGEL 2 OP HET ECHTE INJECTIEPROFIEL. _analyseerInjectieOptimalisatie
+//                aanvaardt nu een opgeladen injectie-kwartierprofiel (p.injectie_kwartier, 35040, som=1): de curtailment/
+//                onbalans-waardering draait op de ECHTE gemeten injectievorm i.p.v. de gemodelleerde zonvorm. Nieuwe helper
+//                _pasOpgeladenInjectieToe (manager-only, project_id). Fallback = ONGEWIJZIGD (zonvorm) bij geen manager/geen
+//                profiel/fout. kamino/productie wired + label out.injectie_bron. GEEN wijziging aan het afname-pad.
 // Versie:        v15.68.0 (08-08, Johan): PROFIEL-ANALYSES MANAGER-ONLY. Het opgeladen Fluvius-profiel wordt nu enkel
 //                in de analyse gebruikt wanneer de aanvrager een MANAGER is (_isManagerReq → input._mgr_ok). Sellers/
 //                adviseurs blijven altijd op het standaardprofiel (eenvoud + geen verwarring). Toegepast op
@@ -982,13 +987,28 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
   // 200 MWh) veel groter is dan de productie (bv. 27 MWh) — dat gaf voorheen een 10× te lage opbrengst.
   let prodTot=0; const prodArr=new Array(N);
   for(let i=0;i<N;i++){ const prod=productiePeriode*solarFrac[i]; prodArr[i]=prod; prodTot+=prod; }
-  const injFrac = prodTot>0 ? Math.min(1, injGegevenPeriode/prodTot) : 0;   // aandeel van de productie dat geïnjecteerd wordt
+  // ── Fase 4 (v15.69): opgeladen INJECTIE-profiel → waardering (curtailment/onbalans) op de ECHTE gemeten
+  // injectievorm i.p.v. de gemodelleerde zonvorm. Fallback = ONGEWIJZIGD (zonvorm) bij ontbrekend/ongeldig
+  // profiel. Uitgelijnd op de MARKT-timeline via _idx2025 (identiek aan solar/prof), genormaliseerd som=1.
+  const injProfiel = (Array.isArray(p.injectie_kwartier)&&p.injectie_kwartier.length===35040)?p.injectie_kwartier:null;
+  let injRealFrac=null;
+  if(injProfiel){
+    injRealFrac=new Array(N); let iSum=0;
+    for(let i=0;i<N;i++){ const d=new Date(van.getTime()+i*15*60*1000); const idx=_idx2025(d); const v=(idx>=0&&idx<injProfiel.length)?(+injProfiel[idx]||0):0; injRealFrac[i]=v; iSum+=v; }
+    if(iSum>0){ for(let i=0;i<N;i++) injRealFrac[i]/=iSum; } else { injRealFrac=null; }
+  }
+  if(injRealFrac && injGegevenPeriode<=0 && +p.injectie_profiel_mwh>0){
+    injGegevenPeriode = (+p.injectie_profiel_mwh)*1000*periodeJaarFractie;   // geen factuurvolume → val terug op het gemeten profielvolume
+  }
+  const _injBron = injRealFrac ? 'opgeladen_injectie' : 'gemodelleerd';
+  const injFrac = prodTot>0 ? Math.min(1, injGegevenPeriode/prodTot) : 0;   // aandeel van de productie dat geïnjecteerd wordt (fallback-pad)
   let injTotReco=0, demTot=0;
   const inj = new Array(N);
   for(let i=0;i<N;i++){
-    inj[i] = prodArr[i]*injFrac;                          // injectie ∝ productie, geschaald op het opgegeven volume
-    const selfc = prodArr[i]-inj[i];                      // zelfconsumptie dat kwartier
-    const dem = afnamePeriodeKwh*profFrac[i] + selfc;     // gebouw-demand = afname + zelfconsumptie
+    inj[i] = injRealFrac ? (injGegevenPeriode*injRealFrac[i])   // Fase 4: ECHTE gemeten vorm, geschaald op het opgegeven jaarvolume
+                         : (prodArr[i]*injFrac);                 // fallback: injectie ∝ gemodelleerde productie (ongewijzigd)
+    const selfc = Math.max(0, prodArr[i]-inj[i]);              // zelfconsumptie dat kwartier (≥0; no-op voor het fallback-pad)
+    const dem = afnamePeriodeKwh*profFrac[i] + selfc;          // gebouw-demand = afname + zelfconsumptie
     injTotReco+=inj[i]; demTot+=dem;
   }
   const zelfconsumptie = Math.max(0, prodTot - injTotReco);   // = productie − injectie (voor rapportage)
@@ -1107,7 +1127,8 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
 
   return {
     invoer:{ pv_kwp:Math.round(kwp*10)/10, inverter_kva:Math.round(kva*10)/10, piek_kw:piek||null,
-             afname_mwh_jaar:afnameJaarMwh, injectie_gegeven_mwh_periode:Math.round(injGegevenPeriode/100)/10 },
+             afname_mwh_jaar:afnameJaarMwh, injectie_gegeven_mwh_periode:Math.round(injGegevenPeriode/100)/10,
+             injectie_bron:_injBron },
     periode:{ van:MARKT.van, tot:MARKT.tot, n_kwartieren:N, jaar_fractie:Math.round(periodeJaarFractie*1000)/1000 },
     sturing:{ forecast_modus:modus, methode:'predict-nominate-steer (seeded) + capture van het plafond',
               sigma_da_eur_mwh:Math.round(SIG_DA*10)/10, sigma_imb_eur_mwh:Math.round(SIG_IMB*10)/10,
@@ -3391,12 +3412,16 @@ app.post('/api/kamino/productie', async (req, res) => {
     let profiel_kwartier = _laadProfielKwartier(profielNaam);
     // v15.67 (fase 2): opgeladen afname-profiel gebruiken voor de zelfconsumptie-berekening (fallback = standaard).
     let _pbron = null;
-    try { const _mgrOk = await _isManagerReq(req); const op = _mgrOk ? await _opgeladenProfiel(b.project_id, 'afname') : null; if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) { profiel_kwartier = op.kwartier; _pbron = { bron: 'opgeladen_afname', ean: op.ean, mwh: op.mwh, maanden: op.maanden }; } } catch (e) {}
-    const a = _analyseerInjectieOptimalisatie(MARKT, {
-      pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: afnameJaarMwh,
+    const _mgrOk = await _isManagerReq(req);
+    try { const op = _mgrOk ? await _opgeladenProfiel(b.project_id, 'afname') : null; if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) { profiel_kwartier = op.kwartier; _pbron = { bron: 'opgeladen_afname', ean: op.ean, mwh: op.mwh, maanden: op.maanden }; } } catch (e) {}
+    // v15.69 (fase 4): opgeladen INJECTIE-profiel → curtailment/onbalans op de ECHTE gemeten vorm (fallback = zonvorm).
+    const _iparams = { pv_kwp, inverter_kva, piek_kw, afname_mwh_jaar: afnameJaarMwh,
       injectie_mwh_jaar, injectie_mwh_maand: 0, injectie_maand: 0,
-      forecast_modus: 'realistic', profiel_kwartier
-    });
+      forecast_modus: 'realistic', profiel_kwartier,
+      project_id: b.project_id, _mgr_ok: _mgrOk };
+    const _ibron = await _pasOpgeladenInjectieToe(_iparams);
+    if (_ibron && !(injectie_mwh_jaar > 0) && _iparams.injectie_profiel_mwh > 0) _iparams.injectie_mwh_jaar = _iparams.injectie_profiel_mwh;   // geen factuurvolume → gemeten profielvolume
+    const a = _analyseerInjectieOptimalisatie(MARKT, _iparams);
     const o = a.opbrengst_jaar || {}, pb = a.payback || {}, e = a.energie_jaar || {};
     const out = {
       extra_opbrengst_jaar: Math.round(+o.meerwaarde_totaal_eur || 0),
@@ -3407,6 +3432,7 @@ app.post('/api/kamino/productie', async (req, res) => {
       _debug: { opbrengst_jaar: o, payback: pb, energie_jaar: e, sturing: a.sturing }
     };
     if (_pbron) out.profiel_bron = _pbron;   // v15.67 (fase 2): label
+    if (_ibron) out.injectie_bron = _ibron;   // v15.69 (fase 4): label opgeladen injectieprofiel
     console.log(`[kamino/productie] extra=${out.extra_opbrengst_jaar} netto=${out.netto_jaar} tvt=${out.terugverdientijd_jaar} (pv=${pv_kwp} inj=${injectie_mwh_jaar} profiel=${profielNaam}${_pbron?' · opgeladen':''})`);
     return res.json(out);
   } catch (e) {
@@ -5108,6 +5134,22 @@ async function _pasOpgeladenAfnameToe(input) {
       return { bron: 'opgeladen_afname', ean: op.ean, mwh: op.mwh, van: op.van, tot: op.tot, maandpiek_kw: op.maandpiek_kw, maanden: op.maanden, bestand: op.bestand };
     }
   } catch (e) { console.warn('[opgeladen-profiel] toepassen faalde (val terug op standaard):', e.message); }
+  return null;
+}
+
+// v15.69 (fase 4): opgeladen INJECTIE-profiel aan de injectie-analyse-params hangen (mutatie), fallback-safe +
+// MANAGER-ONLY. De caller zet p._mgr_ok (via _isManagerReq) + p.project_id. Zet p.injectie_kwartier (35040, som=1)
+// + p.injectie_profiel_mwh (gemeten volume). Bij geen manager / geen profiel / fout → null → zonvorm-fallback.
+async function _pasOpgeladenInjectieToe(p) {
+  try {
+    if (!p || !p.project_id || !p._mgr_ok) return null;
+    const op = await _opgeladenProfiel(p.project_id, 'injectie');
+    if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) {
+      p.injectie_kwartier = op.kwartier;
+      p.injectie_profiel_mwh = +op.mwh || 0;
+      return { bron: 'opgeladen_injectie', ean: op.ean, mwh: op.mwh, van: op.van, tot: op.tot, maandpiek_kw: op.maandpiek_kw, maanden: op.maanden, bestand: op.bestand };
+    }
+  } catch (e) { console.warn('[opgeladen-injectie] toepassen faalde (val terug op zonvorm):', e.message); }
   return null;
 }
 
