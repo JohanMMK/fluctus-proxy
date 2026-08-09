@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.70.0 (09-08, Johan): NO-FACTUUR-FLOW + LABEL. /api/kamino/onderhandel werkt nu ook ZONDER
+//                factuur-energiepost: op een referentieprijs (referentie_eur_mwh, default 90) × verbruik → geen_factuur:true.
+//                /api/nominatie-sim is async + past het opgeladen afname-profiel toe (tegel 1 op echt profiel) en draagt
+//                profiel_bron als label. /api/injectie-optimalisatie draagt profiel_bron+injectie_bron. Fallback overal ongewijzigd.
 // Versie:        v15.69.0 (09-08, Johan): FASE 4 — TEGEL 2 OP HET ECHTE INJECTIEPROFIEL. _analyseerInjectieOptimalisatie
 //                aanvaardt nu een opgeladen injectie-kwartierprofiel (p.injectie_kwartier, 35040, som=1): de curtailment/
 //                onbalans-waardering draait op de ECHTE gemeten injectievorm i.p.v. de gemodelleerde zonvorm. Nieuwe helper
@@ -3272,8 +3276,17 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
     const b = req.body || {}; const bc = b.baseCase || {};
     const profielNaam = String(b.profielNaam || b.profiel || '').trim();
     if (!profielNaam) return res.status(400).json({ error: 'profielNaam verplicht' });
-    const energie = +bc.totaalEnergieExclBtw || 0;
-    if (!(energie > 0)) return res.status(400).json({ error: 'geen energiepost in de factuurgegevens' });
+    let energie = +bc.totaalEnergieExclBtw || 0;
+    // v15.70 (no-factuur-flow): zonder factuur-energiepost rekenen we op een referentieprijs × volume,
+    // zodat een Kamino-project zonder PDF (EAN/profiel/verbruik) tóch een onderhandelingsmarge krijgt.
+    let _geenFactuur = false, _refEurMwh = 0;
+    if (!(energie > 0)) {
+      const _volMwhChk = (+bc.afnameKwh || 0) / 1000;
+      if (!(_volMwhChk > 0)) return res.status(400).json({ error: 'zonder factuur: afnameKwh (verbruik) verplicht' });
+      _refEurMwh = +b.referentie_eur_mwh || +bc.referentieEurMwh || (CONTRACT_RAW && +CONTRACT_RAW.referentie_eur_mwh) || 90;
+      energie = _refEurMwh * _volMwhChk;   // indicatieve "huidige" energiepost
+      _geenFactuur = true;
+    }
     const distributie = +bc.totaalDistributieExclBtw || 0, heffingen = +bc.totaalHeffingenExclBtw || 0;
     const subtot = (+bc.totaalExclBtw || 0) || (energie + distributie + heffingen);
     const pVan = bc.periodeVan, pTot = bc.periodeTot;
@@ -3366,6 +3379,7 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
       pricing: result.pricing || jf.pricing || result._pricing || null,
       effectief_jaarverbruik_mwh: result.effectief_jaarverbruik_mwh || jf.effectief_jaarverbruik_mwh || result.effectief_jaarverbruik || null
     };
+    out.geen_factuur = _geenFactuur; if (_geenFactuur) out.referentie_eur_mwh = Math.round(_refEurMwh);   // v15.70
     console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam} · vergroening=${ui.contract.vergroening_eur_per_mwh} · geproj=${out.geprojecteerd_mwh} · schijf=${out.schijf})`);
     return res.json(out);
   } catch (e) {
@@ -3707,7 +3721,7 @@ app.post('/api/factuur-staffel-bepalen', (req, res) => {
 
 
 // ─── SIMULATIE ────────────────────────────────────────────────────────────────
-app.post('/api/nominatie-sim', (req, res) => {
+app.post('/api/nominatie-sim', async (req, res) => {
   const input = req.body;
   if (!input || typeof input !== 'object')
     return res.status(400).json({ error:'body is verplicht' });
@@ -3744,6 +3758,9 @@ app.post('/api/nominatie-sim', (req, res) => {
     solar_nonzero: MARKT.solar_norm ? MARKT.solar_norm.filter(v=>v>0).length : 0,
     van: MARKT.van, tot: MARKT.tot
   } : 'NULL');
+  // v15.70 (#1/label): opgeladen afname-profiel ook op de interactieve nominatie-sim (tegel 1 factuuranalyse) toepassen.
+  input._mgr_ok = await _isManagerReq(req);
+  const _piNom = await _pasOpgeladenAfnameToe(input);
   const simInput  = buildSimInput(input);
   console.log('[sim] pvVorm length:', simInput.pv ? simInput.pv.vorm_kwartier.length : 0,
     'nonzero:', simInput.pv ? simInput.pv.vorm_kwartier.filter(v=>v>0).length : 0);
@@ -3769,6 +3786,7 @@ app.post('/api/nominatie-sim', (req, res) => {
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
     result._meta = { elapsed_ms:elapsed, server_version:'15.11.1' };
     result._serverLog = stderr;
+    if (_piNom) result.profiel_bron = { bron:'opgeladen_afname', ean:_piNom.ean, mwh:_piNom.mwh, maanden:_piNom.maanden, maandpiek_kw:_piNom.maandpiek_kw };   // v15.70 label
     res.json(result);
   });
 
@@ -4778,8 +4796,12 @@ app.post('/api/injectie-optimalisatie', async (req, res) => {
   if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
   try {
     const profielNaam = input.profielNaam || input.profiel_naam || null;
-    const profiel_kwartier = profielNaam ? _laadProfielKwartier(profielNaam) : null;
-    const r = _analyseerInjectieOptimalisatie(MARKT, {
+    let profiel_kwartier = profielNaam ? _laadProfielKwartier(profielNaam) : null;
+    // v15.69 (fase 4): opgeladen afname- én injectie-profiel toepassen (manager-only, project_id; fallback = standaard/zonvorm).
+    const _mgrOk = await _isManagerReq(req);
+    let _pbron = null;
+    try { const opA = _mgrOk ? await _opgeladenProfiel(input.project_id, 'afname') : null; if (opA && Array.isArray(opA.kwartier) && opA.kwartier.length === 35040) { profiel_kwartier = opA.kwartier; _pbron = { bron:'opgeladen_afname', ean:opA.ean, mwh:opA.mwh, maanden:opA.maanden }; } } catch (e) {}
+    const _iparams = {
       pv_kwp: Number(input.pv_kwp || input.pvKwp || 0),
       inverter_kva: Number(input.inverter_kva || input.kva || 0),
       piek_kw: Number(input.piek_kw || input.piekKw || 0),
@@ -4789,7 +4811,11 @@ app.post('/api/injectie-optimalisatie', async (req, res) => {
       injectie_maand: Number(input.injectie_maand || 0),
       forecast_modus: input.forecast_modus || input.bspForecastModus || 'realistic',
       profiel_kwartier: profiel_kwartier,
-    });
+      project_id: input.project_id, _mgr_ok: _mgrOk,
+    };
+    const _ibron = await _pasOpgeladenInjectieToe(_iparams);
+    if (_ibron && !(_iparams.injectie_mwh_jaar > 0) && _iparams.injectie_profiel_mwh > 0) _iparams.injectie_mwh_jaar = _iparams.injectie_profiel_mwh;
+    const r = _analyseerInjectieOptimalisatie(MARKT, _iparams);
     const _o = r.opbrengst_jaar || {}, _st = r.sturing || {};
     const _plafond = (r.opbrengst_jaar ? (+_o.met_curtail_eur||0) : 0) + (+_st.onbalans_potentie_eur||0);
     const _ijk = _bouwIjk('injectie-solaractive','opbrengst',
@@ -4801,7 +4827,7 @@ app.post('/api/injectie-optimalisatie', async (req, res) => {
         sigma_da_eur_mwh:_st.sigma_da_eur_mwh, sigma_imb_eur_mwh:_st.sigma_imb_eur_mwh, thr_factor:_st.thr_factor },
       { basis:+_o.vandaag_spot_eur||0, sturing:+_o.met_curtail_eur||0, onbalans:+_o.met_curtail_onbalans_eur||0,
         plafond:_plafond });
-    return res.json({ ok: true, analyse: r, _ijk: _ijk, _meta: { server_version: SERVER_VERSIE } });
+    return res.json({ ok: true, analyse: r, _ijk: _ijk, profiel_bron: _pbron, injectie_bron: _ibron, _meta: { server_version: SERVER_VERSIE } });
   } catch (e) {
     console.error('[injectie-opt] fout:', e.message);
     return res.status(500).json({ error: 'injectie-optimalisatie gefaald: ' + e.message });
