@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.71.0 (09-08, Johan): GEEN AUDIT-MAIL BIJ VERWIJDEREN. action='delete' verstuurt geen Brevo-mail meer;
+//                de export blijft lokaal downloadbaar via de UI. (_verzendAuditMail blijft bestaan maar wordt niet meer aangeroepen.)
 // Versie:        v15.70.0 (09-08, Johan): NO-FACTUUR-FLOW + LABEL. /api/kamino/onderhandel werkt nu ook ZONDER
 //                factuur-energiepost: op een referentieprijs (referentie_eur_mwh, default 90) × verbruik → geen_factuur:true.
 //                /api/nominatie-sim is async + past het opgeladen afname-profiel toe (tegel 1 op echt profiel) en draagt
@@ -2051,8 +2053,8 @@ app.post('/api/manager/user', async (req, res) => {
       const txt = _bouwVerwijderExport(prof, authUid, grants, logs, certs, nu, u, herlink);
       const bestandsnaam = `verwijderd_${email.replace(/[^a-z0-9]+/gi, '_')}_${nu.stempel.replace(/[^0-9]/g, '')}.txt`;
 
-      // 3) Export mailen (best-effort — blokkeert de verwijdering niet)
-      const mail = await _verzendAuditMail(onderwerp, txt, bestandsnaam);
+      // 3) v15.71 (Johan 09-08): GEEN mail bij verwijderen — de audit-export wordt enkel lokaal gedownload (vangnet).
+      const mail = { sent: false, reden: 'uitgeschakeld' };
 
       // 4) Verwijderen: logs → grants → profiel → auth-user (in deze volgorde i.v.m. FK's)
       if (authUid) {
