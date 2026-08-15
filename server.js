@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.72.0 (2026-08-15 20:11, Johan): SIMULEER-KNOP. _draaiSim3 kent nu de vlag input._simuleer_enkel →
+//                forceert EXACT de opgegeven installatie in 3 sturingen (modus 'enkel'), zonder opstellingen-vergelijking,
+//                batterij-/PV-sweep of groeipad. Geguard: enkel de nieuwe Simuleer-knop zet de vlag; alle bestaande
+//                flows (Ontwerp/nominatie-sim-3, autopilot) ONgewijzigd. Vereist simulator.html v1.63.73+.
 // Versie:        v15.71.0 (09-08, Johan): GEEN AUDIT-MAIL BIJ VERWIJDEREN. action='delete' verstuurt geen Brevo-mail meer;
 //                de export blijft lokaal downloadbaar via de UI. (_verzendAuditMail blijft bestaan maar wordt niet meer aangeroepen.)
 // Versie:        v15.70.0 (09-08, Johan): NO-FACTUUR-FLOW + LABEL. /api/kamino/onderhandel werkt nu ook ZONDER
@@ -4876,6 +4880,23 @@ async function _draaiSim3(input, job) {
     // Probe: één 'geen'-run op de originele config → capaciteits-oordeel (uit simulator.py).
     const probe = await _runSimulatorOnce(buildSimInput(_variantUi(input, 'geen')));
     const cap = (probe.laadplein && probe.laadplein.capaciteit) || { voldoende: true };
+
+    // ── v15.72.0 (Johan 15-08): "SIMULEER"-knop — forceer EXACT de opgegeven installatie in 3 sturingen.
+    // Geguard op input._simuleer_enkel: enkel de nieuwe Simuleer-knop zet die vlag → alle bestaande flows
+    // (Ontwerp/nominatie-sim-3, autopilot) blijven ONGEWIJZIGD. Hergebruikt de bestaande 'enkel'-tak: geen
+    // opstellingen-vergelijking, geen batterij-/PV-sweep, geen groeipad. Zo simuleert de adviseur een
+    // bestaande of gekozen installatie rechtstreeks (één config → gesimuleerde factuur + meerwaarde-sturing).
+    if (input._simuleer_enkel) {
+      const [_stF, _onbF] = await Promise.all([
+        _runSimulatorOnce(buildSimInput(_variantUi(input, 'sturing'))),
+        heeftFlex ? _runSimulatorOnce(buildSimInput(_variantUi(input, 'onbalans'))) : Promise.resolve(null),
+      ]);
+      const varianten = { geen: probe, sturing: _stF, onbalans: heeftFlex ? _onbF : _stF };
+      const kpi_sturing = _kpi(varianten, !heeftFlex);
+      _jlog(job, 'klaar', `Simulatie van de opgegeven installatie (${Math.round((Date.now()-startTime)/1000)}s)`);
+      return { ok: true, modus: 'enkel', varianten, kpi_sturing, capaciteit: cap, simuleer: true,
+        _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.72.0', heeftFlex, simuleer: true } };
+    }
 
     // ── v15.35.0: Geen laadplein → BATTERIJ-ONLY KAMINO op het bestaande verbruik.
     // We sweepen 1…Nmax batterijen (tot 120 kW boven het toegangsvermogen), kiezen de
