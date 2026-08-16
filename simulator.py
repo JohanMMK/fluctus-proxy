@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.11.1 (2026-08-16, Johan): FLOOR p_charge/p_discharge op >=0 bij LP-extractie. Bij een
+#                INFEASIBLE maand-LP (EV-laadvraag > aansluiting+batterij) gaf CBC garbage variabele-waarden
+#                buiten de bounds (grote NEGATIEVE p_ch/p_dis) terug; de clip kapte enkel de bovengrens. Die
+#                negatieve p_ch vervuilden de PV-energiebalans-routing (negatieve 'naar de batterij', injectie >
+#                gebruikte PV) en de cycli. max(0.0, .) is no-op bij optimale solves. ENKEL weergave/balans + cycli.
 # Versie:        v1.11.0 (base 'sturing' arbitrage-case piek-bewust: nieuwe lp_dispatch_month_arb draait
 #                spot-arbitrage + PIEKSHAVING + zelfconsumptie op kalendermaand-niveau. De maandpiek-term
 #                (maandpiek_B/12 + transport_maandpiek_D) verhuist piekshaving van de onbalans-windfall (B)
@@ -1125,8 +1130,8 @@ def lp_dispatch_day(
         log.warning(f"LP-status non-optimal: {status_str} — output kan onnauwkeurig zijn")
 
     # Extract values
-    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    p_ch_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_ch]
+    p_dis_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_dis]
     grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
     grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
     soc_vals = [pulp.value(v) or 0.0 for v in soc]
@@ -1305,8 +1310,8 @@ def lp_dispatch_month_arb(
     if status_str != 'Optimal':
         log.warning(f"Maand-arbitrage-LP non-optimal: {status_str} — output kan onnauwkeurig zijn")
 
-    p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-    p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+    p_ch_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_ch]
+    p_dis_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_dis]
     grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
     grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
     soc_vals = [pulp.value(v) or 0.0 for v in soc]
@@ -1515,8 +1520,8 @@ def lp_dispatch_day_bsp(
         nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
         nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
         pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
-        p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-        p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+        p_ch_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_ch]
+        p_dis_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_dis]
         grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
         grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
         soc_vals = [pulp.value(v) or 0.0 for v in soc]
@@ -1935,8 +1940,8 @@ def lp_dispatch_month_bsp(
         nom_afn_vals = [pulp.value(v) or 0.0 for v in nom_afn]
         nom_inj_vals = [pulp.value(v) or 0.0 for v in nom_inj]
         pv_curt_vals = [pulp.value(v) or 0.0 for v in pv_curt]
-        p_ch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-        p_dis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+        p_ch_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_ch]
+        p_dis_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_dis]
         grid_in_vals = [pulp.value(v) or 0.0 for v in grid_in]
         grid_out_vals = [pulp.value(v) or 0.0 for v in grid_out]
         soc_vals = [pulp.value(v) or 0.0 for v in soc]
@@ -2589,8 +2594,8 @@ def lp_dispatch_day_stacked(
 
         gin_vals = [pulp.value(v) or 0.0 for v in gin]
         gout_vals = [pulp.value(v) or 0.0 for v in gout]
-        pch_vals = [pulp.value(v) or 0.0 for v in p_ch]
-        pdis_vals = [pulp.value(v) or 0.0 for v in p_dis]
+        pch_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_ch]
+        pdis_vals = [max(0.0, pulp.value(v) or 0.0) for v in p_dis]
 
         # v1.6 post-solve clip
         _tol = 0.01
