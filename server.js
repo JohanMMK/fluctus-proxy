@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.73.0 (2026-08-16, Johan): THUISLADEN-TEGEL. Nieuwe route POST /api/thuisladen — bouwt een
+//                residentiële base-input (buildSimInput) en spawnt simulator.py in de geïsoleerde _modus:'thuisladen'
+//                (30 anker-dispatches, 6 batterij-kWh × 5 PV-panelen, ALLE zonder onbalans). Frontend interpoleert +
+//                simuleert losse cellen bij. Onbalans blijft buiten de zoektocht (extra winst apart). VOLLEDIG
+//                geïsoleerd: geen enkele bestaande route/flow raakt gewijzigd. Vereist simulator.py met run_thuisladen.
 // Versie:        v15.72.0 (2026-08-15 20:11, Johan): SIMULEER-KNOP. _draaiSim3 kent nu de vlag input._simuleer_enkel →
 //                forceert EXACT de opgegeven installatie in 3 sturingen (modus 'enkel'), zonder opstellingen-vergelijking,
 //                batterij-/PV-sweep of groeipad. Geguard: enkel de nieuwe Simuleer-knop zet de vlag; alle bestaande
@@ -4651,6 +4656,106 @@ app.post('/api/groeipad', async (req, res) => {
   } catch (e) {
     console.error('[groeipad] fout:', e.message);
     return res.status(500).json({ error: 'groeipad gefaald: ' + e.message });
+  }
+});
+
+// ── THUISLADEN: POST /api/thuisladen ─────────────────────────────────────────
+// Cafetariaplan-laadpaal (particulier). Bouwt één residentiële base-input via
+// buildSimInput en laat simulator.py (_modus:'thuisladen') het ankernet van
+// 30 dispatches (6 batterij-kWh × 5 PV-panelen, ALLE zonder onbalans) draaien.
+// De frontend interpoleert daar tussen (spline/bilineair) en kan losse cellen
+// bijsimuleren. Onbalans blijft — per Johan — buiten de zoektocht (extra winst
+// apart, client-side indicatief). Geen regressie op andere tegels: de mode is
+// volledig geïsoleerd (eigen _modus-tak in main() + run_thuisladen()).
+app.post('/api/thuisladen', async (req, res) => {
+  const b = req.body || {};
+  if (typeof b !== 'object') return res.status(400).json({ error: 'body is verplicht' });
+  if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+  const inv = b.in || {};                 // klant-invoer (IN uit de frontend)
+  const par = b.params || {};             // model-/procesparameters (P uit de frontend)
+  const wagens = Array.isArray(inv.wagens) ? inv.wagens : [];
+  if (!wagens.length) return res.status(400).json({ error: 'minstens één wagen is verplicht' });
+
+  // Fasegrens → harde kVA-cap (2 fasen = 5 kVA, 3 fasen = 25 kVA).
+  const maxKva = Number(inv.fasen) === 2 ? Number(par.MAX_KVA_2F || 5) : Number(par.MAX_KVA_3F || 25);
+  const piekKw = Math.max(0.5, Number(inv.piek_kw || 5));
+
+  // Batterijreeks (frontend stuurt {kva,kwh,eur}); server filtert op de fasegrens.
+  const battSeries = (Array.isArray(par.BATT) ? par.BATT : [])
+    .map(x => ({ kva: Number(x.kva), kwh: Number(x.kwh), eur: Number(x.eur) }))
+    .filter(x => x.kva > 0 && x.kwh > 0 && x.kva <= maxKva);
+
+  // Anker-assen (identiek aan de frontend-heatmap): batterij-kWh × extra-PV-panelen.
+  const pvMax = Number(par.PV_MAX || 40), pvStap = Number(par.PV_STAP || 2);
+  const pctPan = pct => Math.round(pvMax * pct / 100 / pvStap) * pvStap;
+  const battAs = [0, 5, 10, 15, 20, 25];
+  const pvAs   = [0, pctPan(25), pctPan(50), pctPan(75), pctPan(100)];
+
+  // Residentiële base-UI → volwaardige run_simulation-input. PV=0 en geen batterij:
+  // run_thuisladen injecteert per anker de batterij + extra PV + laadpleinen.
+  const ui = {
+    grd: inv.grd || 'Fluvius West',
+    spanning: 'LS',
+    jaarverbruik_mwh: Number(inv.jaarverbruik_mwh || 3.5),
+    profielNaam: inv.profielNaam || inv.profiel || 'residentieel',
+    aansluiting_kva: maxKva,                 // fysieke dispatch-cap = fasegrens
+    toegangsvermogen_kw: piekKw,             // facturatiebasis = piekvermogen
+    pv_kwp: 0,
+    bestaande_pv: (Number(inv.bestaand_pv_kwp) > 0)
+      ? { aanwezig: true, kwp: Number(inv.bestaand_pv_kwp), inj_mwh_jaar: Number(inv.bestaand_inj_mwh || 0), maand: 6 }
+      : { aanwezig: false },
+    pvInjStrategie: 'passthrough',           // arbitrage-pricing (passieve respons, zonder onbalans)
+    geen_arbitrage: false,
+    laadpleinen: [],
+  };
+
+  let base;
+  try { base = buildSimInput(ui); }
+  catch (e) { console.error('[thuisladen] buildSimInput fout:', e.message); return res.status(500).json({ error: 'base-input bouwen faalde: ' + e.message }); }
+
+  const payload = {
+    _modus: 'thuisladen',
+    base,
+    thuisladen: {
+      wagens: wagens.map(w => ({
+        km: Number(w.km || 0), kwhkm: Number(w.kwhkm || 0.16),
+        wd_start: Number(w.wd_start || 0), wd_eind: Number(w.wd_eind || 7),
+        creg: !!w.creg,
+      })),
+      referentiekost: Number(inv.referentiekost || 0),
+      creg_eur_mwh: Number(par.CREG || 60),
+      diesel_100km: Number(par.DIESEL_100KM || 9),
+      pv_kost: Number(par.PV_KOST || 500),
+      paneel_wp: Number(par.PANEEL_WP || 450),
+      laadvermogen_basis: Number(par.LAADVERMOGEN_BASIS || 4),
+      max_kva: maxKva,
+      batt_dod: Number(par.BATT_DOD || 90),
+      batt_rte: Math.round((Number(par.RTE || 0.90)) * 100),
+      batt_series: battSeries,
+      batt_kwh_as: battAs,
+      pv_pan_as: pvAs,
+    },
+  };
+
+  try {
+    await _simSlot();
+    let out;
+    try { out = await _runSimulatorRaw(payload); }
+    finally { _simSlotVrij(); }
+    const anchors = Array.isArray(out.anchors) ? out.anchors : [];
+    return res.json({
+      ok: true,
+      anchors,
+      grid: out.grid || { batt_kwh_as: battAs, pv_pan_as: pvAs },
+      income: out.income || null,
+      ev_mwh: out.ev_mwh,
+      home_kw: out.home_kw,
+      runs: out.runs || anchors.length,
+      _meta: { server_version: '15.73.0', modus: 'thuisladen', elapsedMs: out._elapsedMs || null },
+    });
+  } catch (e) {
+    console.error('[thuisladen] fout:', e.message);
+    return res.status(500).json({ error: 'thuisladen gefaald: ' + e.message });
   }
 });
 
