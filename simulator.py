@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.11.3 (2026-08-16, Johan): ONBALANS-PAD (lp_dispatch_month_bsp) krijgt dezelfde EV-tekort-slack
+#                als het arbitrage-pad. Onder VERZADIGING (EV-laadvraag > transfo+batterij) viel de maand-BSP-LP
+#                terug op 'niveau 4: maand verloren' → grid_in=0 → ALLE volumetrische factuurposten (energie,
+#                distributie-volume, Gsc/Wkk/vergroening/accijnzen/heffingen) stortten in richting €0. Zo werd de
+#                'met onbalans'-kolom absurd laag (LIP3: €9,5/MWh; LIP2: gehalveerd) terwijl 'zonder onbalans'
+#                stabiel bleef. Fix: nieuwe param ev_load_kw + ev_tekort-slack in de balans (grid_in - grid_out +
+#                p_dis - p_ch + (pv-curt) + ev_tekort == consumption), straf 1000 EUR/MWh → het niet-passende
+#                EV-deel valt weg als tekort i.p.v. de maand te laten instorten. Caller geeft de grid-first gekapte
+#                _ev_load[i0:i1] door. Zo blijven de drie sturingen op DEZELFDE leverbare last (appels-met-appels),
+#                de transfo hard begrensd, en de onbalans-meerwaarde realistisch. Zonder ev_load_kw (IMBY/ijk) = no-op.
+#                Getest (unit-harness): verzadigd 900 kW → vóór retry4/afname 0/gsc €0; ná retry2/afname 272,5 MWh/
+#                gsc €2.997/ev_tekort 26,6 MWh. Niet-verzadigd 500 kW → ongewijzigd (retry0, identiek).
 # Versie:        v1.11.2 (2026-08-16, Johan): LAADLADDER met HARDE transfo-limiet. De EV-laadvraag wordt nooit
 #                over de aansluiting (bv. 635 kW) geduwd; de veiligheden zijn fysiek. Ladder: (1) grid-first —
 #                _bouw_ev_load(grid_first=True) laadt eerst met grid ONDER de transfo, batterij enkel als
@@ -1696,6 +1708,7 @@ def lp_dispatch_month_bsp(
     netbeheer_tarieven: dict,     # v1.7: nodig voor monthly_peak-kost in objective
     consumption_forecast_kw: list = None,
     pv_forecast_kw: list = None,
+    ev_load_kw: list = None,      # v1.11.3: EV-deel van de last → tekort-slack (nooit infeasible/verloren)
 ) -> dict:
     """
     Maand-niveau BSP-LP. Refactor v1.7 van lp_dispatch_day_bsp.
@@ -1828,6 +1841,10 @@ def lp_dispatch_month_bsp(
         vol_mwh = sum(consumption_kw[i0:i1]) * 0.25 / 1000.0
         daily_paper_budget_mwh.append(paper_capture_rate * vol_mwh)
 
+    # v1.11.3 (Johan 16-08): EV-deel van de last, als bovengrens voor de tekort-slack.
+    # Zonder ev_load_kw (bv. IMBY/ijk-runs) blijft alles op 0 → identiek aan v1.11.2-gedrag.
+    _ev_ub_month = [(ev_load_kw[t] if (ev_load_kw and t < len(ev_load_kw)) else 0.0) for t in range(H)]
+
     def _build_and_solve_month(spec_budget_multiplier: float, label: str,
                                feasibility_only: bool = False):
         """
@@ -1870,6 +1887,10 @@ def lp_dispatch_month_bsp(
         # in feasibility-modus; anders houdt de harde bound ze op 0).
         over_afn_hard = [pulp.LpVariable(f'oah_{t}', 0) for t in range(H)]
         over_inj_hard = [pulp.LpVariable(f'oih_{t}', 0) for t in range(H)]
+        # v1.11.3: EV-tekort-slack — het deel van de (grid-first gekapte) EV-last dat zelfs mét
+        # batterij niet binnen de transfo past valt weg als tekort i.p.v. de maand infeasible/verloren
+        # te maken. Zware straf (1000 €/MWh) in de objective → enkel als laatste redmiddel.
+        ev_tekort = [pulp.LpVariable(f'evt_{t}', 0, max(0.0, _ev_ub_month[t])) for t in range(H)]
 
         # v1.7 NIEUW: monthly_peak — één unieke variabele over de hele maand,
         # bound door grid_in[t] voor alle t. LP minimiseert (cost term in objective),
@@ -1906,7 +1927,7 @@ def lp_dispatch_month_bsp(
 
         # Per-kwartier constraints
         for t in range(H):
-            prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) == consumption_kw[t]
+            prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - pv_curt[t]) + ev_tekort[t] == consumption_kw[t]
             prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
             prob += monthly_peak >= grid_in[t]  # v1.7 monthly_peak constraint
             prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
@@ -1960,6 +1981,9 @@ def lp_dispatch_month_bsp(
         # de kop-ruimte tot contract vrij voor arbitrage, maar shaaft de piek waar
         # dat de maandpiek-kost verlaagt.
         obj_terms.append(c_per_maand_kw * monthly_peak)
+        # v1.11.3: zware straf op EV-tekort — de last wordt maximaal bediend binnen de transfo,
+        # het niet-passende EV-deel valt weg als tekort i.p.v. de maand verloren te verklaren.
+        obj_terms.append(1000.0 * pulp.lpSum(ev_tekort) * dt_h)
 
         prob += pulp.lpSum(obj_terms)
 
@@ -1983,6 +2007,7 @@ def lp_dispatch_month_bsp(
         oiz_vals = [pulp.value(v) or 0.0 for v in over_inj_zacht]
         oah_vals = [pulp.value(v) or 0.0 for v in over_afn_hard]
         oih_vals = [pulp.value(v) or 0.0 for v in over_inj_hard]
+        evt_vals = [max(0.0, pulp.value(v) or 0.0) for v in ev_tekort]   # v1.11.3
         mp_val = pulp.value(monthly_peak) or 0.0
 
         return status_str, {
@@ -1993,6 +2018,7 @@ def lp_dispatch_month_bsp(
             'pv_curt': pv_curt_vals,
             'oaz': oaz_vals, 'oiz': oiz_vals,
             'oah': oah_vals, 'oih': oih_vals,
+            'ev_tekort': evt_vals,   # v1.11.3
             'monthly_peak': mp_val,
         }
 
@@ -2041,6 +2067,7 @@ def lp_dispatch_month_bsp(
                         'pv_curt': list(_zeros),
                         'oaz': list(_zeros), 'oiz': list(_zeros),
                         'oah': list(_zeros), 'oih': list(_zeros),
+                        'ev_tekort': list(_zeros),   # v1.11.3
                         'monthly_peak': 0.0,
                     }
 
@@ -2057,6 +2084,7 @@ def lp_dispatch_month_bsp(
     oiz_vals = r['oiz']
     oah_vals = r.get('oah', [0.0] * H)
     oih_vals = r.get('oih', [0.0] * H)
+    ev_tekort_vals = r.get('ev_tekort', [0.0] * H)   # v1.11.3
     monthly_peak_kw = r['monthly_peak']
 
     # v1.6 post-solve clip (defensieve clip, identiek aan dag-versie).
@@ -2121,6 +2149,8 @@ def lp_dispatch_month_bsp(
         # v1.7 NIEUW
         'monthly_peak_kw': monthly_peak_kw,
         'n_dagen': n_dagen,
+        # v1.11.3: totaal weggevallen EV-last (km-tekort in de onbalans-variant)
+        'ev_tekort_kwh': sum(ev_tekort_vals) * dt_h,
     }
 
 
@@ -3165,6 +3195,7 @@ def run_simulation(inp: dict) -> dict:
                     netbeheer_tarieven=_netbeheer_tarieven,
                     consumption_forecast_kw=consumption_forecast[i0:i1],
                     pv_forecast_kw=pv_forecast[i0:i1],
+                    ev_load_kw=(_ev_load[i0:i1] if '_ev_load' in dir() and _ev_load else None),   # v1.11.3: tekort-slack
                 )
 
                 # v1.7 lp_diagnostics: maand-niveau tellers + dagen-aggregaat
