@@ -4460,6 +4460,114 @@ def analyseer_pieken_en_arbitrage(inp: dict) -> dict:
 # MAIN
 # =============================================================================
 
+# =============================================================================
+# THUISLADEN (v0.1) — cafetariaplan-laadpaal: 50-anker zoektocht, ENKEL zonder onbalans.
+# Geïsoleerd (mode 'thuisladen'); raakt geen bestaand dispatch-pad. Hergebruikt run_simulation
+# per anker (bsp.actief=False = zonder onbalans, geen_aansluiting_verhoging=True = exacte install).
+# Input: { _modus:'thuisladen', base:<geldige run_simulation-input>, thuisladen:{...} }
+#   thuisladen: wagens[{km,kwhkm,wd_start,wd_eind,creg}], referentiekost, creg_eur_mwh, diesel_100km,
+#               pv_kost, paneel_wp, laadvermogen_basis, max_kva, batt_dod, batt_rte,
+#               batt_series[{kva,kwh,eur}], batt_kwh_as[], pv_pan_as[]
+# =============================================================================
+def _tl_batt_pick(series, kwh, max_kva):
+    if kwh <= 0:
+        return {'kva': 0, 'kwh': 0, 'eur': 0}
+    cand = [b for b in series if int(b['kwh']) == int(kwh) and float(b['kva']) <= float(max_kva)]
+    if not cand:
+        return None                      # past niet op deze aansluiting
+    cand.sort(key=lambda b: b['eur'])
+    return cand[0]
+
+def run_thuisladen(inp: dict) -> dict:
+    import copy
+    base = inp.get('base') or {}
+    tl = inp.get('thuisladen') or {}
+    wagens = tl.get('wagens') or []
+    referentiekost = float(tl.get('referentiekost', 0) or 0)
+    creg_mwh = float(tl.get('creg_eur_mwh', 60) or 60)
+    diesel_100 = float(tl.get('diesel_100km', 9) or 9)
+    pv_kost = float(tl.get('pv_kost', 500) or 500)
+    paneel_wp = float(tl.get('paneel_wp', 450) or 450)
+    laadverm = float(tl.get('laadvermogen_basis', 4) or 4)
+    max_kva = float(tl.get('max_kva', 25) or 25)
+    dod = float(tl.get('batt_dod', 90) or 90)
+    rte = float(tl.get('batt_rte', 90) or 90)
+    series = tl.get('batt_series') or []
+    batt_as = tl.get('batt_kwh_as') or [0, 5, 10, 15, 20, 25]
+    pv_as = tl.get('pv_pan_as') or [0, 10, 20, 30, 40]
+
+    piek = float(base.get('aansluiting', {}).get('max_afname_kw_hard', max_kva) or max_kva)
+    home_kw = max(0.5, min(laadverm, max_kva - min(piek, max_kva - 0.5)))
+    if home_kw <= 0.5:
+        home_kw = laadverm
+
+    # EV-laadpleinen uit de wagens (v0.1: weekdag-venster, dpw=7 — weekend-venster is een verfijning).
+    laadpleinen = []
+    creg_income = 0.0
+    diesel_income = 0.0
+    ev_mwh_tot = 0.0
+    for i, w in enumerate(wagens):
+        km = float(w.get('km', 0) or 0); kwhkm = float(w.get('kwhkm', 0) or 0)
+        mwh = km * kwhkm / 1000.0
+        ev_mwh_tot += mwh
+        laadpleinen.append({
+            'naam': 'Wagen ' + str(i + 1), 'voertuigtype': 'personenwagen', 'aantal': 1,
+            'km_per_jaar': km, 'kwh_per_km': kwhkm,
+            'venster_start': float(w.get('wd_start', 0) or 0), 'venster_eind': float(w.get('wd_eind', 7) or 7),
+            'dagen_per_week': 7, 'cap_kw': home_kw, 'laadpunten': [],
+        })
+        if w.get('creg'):
+            creg_income += mwh * creg_mwh
+        else:
+            diesel_income += (km / 100.0) * diesel_100
+
+    gebouw_mwh = float(base.get('jaarverbruik_mwh', 0) or 0)
+    vast_inkomen = referentiekost + creg_income + diesel_income
+
+    anchors = []
+    for bkwh in batt_as:
+        bt = _tl_batt_pick(series, bkwh, max_kva)
+        for pan in pv_as:
+            capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
+            cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
+                    'capex': capex, 'kost': None, 'besparing': None, 'rendement': None, 'eurMwh': None, 'ev_mwh': None}
+            if bt is None:
+                anchors.append(cell); continue     # batterij past niet op deze aansluiting
+            try:
+                a = copy.deepcopy(base)
+                a['batterij'] = {'kwh': bkwh, 'kw': (bt['kva'] if bkwh > 0 else 0),
+                                 'dod_pct': dod, 'rte_pct': rte,
+                                 'capex_eur': bt['eur'], 'max_cycli': 8000}
+                a.setdefault('pv', {})
+                a['pv'] = dict(a.get('pv') or {})
+                a['pv']['kwp'] = float(a['pv'].get('kwp', 0) or 0) + (pan * paneel_wp / 1000.0)
+                a['laadpleinen'] = copy.deepcopy(laadpleinen)
+                a.setdefault('bsp', {}); a['bsp'] = dict(a.get('bsp') or {}); a['bsp']['actief'] = False
+                a['geen_arbitrage'] = False
+                a['geen_aansluiting_verhoging'] = True
+                a['_simuleer_enkel'] = True
+                res = run_simulation(a)
+                kost = float(((res.get('jaarfactuur') or {}).get('subtotaal_excl_btw')) or 0)
+                evm = float(((res.get('laadplein') or {}).get('ev_last_mwh')) or ev_mwh_tot)
+                tot_mwh = max(1e-6, gebouw_mwh + evm)
+                besp = vast_inkomen - kost
+                cell['kost'] = round(kost, 1)
+                cell['besparing'] = round(besp, 1)
+                cell['rendement'] = round((besp / capex * 100.0) if capex > 0 else (999.0 if besp > 0 else 0.0), 2)
+                cell['eurMwh'] = round(kost / tot_mwh, 2)
+                cell['ev_mwh'] = round(evm, 3)
+            except Exception as e:
+                log.warning(f"thuisladen anker {bkwh}kWh/{pan}p faalde: {e}")
+            anchors.append(cell)
+
+    return {
+        'anchors': anchors,
+        'grid': {'batt_kwh_as': batt_as, 'pv_pan_as': pv_as},
+        'income': {'referentiekost': referentiekost, 'creg': round(creg_income, 1), 'diesel': round(diesel_income, 1)},
+        'ev_mwh': round(ev_mwh_tot, 3), 'home_kw': round(home_kw, 2), 'runs': len(anchors),
+    }
+
+
 def main():
     try:
         inp = json.load(sys.stdin)
@@ -4467,12 +4575,14 @@ def main():
         log.error(f"Kon input-JSON niet lezen: {e}")
         sys.exit(1)
 
-    # Kies modus: analyse of simulatie
+    # Kies modus: analyse, thuisladen of simulatie
     modus = inp.get('_modus', 'simulatie')
 
     try:
         if modus == 'analyse':
             out = analyseer_pieken_en_arbitrage(inp)
+        elif modus == 'thuisladen':
+            out = run_thuisladen(inp)
         else:
             out = run_simulation(inp)
     except Exception as e:
