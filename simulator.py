@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.11.2 (2026-08-16, Johan): LAADLADDER met HARDE transfo-limiet. De EV-laadvraag wordt nooit
+#                over de aansluiting (bv. 635 kW) geduwd; de veiligheden zijn fysiek. Ladder: (1) grid-first —
+#                _bouw_ev_load(grid_first=True) laadt eerst met grid ONDER de transfo, batterij enkel als
+#                bijvulling voor de rest; (2) fallback: wat niet past → tekort (echt km-tekort i.p.v. clip);
+#                (3) lp_dispatch_month_arb kreeg ev_tekort-slack (param ev_load_kw): het EV-deel mag als laatste
+#                redmiddel wegvallen tegen 1000 EUR/MWh straf i.p.v. de maand-LP INFEASIBLE te maken (was de
+#                oorzaak van 'verloren dagen' / garbage-cijfers). Zo blijft de transfo hard begrensd, springt de
+#                batterij bij, en gaat vrije batterij-ruimte spot/onbalans verdienen. ENKEL energy arbitrage +
+#                imbalance settlement. Actief bij Simuleer (geen_aansluiting_verhoging=True).
 # Versie:        v1.11.1 (2026-08-16, Johan): FLOOR p_charge/p_discharge op >=0 bij LP-extractie. Bij een
 #                INFEASIBLE maand-LP (EV-laadvraag > aansluiting+batterij) gaf CBC garbage variabele-waarden
 #                buiten de bounds (grote NEGATIEVE p_ch/p_dis) terug; de clip kapte enkel de bovengrens. Die
@@ -710,7 +719,8 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
 def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                   pv_kw: list, base_cons_kw: list, modus: str,
                   connection_kw: float = 1e12, battery_kw: float = 0.0,
-                  per_plein_out: list = None, battery_kwh: float = None):
+                  per_plein_out: list = None, battery_kwh: float = None,
+                  grid_first: bool = False):
     """Bouw het EV-laadprofiel (kW/kwartier) voor alle laadpleinen samen, CONNECTION-AWARE:
     per kwartier laden we max = min(laadpunt-cap, vrije ruimte onder het toegangsvermogen
     (+ batterij-buffer)). We zetten dus nooit 'ineens alle vermogen' aan.
@@ -795,33 +805,48 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                     return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
                 # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
                 volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
-            resterend = rec['dag_kwh']
+            resterend = [rec['dag_kwh']]   # in lijst zodat de nested _vul() 'm kan aanpassen
             if not _batt_ongebonden and dag not in _batt_budget:
                 _batt_budget[dag] = max(0.0, battery_kwh)   # bruikbare batterij-energie voor deze sessie
-            for i in volgorde:
-                if resterend <= 1e-9:
-                    break
-                conn_kw = _conn_vrij_kw(i)
+            _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
+            def _batt_vrij_kw():
                 if _batt_ongebonden:
-                    batt_kw_vrij = battery_kw
-                else:
-                    _rem = _batt_budget[dag]
-                    batt_kw_vrij = min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
-                beschikbaar_kw = min(cap, conn_kw + batt_kw_vrij)
-                take = min(beschikbaar_kw * dt_h, resterend)
-                if take > 0:
-                    ev[i] += take / dt_h
-                    if _pp is not None:
-                        _pp['load_kw'][i] += take / dt_h
-                    if not _batt_ongebonden:
-                        # energie boven de vrije aansluiting komt uit de batterij → budget aframen
-                        _uit_batt = max(0.0, take - conn_kw * dt_h)
-                        _batt_budget[dag] -= _uit_batt
-                    resterend -= take
-            if resterend > 1e-6:
-                tekort_kwh += resterend  # paste niet onder de aansluiting in dit venster
+                    return battery_kw
+                _rem = _batt_budget.get(dag, 0.0)
+                return min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
+            def _vul(gebruik_batt):
+                for i in volgorde:
+                    if resterend[0] <= 1e-9:
+                        break
+                    conn_kw = _conn_vrij_kw(i)
+                    extra_batt = _batt_vrij_kw() if gebruik_batt else 0.0
+                    ruimte_cap = cap - _pl_bij.get(i, 0.0)
+                    if ruimte_cap <= 1e-9:
+                        continue
+                    beschikbaar_kw = min(ruimte_cap, conn_kw + extra_batt)
+                    take = min(beschikbaar_kw * dt_h, resterend[0])
+                    if take > 0:
+                        ev[i] += take / dt_h
+                        _pl_bij[i] = _pl_bij.get(i, 0.0) + take / dt_h
+                        if _pp is not None:
+                            _pp['load_kw'][i] += take / dt_h
+                        if not _batt_ongebonden:
+                            # energie boven de vrije aansluiting komt uit de batterij → budget aframen
+                            _uit_batt = max(0.0, take - conn_kw * dt_h)
+                            _batt_budget[dag] -= _uit_batt
+                        resterend[0] -= take
+            if grid_first:
+                # LADDER (Johan 16-08): 1) laad grid-first onder de aansluiting (transfo blijft heilig),
+                # 2) batterij vult enkel de rest bij, 3) wat dan nog rest = echt tekort. Zo blijft de
+                # batterij vrij voor arbitrage wanneer de laadvraag ruim onder het toegangsvermogen past.
+                _vul(False)   # 1) grid alleen
+                _vul(True)    # 2) batterij-headroom voor de rest
+            else:
+                _vul(True)    # oud gedrag: aansluiting + batterij samen (één pass)
+            if resterend[0] > 1e-6:
+                tekort_kwh += resterend[0]  # paste niet onder de aansluiting in dit venster
                 if _pp is not None:
-                    _pp['tekort_kwh'] += resterend
+                    _pp['tekort_kwh'] += resterend[0]
     return ev, tekort_kwh
 
 
@@ -1183,6 +1208,7 @@ def lp_dispatch_month_arb(
     cyclus_kost_eur_per_kwh: float,
     netbeheer_tarieven: dict,     # v1.11: maandpiek-kost in objective (piekshaving)
     imb_eur_mwh: list = None,     # optioneel: IMB-prijs voor dispatch (None = spot)
+    ev_load_kw: list = None,      # v1.11.2: EV-deel van de last → tekort-slack (nooit Infeasible)
 ) -> dict:
     """
     v1.11 — Maand-niveau ARBITRAGE-LP met piekshaving + zelfconsumptie.
@@ -1272,6 +1298,11 @@ def lp_dispatch_month_arb(
     soc = [pulp.LpVariable(f'soc_{t}', soc_min, soc_max) for t in range(H + 1)]
     over_afn_zacht = [pulp.LpVariable(f'oaz_{t}', 0) for t in range(H)]
     over_inj_zacht = [pulp.LpVariable(f'oiz_{t}', 0) for t in range(H)]
+    # v1.11.2 (Johan 16-08): EV-TEKORT-SLACK. De transfo (grid_in ≤ _gin_cap) blijft HARD — nooit overschrijden.
+    # Past de laadvraag zelfs met de batterij niet onder het toegangsvermogen, dan laadt de LP MINDER
+    # (ev_tekort > 0, zwaar bestraft) i.p.v. Infeasible te worden. ev_tekort[t] ≤ het EV-deel van de last t.
+    _ev_ub = [ (ev_load_kw[t] if (ev_load_kw and t < len(ev_load_kw)) else 0.0) for t in range(H) ]
+    ev_tekort = [pulp.LpVariable(f'evt_{t}', 0, max(0.0, _ev_ub[t])) for t in range(H)]
 
     # v1.11: één monthly_peak over de hele maand, bound door alle grid_in[t].
     monthly_peak = pulp.LpVariable('monthly_peak', 0, _gin_cap)
@@ -1279,7 +1310,7 @@ def lp_dispatch_month_arb(
     prob += soc[0] == soc_start_kwh
 
     for t in range(H):
-        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] == consumption_kw[t]
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] + ev_tekort[t] == consumption_kw[t]
         prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
         prob += monthly_peak >= grid_in[t]  # v1.11 piekshaving
         prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
@@ -1299,6 +1330,8 @@ def lp_dispatch_month_arb(
         obj_terms.append(eps_penalty * (grid_in[t] + grid_out[t]) * dt_h)
     # v1.11: piekshaving-kost op de gerealiseerde maandpiek
     obj_terms.append(c_per_maand_kw * monthly_peak)
+    # v1.11.2: zware straf op niet-geladen EV — laden gaat vóór verdienen (ladder-stap 3 = ultieme fallback).
+    obj_terms.append(1000.0 * pulp.lpSum(ev_tekort) * dt_h)
 
     prob += pulp.lpSum(obj_terms)
 
@@ -1337,6 +1370,7 @@ def lp_dispatch_month_arb(
         'over_afn_hard': [0.0] * H,
         'over_inj_hard': [0.0] * H,
         'monthly_peak': pulp.value(monthly_peak) or 0.0,
+        'ev_tekort_kwh': sum((pulp.value(v) or 0.0) for v in ev_tekort) * dt_h,   # v1.11.2
         'lp_status': status_str,
     }
 
@@ -2830,10 +2864,14 @@ def run_simulation(inp: dict) -> dict:
             _batt_dod = (inp['batterij'].get('dod_pct', 90) or 90) / 100.0
             _batt_usable_kwh = (inp['batterij'].get('kwh', 0) or 0) * _batt_dod
         _ev_per_plein = []
+        # grid_first (Johan 16-08): bij een VASTE aansluiting (Simuleer) laden we grid-first onder de transfo,
+        # batterij enkel als bijvulling, rest = echt tekort. Bij Ontwerp (auto-verhoging) blijft het oude gedrag.
+        _grid_first = bool(inp.get('geen_aansluiting_verhoging', False))
         _ev_load, _ev_tekort = _bouw_ev_load(_lp_prep, sim_timestamps, spot_actual, imb_actual,
                                              pv_kw, consumption_kw, _ev_modus,
                                              connection_kw=_ev_conn, battery_kw=_batt_kw,
-                                             per_plein_out=_ev_per_plein, battery_kwh=_batt_usable_kwh)
+                                             per_plein_out=_ev_per_plein, battery_kwh=_batt_usable_kwh,
+                                             grid_first=_grid_first)
         # v1.8.10: MANUELE BATTERIJ ONTOEREIKEND (variant 2/3) → verhoog het
         # toegangsvermogen tot de laadvraag haalbaar wordt, i.p.v. dagen te
         # verliezen. (Variant 1 laadt ongetemperd op 1e12 → geen tekort, geen raise.)
@@ -3265,6 +3303,7 @@ def run_simulation(inp: dict) -> dict:
                     cyclus_kost,
                     _netbeheer_arb,
                     imb_eur_mwh=None,
+                    ev_load_kw=(_ev_load[i0:i1] if '_ev_load' in dir() and _ev_load else None),   # v1.11.2: tekort-slack op het EV-deel
                 )
                 grid_in_all.extend(result['grid_in'])
                 grid_out_all.extend(result['grid_out'])
