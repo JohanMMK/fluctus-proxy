@@ -4484,7 +4484,7 @@ def run_thuisladen(inp: dict) -> dict:
     tl = inp.get('thuisladen') or {}
     wagens = tl.get('wagens') or []
     referentiekost = float(tl.get('referentiekost', 0) or 0)
-    creg_mwh = float(tl.get('creg_eur_mwh', 60) or 60)
+    creg_mwh = float(tl.get('creg_eur_mwh', 322) or 322)   # CREG-refertetarief thuisladen (Vlaanderen Q3 2026 = 32,22 c/kWh)
     diesel_100 = float(tl.get('diesel_100km', 9) or 9)
     pv_kost = float(tl.get('pv_kost', 500) or 500)
     paneel_wp = float(tl.get('paneel_wp', 450) or 450)
@@ -4522,7 +4522,14 @@ def run_thuisladen(inp: dict) -> dict:
             diesel_income += (km / 100.0) * diesel_100
 
     gebouw_mwh = float(base.get('jaarverbruik_mwh', 0) or 0)
-    vast_inkomen = referentiekost + creg_income + diesel_income
+
+    # BESPARINGSDEFINITIE (Johan 16-08): de referentie is de kost van (gebouw + laden)
+    # ZONDER PV/batterij/sturing = de 0-batterij/0-PV-cel. Elk scenario = kost van
+    # (gebouw + wagens) MET PV + batterij + slimme sturing (zonder onbalans).
+    #   besparing[b,pv] = kost[0,0] - kost[b,pv].
+    # CREG/diesel vallen uit dit verschil (gelijk aan beide kanten) — ze blijven enkel
+    # informatief in 'income'. De (0,0)-cel staat vooraan in de assen → ref eerst berekend.
+    ref_kost = None
 
     anchors = []
     for bkwh in batt_as:
@@ -4530,7 +4537,8 @@ def run_thuisladen(inp: dict) -> dict:
         for pan in pv_as:
             capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
             cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
-                    'capex': capex, 'kost': None, 'besparing': None, 'rendement': None, 'eurMwh': None, 'ev_mwh': None}
+                    'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
+                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None}
             if bt is None:
                 anchors.append(cell); continue     # batterij past niet op deze aansluiting
             try:
@@ -4550,12 +4558,16 @@ def run_thuisladen(inp: dict) -> dict:
                 kost = float(((res.get('jaarfactuur') or {}).get('subtotaal_excl_btw')) or 0)
                 evm = float(((res.get('laadplein') or {}).get('ev_last_mwh')) or ev_mwh_tot)
                 tot_mwh = max(1e-6, gebouw_mwh + evm)
-                besp = vast_inkomen - kost
+                if bkwh == 0 and pan == 0:
+                    ref_kost = kost                 # referentie = gebouw + laden, geen PV/batterij
                 cell['kost'] = round(kost, 1)
-                cell['besparing'] = round(besp, 1)
-                cell['rendement'] = round((besp / capex * 100.0) if capex > 0 else (999.0 if besp > 0 else 0.0), 2)
                 cell['eurMwh'] = round(kost / tot_mwh, 2)
                 cell['ev_mwh'] = round(evm, 3)
+                if ref_kost is not None:
+                    besp = ref_kost - kost
+                    cell['ref_kost'] = round(ref_kost, 1)
+                    cell['besparing'] = round(besp, 1)
+                    cell['rendement'] = round((besp / capex * 100.0) if capex > 0 else (999.0 if besp > 0 else 0.0), 2)
             except Exception as e:
                 log.warning(f"thuisladen anker {bkwh}kWh/{pan}p faalde: {e}")
             anchors.append(cell)
@@ -4563,6 +4575,7 @@ def run_thuisladen(inp: dict) -> dict:
     return {
         'anchors': anchors,
         'grid': {'batt_kwh_as': batt_as, 'pv_pan_as': pv_as},
+        'referentie_kost': round(ref_kost, 1) if ref_kost is not None else None,   # kost gebouw+laden, geen PV/batterij
         'income': {'referentiekost': referentiekost, 'creg': round(creg_income, 1), 'diesel': round(diesel_income, 1)},
         'ev_mwh': round(ev_mwh_tot, 3), 'home_kw': round(home_kw, 2), 'runs': len(anchors),
     }
