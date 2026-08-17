@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.77.0 (2026-08-17 11:58 Europe/Brussels, Johan): THUISLADEN — omvormer-sizing C-rate (par.BATT_CRATE,
+//                default 2) doorgegeven aan de dispatch (kW = kWh/C → grotere batterij shaaft hógere piek).
 // Versie:        v15.76.0 (2026-08-17 11:49 Europe/Brussels, Johan): THUISLADEN — nieuwe route POST /api/thuisladen-cel
 //                (één echte dispatch voor de aangeklikte cel) zodat "klik = exact simuleren" in server-modus de ECHTE
 //                cijfers geeft i.p.v. het lokale benaderingsmodel (dat inconsistente heatmap-uitschieters gaf).
@@ -4723,6 +4725,7 @@ function _thuisladenInput(inv, par) {
     max_kva: maxKva,
     batt_dod: Number(par.BATT_DOD || 90),
     batt_rte: Math.round((Number(par.RTE || 0.90)) * 100),
+    batt_crate: Number(par.BATT_CRATE || 2),   // omvormer-sizing: kW = kWh / C-rate
     batt_series: battSeries,
     batt_kwh_as: battAs,
     pv_pan_as: pvAs,
