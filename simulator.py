@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.12.1 (2026-08-17 11:25 Europe/Brussels, Johan): THUISLADEN single-cell modus (_tl_cell) →
+#                server.js kan de 30 ankers parallel spawnen. Context/cel-logica in _tl_build_context/_tl_cell_compute
+#                (gedeeld door de parallelle én de sequentiële fallback-lus). Geen gedragswijziging in de cijfers.
 # Versie:        v1.12.0 (2026-08-17 11:11 Europe/Brussels, Johan): THUISLADEN — run_thuisladen splitst nu per wagen
 #                een WEEKDAG-sessie (5 dagen, venster wd) en WEEKEND-sessie (2 dagen, venster we); jaar-km 5/7·2/7.
 #                Per anker ook max-piek (jaarpiek_afname_kw) + factuurgroepen A–E + energieflows (PV/net, via batterij).
@@ -4538,13 +4541,61 @@ def _tl_detail(res, rte_pct):
     }
     return factuur, energie
 
-def run_thuisladen(inp: dict) -> dict:
+def _tl_cell_compute(base, ctx, bkwh, pan):
+    """Bereken één anker-cel (dispatch + factuur/energie-detail). GEEN besparing/ref hier
+    (die is cross-cel; de aanroeper vult ze in). Herbruikt door de sequentiële lus én de
+    server-side parallelle orkestratie (single-cell modus)."""
     import copy
+    series = ctx['series']; max_kva = ctx['max_kva']; paneel_wp = ctx['paneel_wp']
+    pv_kost = ctx['pv_kost']; dod = ctx['dod']; rte = ctx['rte']
+    laadpleinen = ctx['laadpleinen']; ev_mwh_tot = ctx['ev_mwh_tot']; gebouw_mwh = ctx['gebouw_mwh']
+    bt = _tl_batt_pick(series, bkwh, max_kva)
+    capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
+    cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
+            'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
+            'eurMwh': None, 'ev_mwh': None, 'ref_kost': None, 'piek_kw': None, 'factuur': None, 'energie': None}
+    if bt is None:
+        return cell                              # batterij past niet op deze aansluiting
+    try:
+        a = copy.deepcopy(base)
+        a['batterij'] = {'kwh': bkwh, 'kw': (bt['kva'] if bkwh > 0 else 0),
+                         'dod_pct': dod, 'rte_pct': rte, 'capex_eur': bt['eur'], 'max_cycli': 8000}
+        a.setdefault('pv', {})
+        a['pv'] = dict(a.get('pv') or {})
+        a['pv']['kwp'] = float(a['pv'].get('kwp', 0) or 0) + (pan * paneel_wp / 1000.0)
+        a['laadpleinen'] = copy.deepcopy(laadpleinen)
+        a.setdefault('bsp', {}); a['bsp'] = dict(a.get('bsp') or {}); a['bsp']['actief'] = False
+        a['geen_arbitrage'] = False
+        a['geen_aansluiting_verhoging'] = True
+        a['_simuleer_enkel'] = True
+        res = run_simulation(a)
+        kost = float(((res.get('jaarfactuur') or {}).get('subtotaal_excl_btw')) or 0)
+        evm = float(((res.get('laadplein') or {}).get('ev_last_mwh')) or ev_mwh_tot)
+        tot_mwh = max(1e-6, gebouw_mwh + evm)
+        cell['kost'] = round(kost, 1)
+        cell['eurMwh'] = round(kost / tot_mwh, 2)
+        cell['ev_mwh'] = round(evm, 3)
+        try:
+            _piek = float(((res.get('jaarfactuur') or {}).get('jaarpiek_afname_kw')) or 0)
+            cell['piek_kw'] = round(_piek, 1) if _piek > 0 else None
+        except (TypeError, ValueError):
+            cell['piek_kw'] = None
+        try:
+            cell['factuur'], cell['energie'] = _tl_detail(res, rte)
+        except Exception as e:
+            log.warning(f"thuisladen detail {bkwh}kWh/{pan}p faalde: {e}")
+    except Exception as e:
+        log.warning(f"thuisladen anker {bkwh}kWh/{pan}p faalde: {e}")
+    return cell
+
+
+def _tl_build_context(inp):
+    """Gemeenschappelijke context (laadpleinen, income, parameters) voor de volledige lus én de single-cell modus."""
     base = inp.get('base') or {}
     tl = inp.get('thuisladen') or {}
     wagens = tl.get('wagens') or []
     referentiekost = float(tl.get('referentiekost', 0) or 0)
-    creg_mwh = float(tl.get('creg_eur_mwh', 322) or 322)   # CREG-refertetarief thuisladen (Vlaanderen Q3 2026 = 32,22 c/kWh)
+    creg_mwh = float(tl.get('creg_eur_mwh', 322) or 322)
     diesel_100 = float(tl.get('diesel_100km', 9) or 9)
     pv_kost = float(tl.get('pv_kost', 500) or 500)
     paneel_wp = float(tl.get('paneel_wp', 450) or 450)
@@ -4561,13 +4612,8 @@ def run_thuisladen(inp: dict) -> dict:
     if home_kw <= 0.5:
         home_kw = laadverm
 
-    # EV-laadpleinen uit de wagens: per wagen een WEEKDAG-sessie (5 dagen, venster wd) en een
-    # WEEKEND-sessie (2 dagen, venster we). De jaar-km wordt 5/7 · 2/7 gesplitst → correct dagverbruik
-    # per dagtype, en elk venster (bv. weekdag 19→7 overnacht, weekend 0→24) telt echt mee in de dispatch.
     laadpleinen = []
-    creg_income = 0.0
-    diesel_income = 0.0
-    ev_mwh_tot = 0.0
+    creg_income = 0.0; diesel_income = 0.0; ev_mwh_tot = 0.0
     for i, w in enumerate(wagens):
         km = float(w.get('km', 0) or 0); kwhkm = float(w.get('kwhkm', 0) or 0)
         mwh = km * kwhkm / 1000.0
@@ -4577,14 +4623,12 @@ def run_thuisladen(inp: dict) -> dict:
         laadpleinen.append({
             'naam': 'Wagen ' + str(i + 1) + ' (weekdag)', 'voertuigtype': 'personenwagen', 'aantal': 1,
             'km_per_jaar': km * 5.0 / 7.0, 'kwh_per_km': kwhkm,
-            'venster_start': wd_s, 'venster_eind': wd_e,
-            'dagen_per_week': 5, 'cap_kw': home_kw, 'laadpunten': [],
+            'venster_start': wd_s, 'venster_eind': wd_e, 'dagen_per_week': 5, 'cap_kw': home_kw, 'laadpunten': [],
         })
         laadpleinen.append({
             'naam': 'Wagen ' + str(i + 1) + ' (weekend)', 'voertuigtype': 'personenwagen', 'aantal': 1,
             'km_per_jaar': km * 2.0 / 7.0, 'kwh_per_km': kwhkm,
-            'venster_start': we_s, 'venster_eind': we_e,
-            'dagen_per_week': 2, 'cap_kw': home_kw, 'laadpunten': [],
+            'venster_start': we_s, 'venster_eind': we_e, 'dagen_per_week': 2, 'cap_kw': home_kw, 'laadpunten': [],
         })
         if w.get('creg'):
             creg_income += mwh * creg_mwh
@@ -4592,71 +4636,53 @@ def run_thuisladen(inp: dict) -> dict:
             diesel_income += (km / 100.0) * diesel_100
 
     gebouw_mwh = float(base.get('jaarverbruik_mwh', 0) or 0)
+    return {
+        'base': base, 'series': series, 'max_kva': max_kva, 'paneel_wp': paneel_wp, 'pv_kost': pv_kost,
+        'dod': dod, 'rte': rte, 'laadpleinen': laadpleinen, 'ev_mwh_tot': ev_mwh_tot, 'gebouw_mwh': gebouw_mwh,
+        'referentiekost': referentiekost, 'creg_income': creg_income, 'diesel_income': diesel_income,
+        'home_kw': home_kw, 'batt_as': batt_as, 'pv_as': pv_as,
+    }
 
-    # BESPARINGSDEFINITIE (Johan 16-08): de referentie is de kost van (gebouw + laden)
-    # ZONDER PV/batterij/sturing = de 0-batterij/0-PV-cel. Elk scenario = kost van
-    # (gebouw + wagens) MET PV + batterij + slimme sturing (zonder onbalans).
-    #   besparing[b,pv] = kost[0,0] - kost[b,pv].
-    # CREG/diesel vallen uit dit verschil (gelijk aan beide kanten) — ze blijven enkel
-    # informatief in 'income'. De (0,0)-cel staat vooraan in de assen → ref eerst berekend.
+
+def run_thuisladen(inp: dict) -> dict:
+    # SINGLE-CELL MODUS: server.js orkestreert de 30 dispatches PARALLEL (elk een eigen spawn,
+    # gecapt op sim_max_parallel) door per cel _tl_cell in te sturen. Zo blijft de HTTP-call snel
+    # (i.p.v. één trage sequentiële Python-lus die de client-time-out haalt).
+    _cell = inp.get('_tl_cell')
+    if isinstance(_cell, dict):
+        ctx = _tl_build_context(inp)
+        cell = _tl_cell_compute(ctx['base'], ctx, float(_cell.get('bkwh', 0) or 0), float(_cell.get('pan', 0) or 0))
+        return {
+            'cell': cell,
+            'income': {'referentiekost': ctx['referentiekost'], 'creg': round(ctx['creg_income'], 1), 'diesel': round(ctx['diesel_income'], 1)},
+            'ev_mwh': round(ctx['ev_mwh_tot'], 3), 'home_kw': round(ctx['home_kw'], 2),
+        }
+
+    # VOLLEDIGE LUS (fallback / backward-compat): sequentieel alle ankers in dit ene proces.
+    ctx = _tl_build_context(inp)
+    base = ctx['base']; batt_as = ctx['batt_as']; pv_as = ctx['pv_as']
+    # BESPARINGSDEFINITIE (Johan 16-08): referentie = kost (gebouw + laden) ZONDER PV/batterij = de 0/0-cel.
+    #   besparing[b,pv] = kost[0,0] - kost[b,pv]. CREG/diesel vallen uit het verschil (info in 'income').
     ref_kost = None
-
     anchors = []
     for bkwh in batt_as:
-        bt = _tl_batt_pick(series, bkwh, max_kva)
         for pan in pv_as:
-            capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
-            cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
-                    'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
-                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None, 'piek_kw': None, 'factuur': None, 'energie': None}
-            if bt is None:
-                anchors.append(cell); continue     # batterij past niet op deze aansluiting
-            try:
-                a = copy.deepcopy(base)
-                a['batterij'] = {'kwh': bkwh, 'kw': (bt['kva'] if bkwh > 0 else 0),
-                                 'dod_pct': dod, 'rte_pct': rte,
-                                 'capex_eur': bt['eur'], 'max_cycli': 8000}
-                a.setdefault('pv', {})
-                a['pv'] = dict(a.get('pv') or {})
-                a['pv']['kwp'] = float(a['pv'].get('kwp', 0) or 0) + (pan * paneel_wp / 1000.0)
-                a['laadpleinen'] = copy.deepcopy(laadpleinen)
-                a.setdefault('bsp', {}); a['bsp'] = dict(a.get('bsp') or {}); a['bsp']['actief'] = False
-                a['geen_arbitrage'] = False
-                a['geen_aansluiting_verhoging'] = True
-                a['_simuleer_enkel'] = True
-                res = run_simulation(a)
-                kost = float(((res.get('jaarfactuur') or {}).get('subtotaal_excl_btw')) or 0)
-                evm = float(((res.get('laadplein') or {}).get('ev_last_mwh')) or ev_mwh_tot)
-                tot_mwh = max(1e-6, gebouw_mwh + evm)
-                if bkwh == 0 and pan == 0:
-                    ref_kost = kost                 # referentie = gebouw + laden, geen PV/batterij
-                cell['kost'] = round(kost, 1)
-                cell['eurMwh'] = round(kost / tot_mwh, 2)
-                cell['ev_mwh'] = round(evm, 3)
-                try:
-                    _piek = float(((res.get('jaarfactuur') or {}).get('jaarpiek_afname_kw')) or 0)
-                    cell['piek_kw'] = round(_piek, 1) if _piek > 0 else None
-                except (TypeError, ValueError):
-                    cell['piek_kw'] = None
-                try:
-                    cell['factuur'], cell['energie'] = _tl_detail(res, rte)
-                except Exception as e:
-                    log.warning(f"thuisladen detail {bkwh}kWh/{pan}p faalde: {e}")
-                if ref_kost is not None:
-                    besp = ref_kost - kost
-                    cell['ref_kost'] = round(ref_kost, 1)
-                    cell['besparing'] = round(besp, 1)
-                    cell['rendement'] = round((besp / capex * 100.0) if capex > 0 else (999.0 if besp > 0 else 0.0), 2)
-            except Exception as e:
-                log.warning(f"thuisladen anker {bkwh}kWh/{pan}p faalde: {e}")
+            cell = _tl_cell_compute(base, ctx, bkwh, pan)
+            if bkwh == 0 and pan == 0 and cell.get('kost') is not None:
+                ref_kost = cell['kost']
+            if ref_kost is not None and cell.get('kost') is not None:
+                besp = ref_kost - cell['kost']
+                cell['ref_kost'] = round(ref_kost, 1)
+                cell['besparing'] = round(besp, 1)
+                cell['rendement'] = round((besp / cell['capex'] * 100.0) if cell['capex'] > 0 else (999.0 if besp > 0 else 0.0), 2)
             anchors.append(cell)
 
     return {
         'anchors': anchors,
         'grid': {'batt_kwh_as': batt_as, 'pv_pan_as': pv_as},
-        'referentie_kost': round(ref_kost, 1) if ref_kost is not None else None,   # kost gebouw+laden, geen PV/batterij
-        'income': {'referentiekost': referentiekost, 'creg': round(creg_income, 1), 'diesel': round(diesel_income, 1)},
-        'ev_mwh': round(ev_mwh_tot, 3), 'home_kw': round(home_kw, 2), 'runs': len(anchors),
+        'referentie_kost': round(ref_kost, 1) if ref_kost is not None else None,
+        'income': {'referentiekost': ctx['referentiekost'], 'creg': round(ctx['creg_income'], 1), 'diesel': round(ctx['diesel_income'], 1)},
+        'ev_mwh': round(ctx['ev_mwh_tot'], 3), 'home_kw': round(ctx['home_kw'], 2), 'runs': len(anchors),
     }
 
 
