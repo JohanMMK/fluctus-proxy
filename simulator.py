@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.13.1 (2026-08-17 14:09 Europe/Brussels, Johan): THUISLADEN factuurdetail-FIX. _tl_grp_sum telde het
+#                reeds-berekende '_subtotaal'-veld van elke groep MEE bovenop de componenten → factuurgroepen ~2× te hoog
+#                (kloppen niet met het totaal). Gebruikt nu '_subtotaal' (of enkel de niet-onderstreepte componenten).
 # Versie:        v1.13.0 (2026-08-17 11:58 Europe/Brussels, Johan): THUISLADEN omvormer-sizing via C-rate. _tl_batt_pick
 #                kiest nu de omvormer die NET GROTER is dan kWh/C-rate (C=2 default) i.p.v. altijd de goedkoopste (5 kVA).
 #                Grotere batterij → grotere omvormer → shaaft ook een hógere piek. Zo variëren piek/laadfactor met batterijmaat.
@@ -4496,11 +4499,20 @@ def _tl_batt_pick(series, kwh, max_kva, crate=2.0):
     return cand[-1]                      # geen enkele haalt de vereiste power → grootste beschikbare
 
 def _tl_grp_sum(g):
-    """Somt de numerieke componenten van één factuurgroep (A..E)."""
+    """Totaal van één factuurgroep (A..E). De groep bevat een reeds-berekend '_subtotaal'-veld
+    (som van de componenten) NAAST de losse componenten; gebruik dat om dubbeltelling te vermijden.
+    Fallback: som enkel de niet-onderstreepte (echte component-)velden."""
     if not isinstance(g, dict):
         return 0.0
+    if '_subtotaal' in g:
+        try:
+            return float(g['_subtotaal'])
+        except (TypeError, ValueError):
+            pass
     tot = 0.0
-    for v in g.values():
+    for k, v in g.items():
+        if isinstance(k, str) and k.startswith('_'):
+            continue
         try:
             tot += float(v)
         except (TypeError, ValueError):
