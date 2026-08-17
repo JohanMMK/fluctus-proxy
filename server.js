@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.75.0 (2026-08-17 11:25 Europe/Brussels, Johan): THUISLADEN PARALLEL. /api/thuisladen spawnt de
+//                30 ankers nu PARALLEL (per cel _tl_cell via _runSimulatorOnce, gecapt op SIM_MAX_PARALLEL) i.p.v.
+//                één trage sequentiële Python-lus die de client-time-out (150s) haalde. Besparing/ref hier berekend.
 // Versie:        v15.74.0 (2026-08-17 11:11 Europe/Brussels, Johan): THUISLADEN — /api/thuisladen geeft nu ook de
 //                weekend-vensters (we_start/we_eind) per wagen door en kapt de PV-as bij 2 fasen op 20 panelen.
 // Versie:        v15.73.0 (2026-08-16, Johan): THUISLADEN-TEGEL. Nieuwe route POST /api/thuisladen — bouwt een
@@ -4744,20 +4747,46 @@ app.post('/api/thuisladen', async (req, res) => {
   };
 
   try {
-    await _simSlot();
-    let out;
-    try { out = await _runSimulatorRaw(payload); }
-    finally { _simSlotVrij(); }
-    const anchors = Array.isArray(out.anchors) ? out.anchors : [];
+    // PARALLELLE ORKESTRATIE (v15.75.0): i.p.v. één trage Python-lus (30 dispatches sequentieel →
+    // client-time-out) spawnen we per cel een eigen dispatch via _runSimulatorOnce, gecapt op
+    // SIM_MAX_PARALLEL (zelfde patroon als /api/groeipad). Python rekent per cel (_tl_cell) enkel
+    // die ene dispatch + detail; de besparing (referentie − scenario) rekenen we hier na afloop.
+    const t0 = Date.now();
+    const cellList = [];
+    for (const b of battAs) for (const pv of pvAs) cellList.push({ b, pv });
+    let incomeBlk = null, evMwh = null, homeKw = null;
+    const rawCells = await _pmap(cellList, async ({ b, pv }) => {
+      const r = await _runSimulatorOnce({ _modus: 'thuisladen', base, thuisladen: payload.thuisladen, _tl_cell: { bkwh: b, pan: pv } });
+      if (!r) return null;
+      if (!incomeBlk && r.income) incomeBlk = r.income;
+      if (evMwh == null && r.ev_mwh != null) evMwh = r.ev_mwh;
+      if (homeKw == null && r.home_kw != null) homeKw = r.home_kw;
+      return r.cell || null;
+    });
+    const cells = rawCells.filter(Boolean);
+    // Referentie = 0/0-cel; besparing = referentie − scenariokost; rendement = besparing ÷ capex.
+    const c00 = cells.find(c => c.battKwh === 0 && c.pvPan === 0);
+    const refKost = (c00 && c00.kost != null) ? c00.kost : null;
+    if (refKost != null) {
+      for (const c of cells) {
+        if (c.kost == null) continue;
+        const besp = refKost - c.kost;
+        c.ref_kost = Math.round(refKost * 10) / 10;
+        c.besparing = Math.round(besp * 10) / 10;
+        c.rendement = c.capex > 0 ? Math.round((besp / c.capex * 100) * 100) / 100 : (besp > 0 ? 999 : 0);
+      }
+    }
+    console.log(`[thuisladen] ${cells.length} ankers parallel in ${Date.now() - t0}ms (SIM_MAX_PARALLEL=${SIM_MAX_PARALLEL})`);
     return res.json({
       ok: true,
-      anchors,
-      grid: out.grid || { batt_kwh_as: battAs, pv_pan_as: pvAs },
-      income: out.income || null,
-      ev_mwh: out.ev_mwh,
-      home_kw: out.home_kw,
-      runs: out.runs || anchors.length,
-      _meta: { server_version: '15.73.0', modus: 'thuisladen', elapsedMs: out._elapsedMs || null },
+      anchors: cells,
+      grid: { batt_kwh_as: battAs, pv_pan_as: pvAs },
+      referentie_kost: refKost,
+      income: incomeBlk,
+      ev_mwh: evMwh,
+      home_kw: homeKw,
+      runs: cells.length,
+      _meta: { server_version: '15.75.0', modus: 'thuisladen-parallel', elapsedMs: Date.now() - t0 },
     });
   } catch (e) {
     console.error('[thuisladen] fout:', e.message);
