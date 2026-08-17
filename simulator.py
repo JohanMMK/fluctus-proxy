@@ -4478,6 +4478,63 @@ def _tl_batt_pick(series, kwh, max_kva):
     cand.sort(key=lambda b: b['eur'])
     return cand[0]
 
+def _tl_grp_sum(g):
+    """Somt de numerieke componenten van één factuurgroep (A..E)."""
+    if not isinstance(g, dict):
+        return 0.0
+    tot = 0.0
+    for v in g.values():
+        try:
+            tot += float(v)
+        except (TypeError, ValueError):
+            pass
+    return tot
+
+def _tl_detail(res, rte_pct):
+    """Compacte factuur- + energiebalans-detail per anker (null-safe).
+    Energie-splitsing: verbruik naar bron (PV/net, al dan niet via batterij) en
+    PV-productie naar bestemming (direct/batterij/injectie)."""
+    jf = (res.get('jaarfactuur') or {})
+    grp = jf.get('groepen') or {}
+    factuur = {
+        'A_energie':   round(_tl_grp_sum(grp.get('A_energiekost')), 1),
+        'B_afname':    round(_tl_grp_sum(grp.get('B_netgebruik_afname')), 1),
+        'C_injectie':  round(_tl_grp_sum(grp.get('C_netgebruik_injectie')), 1),
+        'D_transport': round(_tl_grp_sum(grp.get('D_transport')), 1),
+        'E_heffingen': round(_tl_grp_sum(grp.get('E_heffingen')), 1),
+        'subtotaal':   round(float(jf.get('subtotaal_excl_btw') or 0), 1),
+    }
+    k = res.get('kpi') or {}
+    def _f(key):
+        try:
+            return max(0.0, float(k.get(key, 0) or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    afname     = _f('totaal_afname_mwh')
+    pv_prod    = _f('totaal_pv_mwh')
+    pv_direct  = _f('pv_direct_zelfverbruik_mwh')
+    pv_batt    = _f('pv_naar_batterij_mwh')
+    pv_inj     = _f('pv_injectie_mwh')
+    ontladen   = _f('energie_ontladen_mwh')       # geleverde batterij-ontlading
+    rte = (rte_pct / 100.0) if rte_pct else 0.9
+    laden_in = (ontladen / rte) if rte > 0 else ontladen   # bruto in de batterij geladen
+    laden_pv = min(pv_batt, laden_in)
+    laden_net = max(0.0, laden_in - laden_pv)
+    # Ontlading pro-rata naar herkomst (PV vs net):
+    ontlaad_pv  = (ontladen * (laden_pv / laden_in)) if laden_in > 1e-9 else 0.0
+    ontlaad_net = max(0.0, ontladen - ontlaad_pv)
+    net_direct = max(0.0, afname - pv_direct - ontladen)   # rest = net rechtstreeks naar de last
+    energie = {
+        'afname_mwh': round(afname, 3), 'pv_prod_mwh': round(pv_prod, 3),
+        'verbruik': {'pv_direct': round(pv_direct, 3), 'pv_batt': round(ontlaad_pv, 3),
+                     'net_direct': round(net_direct, 3), 'net_batt': round(ontlaad_net, 3)},
+        'productie': {'pv_direct': round(pv_direct, 3), 'pv_batt': round(pv_batt, 3),
+                      'pv_inj': round(pv_inj, 3)},
+        'pct_zelfconsumptie': round(float(k.get('pct_zelfconsumptie', 0) or 0), 1),
+        'pct_zelfvoorziening': round(float(k.get('pct_zelfvoorziening', 0) or 0), 1),
+    }
+    return factuur, energie
+
 def run_thuisladen(inp: dict) -> dict:
     import copy
     base = inp.get('base') or {}
@@ -4538,7 +4595,7 @@ def run_thuisladen(inp: dict) -> dict:
             capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
             cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
                     'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
-                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None}
+                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None, 'factuur': None, 'energie': None}
             if bt is None:
                 anchors.append(cell); continue     # batterij past niet op deze aansluiting
             try:
@@ -4563,6 +4620,10 @@ def run_thuisladen(inp: dict) -> dict:
                 cell['kost'] = round(kost, 1)
                 cell['eurMwh'] = round(kost / tot_mwh, 2)
                 cell['ev_mwh'] = round(evm, 3)
+                try:
+                    cell['factuur'], cell['energie'] = _tl_detail(res, rte)
+                except Exception as e:
+                    log.warning(f"thuisladen detail {bkwh}kWh/{pan}p faalde: {e}")
                 if ref_kost is not None:
                     besp = ref_kost - kost
                     cell['ref_kost'] = round(ref_kost, 1)
