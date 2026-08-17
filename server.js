@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.74.0 (2026-08-17 11:11 Europe/Brussels, Johan): THUISLADEN — /api/thuisladen geeft nu ook de
+//                weekend-vensters (we_start/we_eind) per wagen door en kapt de PV-as bij 2 fasen op 20 panelen.
 // Versie:        v15.73.0 (2026-08-16, Johan): THUISLADEN-TEGEL. Nieuwe route POST /api/thuisladen — bouwt een
 //                residentiële base-input (buildSimInput) en spawnt simulator.py in de geïsoleerde _modus:'thuisladen'
 //                (30 anker-dispatches, 6 batterij-kWh × 5 PV-panelen, ALLE zonder onbalans). Frontend interpoleert +
@@ -4722,7 +4724,8 @@ app.post('/api/thuisladen', async (req, res) => {
     thuisladen: {
       wagens: wagens.map(w => ({
         km: Number(w.km || 0), kwhkm: Number(w.kwhkm || 0.16),
-        wd_start: Number(w.wd_start || 0), wd_eind: Number(w.wd_eind || 7),
+        wd_start: Number(w.wd_start != null ? w.wd_start : 19), wd_eind: Number(w.wd_eind != null ? w.wd_eind : 7),
+        we_start: Number(w.we_start != null ? w.we_start : 0), we_eind: Number(w.we_eind != null ? w.we_eind : 24),
         creg: !!w.creg,
       })),
       referentiekost: Number(inv.referentiekost || 0),
