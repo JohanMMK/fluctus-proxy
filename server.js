@@ -4686,7 +4686,10 @@ app.post('/api/thuisladen', async (req, res) => {
     .filter(x => x.kva > 0 && x.kwh > 0 && x.kva <= maxKva);
 
   // Anker-assen (identiek aan de frontend-heatmap): batterij-kWh × extra-PV-panelen.
-  const pvMax = Number(par.PV_MAX || 40), pvStap = Number(par.PV_STAP || 2);
+  // Bij 2 fasen (5 kVA) kappen we de PV-as af op 20 panelen — een kleine aansluiting
+  // heeft aan méér PV weinig (injectie begrensd). Client spiegelt dit (pvMaxEff()).
+  const pvStap = Number(par.PV_STAP || 2);
+  const pvMax = (Number(inv.fasen) === 2) ? Math.min(20, Number(par.PV_MAX || 40)) : Number(par.PV_MAX || 40);
   const pctPan = pct => Math.round(pvMax * pct / 100 / pvStap) * pvStap;
   const battAs = [0, 5, 10, 15, 20, 25];
   const pvAs   = [0, pctPan(25), pctPan(50), pctPan(75), pctPan(100)];
@@ -4723,7 +4726,7 @@ app.post('/api/thuisladen', async (req, res) => {
         creg: !!w.creg,
       })),
       referentiekost: Number(inv.referentiekost || 0),
-      creg_eur_mwh: Number(par.CREG || 60),
+      creg_eur_mwh: Number(par.CREG || 322),   // CREG-refertetarief thuisladen (Vlaanderen Q3 2026 = 32,22 c/kWh); client stuurt de echte waarde mee
       diesel_100km: Number(par.DIESEL_100KM || 9),
       pv_kost: Number(par.PV_KOST || 500),
       paneel_wp: Number(par.PANEEL_WP || 450),
