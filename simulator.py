@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.13.0 (2026-08-17 11:58 Europe/Brussels, Johan): THUISLADEN omvormer-sizing via C-rate. _tl_batt_pick
+#                kiest nu de omvormer die NET GROTER is dan kWh/C-rate (C=2 default) i.p.v. altijd de goedkoopste (5 kVA).
+#                Grotere batterij → grotere omvormer → shaaft ook een hógere piek. Zo variëren piek/laadfactor met batterijmaat.
 # Versie:        v1.12.1 (2026-08-17 11:25 Europe/Brussels, Johan): THUISLADEN single-cell modus (_tl_cell) →
 #                server.js kan de 30 ankers parallel spawnen. Context/cel-logica in _tl_build_context/_tl_cell_compute
 #                (gedeeld door de parallelle én de sequentiële fallback-lus). Geen gedragswijziging in de cijfers.
@@ -4475,14 +4478,22 @@ def analyseer_pieken_en_arbitrage(inp: dict) -> dict:
 #               pv_kost, paneel_wp, laadvermogen_basis, max_kva, batt_dod, batt_rte,
 #               batt_series[{kva,kwh,eur}], batt_kwh_as[], pv_pan_as[]
 # =============================================================================
-def _tl_batt_pick(series, kwh, max_kva):
+def _tl_batt_pick(series, kwh, max_kva, crate=2.0):
+    """Kies de omvormer voor deze batterij-kWh: vereist vermogen = kWh / C-rate (C=2 ⇒ 2-uurs
+    batterij), dan de KLEINSTE beschikbare kVA die NET GROTER is (≥) — binnen de fasegrens.
+    Haalt geen enkele optie de vereiste power, dan de grootste beschikbare. Zo shaaft een grotere
+    batterij ook een hógere piek (i.p.v. altijd de goedkoopste = 5 kVA)."""
     if kwh <= 0:
         return {'kva': 0, 'kwh': 0, 'eur': 0}
     cand = [b for b in series if int(b['kwh']) == int(kwh) and float(b['kva']) <= float(max_kva)]
     if not cand:
         return None                      # past niet op deze aansluiting
-    cand.sort(key=lambda b: b['eur'])
-    return cand[0]
+    cand.sort(key=lambda b: float(b['kva']))
+    req = float(kwh) / (float(crate) if crate and float(crate) > 0 else 2.0)   # vereist omvormervermogen (kW)
+    for b in cand:
+        if float(b['kva']) >= req:
+            return b
+    return cand[-1]                      # geen enkele haalt de vereiste power → grootste beschikbare
 
 def _tl_grp_sum(g):
     """Somt de numerieke componenten van één factuurgroep (A..E)."""
@@ -4547,9 +4558,9 @@ def _tl_cell_compute(base, ctx, bkwh, pan):
     server-side parallelle orkestratie (single-cell modus)."""
     import copy
     series = ctx['series']; max_kva = ctx['max_kva']; paneel_wp = ctx['paneel_wp']
-    pv_kost = ctx['pv_kost']; dod = ctx['dod']; rte = ctx['rte']
+    pv_kost = ctx['pv_kost']; dod = ctx['dod']; rte = ctx['rte']; crate = ctx.get('crate', 2.0)
     laadpleinen = ctx['laadpleinen']; ev_mwh_tot = ctx['ev_mwh_tot']; gebouw_mwh = ctx['gebouw_mwh']
-    bt = _tl_batt_pick(series, bkwh, max_kva)
+    bt = _tl_batt_pick(series, bkwh, max_kva, crate)
     capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
     cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
             'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
@@ -4603,6 +4614,7 @@ def _tl_build_context(inp):
     max_kva = float(tl.get('max_kva', 25) or 25)
     dod = float(tl.get('batt_dod', 90) or 90)
     rte = float(tl.get('batt_rte', 90) or 90)
+    crate = float(tl.get('batt_crate', 2) or 2)   # omvormer-sizing: kW = kWh / C-rate
     series = tl.get('batt_series') or []
     batt_as = tl.get('batt_kwh_as') or [0, 5, 10, 15, 20, 25]
     pv_as = tl.get('pv_pan_as') or [0, 10, 20, 30, 40]
@@ -4638,7 +4650,7 @@ def _tl_build_context(inp):
     gebouw_mwh = float(base.get('jaarverbruik_mwh', 0) or 0)
     return {
         'base': base, 'series': series, 'max_kva': max_kva, 'paneel_wp': paneel_wp, 'pv_kost': pv_kost,
-        'dod': dod, 'rte': rte, 'laadpleinen': laadpleinen, 'ev_mwh_tot': ev_mwh_tot, 'gebouw_mwh': gebouw_mwh,
+        'dod': dod, 'rte': rte, 'crate': crate, 'laadpleinen': laadpleinen, 'ev_mwh_tot': ev_mwh_tot, 'gebouw_mwh': gebouw_mwh,
         'referentiekost': referentiekost, 'creg_income': creg_income, 'diesel_income': diesel_income,
         'home_kw': home_kw, 'batt_as': batt_as, 'pv_as': pv_as,
     }
