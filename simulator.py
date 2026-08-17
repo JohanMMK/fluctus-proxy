@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.12.0 (2026-08-17 11:11 Europe/Brussels, Johan): THUISLADEN — run_thuisladen splitst nu per wagen
+#                een WEEKDAG-sessie (5 dagen, venster wd) en WEEKEND-sessie (2 dagen, venster we); jaar-km 5/7·2/7.
+#                Per anker ook max-piek (jaarpiek_afname_kw) + factuurgroepen A–E + energieflows (PV/net, via batterij).
 # Versie:        v1.11.3 (2026-08-16, Johan): ONBALANS-PAD (lp_dispatch_month_bsp) krijgt dezelfde EV-tekort-slack
 #                als het arbitrage-pad. Onder VERZADIGING (EV-laadvraag > transfo+batterij) viel de maand-BSP-LP
 #                terug op 'niveau 4: maand verloren' → grid_in=0 → ALLE volumetrische factuurposten (energie,
@@ -4558,7 +4561,9 @@ def run_thuisladen(inp: dict) -> dict:
     if home_kw <= 0.5:
         home_kw = laadverm
 
-    # EV-laadpleinen uit de wagens (v0.1: weekdag-venster, dpw=7 — weekend-venster is een verfijning).
+    # EV-laadpleinen uit de wagens: per wagen een WEEKDAG-sessie (5 dagen, venster wd) en een
+    # WEEKEND-sessie (2 dagen, venster we). De jaar-km wordt 5/7 · 2/7 gesplitst → correct dagverbruik
+    # per dagtype, en elk venster (bv. weekdag 19→7 overnacht, weekend 0→24) telt echt mee in de dispatch.
     laadpleinen = []
     creg_income = 0.0
     diesel_income = 0.0
@@ -4567,11 +4572,19 @@ def run_thuisladen(inp: dict) -> dict:
         km = float(w.get('km', 0) or 0); kwhkm = float(w.get('kwhkm', 0) or 0)
         mwh = km * kwhkm / 1000.0
         ev_mwh_tot += mwh
+        wd_s = float(w.get('wd_start', 19) or 0); wd_e = float(w.get('wd_eind', 7) or 7)
+        we_s = float(w.get('we_start', 0) or 0);  we_e = float(w.get('we_eind', 24) or 24)
         laadpleinen.append({
-            'naam': 'Wagen ' + str(i + 1), 'voertuigtype': 'personenwagen', 'aantal': 1,
-            'km_per_jaar': km, 'kwh_per_km': kwhkm,
-            'venster_start': float(w.get('wd_start', 0) or 0), 'venster_eind': float(w.get('wd_eind', 7) or 7),
-            'dagen_per_week': 7, 'cap_kw': home_kw, 'laadpunten': [],
+            'naam': 'Wagen ' + str(i + 1) + ' (weekdag)', 'voertuigtype': 'personenwagen', 'aantal': 1,
+            'km_per_jaar': km * 5.0 / 7.0, 'kwh_per_km': kwhkm,
+            'venster_start': wd_s, 'venster_eind': wd_e,
+            'dagen_per_week': 5, 'cap_kw': home_kw, 'laadpunten': [],
+        })
+        laadpleinen.append({
+            'naam': 'Wagen ' + str(i + 1) + ' (weekend)', 'voertuigtype': 'personenwagen', 'aantal': 1,
+            'km_per_jaar': km * 2.0 / 7.0, 'kwh_per_km': kwhkm,
+            'venster_start': we_s, 'venster_eind': we_e,
+            'dagen_per_week': 2, 'cap_kw': home_kw, 'laadpunten': [],
         })
         if w.get('creg'):
             creg_income += mwh * creg_mwh
@@ -4595,7 +4608,7 @@ def run_thuisladen(inp: dict) -> dict:
             capex = (bt['eur'] if bt else 0) + (pan * paneel_wp / 1000.0) * pv_kost
             cell = {'battKwh': bkwh, 'pvPan': pan, 'kva': (bt['kva'] if bt else None),
                     'capex': capex, 'kost': None, 'besparing': None, 'rendement': None,
-                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None, 'factuur': None, 'energie': None}
+                    'eurMwh': None, 'ev_mwh': None, 'ref_kost': None, 'piek_kw': None, 'factuur': None, 'energie': None}
             if bt is None:
                 anchors.append(cell); continue     # batterij past niet op deze aansluiting
             try:
@@ -4620,6 +4633,11 @@ def run_thuisladen(inp: dict) -> dict:
                 cell['kost'] = round(kost, 1)
                 cell['eurMwh'] = round(kost / tot_mwh, 2)
                 cell['ev_mwh'] = round(evm, 3)
+                try:
+                    _piek = float(((res.get('jaarfactuur') or {}).get('jaarpiek_afname_kw')) or 0)
+                    cell['piek_kw'] = round(_piek, 1) if _piek > 0 else None
+                except (TypeError, ValueError):
+                    cell['piek_kw'] = None
                 try:
                     cell['factuur'], cell['energie'] = _tl_detail(res, rte)
                 except Exception as e:
