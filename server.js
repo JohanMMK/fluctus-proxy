@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.78.0 (2026-08-17 12:29 Europe/Brussels, Johan): THUISLADEN PV-FIX. De base werd met pv_kwp=0
+//                gebouwd → buildSimInput bouwde GEEN zonvorm → de extra PV per anker produceerde NIETS (€/MWh vlak,
+//                rendement daalde met panelen). Base nu met max-extra-PV gebouwd (vorm + omvormer) en pv.kwp gereset
+//                naar enkel de bestaande PV; run_thuisladen telt per anker de panelen bovenop mét echte zonvorm.
 // Versie:        v15.77.0 (2026-08-17 11:58 Europe/Brussels, Johan): THUISLADEN — omvormer-sizing C-rate (par.BATT_CRATE,
 //                default 2) doorgegeven aan de dispatch (kW = kWh/C → grotere batterij shaaft hógere piek).
 // Versie:        v15.76.0 (2026-08-17 11:49 Europe/Brussels, Johan): THUISLADEN — nieuwe route POST /api/thuisladen-cel
@@ -4693,6 +4697,9 @@ function _thuisladenInput(inv, par) {
   const pctPan = pct => Math.round(pvMax * pct / 100 / pvStap) * pvStap;
   const battAs = [0, 5, 10, 15, 20, 25];
   const pvAs   = [0, pctPan(25), pctPan(50), pctPan(75), pctPan(100)];
+  const paneelWp = Number(par.PANEEL_WP || 450);
+  const maxExtraKwp = pvMax * paneelWp / 1000;        // grootste anker (pvMax panelen)
+  const bestaandeKwp = Number(inv.bestaand_pv_kwp) > 0 ? Number(inv.bestaand_pv_kwp) : 0;
   const ui = {
     grd: inv.grd || 'Fluvius West',
     spanning: 'LS',
@@ -4700,15 +4707,20 @@ function _thuisladenInput(inv, par) {
     profielNaam: inv.profielNaam || inv.profiel || 'residentieel',
     aansluiting_kva: maxKva,
     toegangsvermogen_kw: piekKw,
-    pv_kwp: 0,
-    bestaande_pv: (Number(inv.bestaand_pv_kwp) > 0)
-      ? { aanwezig: true, kwp: Number(inv.bestaand_pv_kwp), inj_mwh_jaar: Number(inv.bestaand_inj_mwh || 0), maand: 6 }
+    // FIX: base met pv_kwp=0 bouwt GEEN zonvorm → extra PV per anker produceert niets. We bouwen
+    // de base daarom met de MAX extra PV (zodat vorm + omvormer gebouwd worden) en resetten hieronder
+    // pv.kwp naar enkel de bestaande PV; run_thuisladen telt per anker de panelen bovenop mét zonvorm.
+    pv_kwp: maxExtraKwp,
+    bestaande_pv: (bestaandeKwp > 0)
+      ? { aanwezig: true, kwp: bestaandeKwp, inj_mwh_jaar: Number(inv.bestaand_inj_mwh || 0), maand: 6 }
       : { aanwezig: false },
     pvInjStrategie: 'passthrough',
     geen_arbitrage: false,
     laadpleinen: [],
   };
   const base = buildSimInput(ui);   // kan gooien → aanroeper vangt
+  // Reset PV-kwp naar ENKEL de bestaande PV; de zonvorm + omvormer (voor max PV) blijven staan.
+  if (base.pv) base.pv.kwp = bestaandeKwp;
   const thuisladen = {
     wagens: wagens.map(w => ({
       km: Number(w.km || 0), kwhkm: Number(w.kwhkm || 0.16),
