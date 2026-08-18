@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.79.0 (2026-08-17 14:26 Europe/Brussels, Johan): THUISLADEN — /api/thuisladen geeft nu netbeheer
+//                {grd, spanning, regio, default} terug. Zonder postcode valt de input stil terug op Fluvius West|LS
+//                (Vlaanderen); de app toont dit expliciet zodat de klant de veronderstelde regio/tariefkaart ziet.
 // Versie:        v15.78.0 (2026-08-17 12:29 Europe/Brussels, Johan): THUISLADEN PV-FIX. De base werd met pv_kwp=0
 //                gebouwd → buildSimInput bouwde GEEN zonvorm → de extra PV per anker produceerde NIETS (€/MWh vlak,
 //                rendement daalde met panelen). Base nu met max-extra-PV gebouwd (vorm + omvormer) en pv.kwp gereset
@@ -4798,7 +4801,16 @@ app.post('/api/thuisladen', async (req, res) => {
       ev_mwh: evMwh,
       home_kw: homeKw,
       runs: cells.length,
-      _meta: { server_version: '15.75.0', modus: 'thuisladen-parallel', elapsedMs: Date.now() - t0 },
+      // v15.79.0: welke tariefkaart draait er? Zonder postcode valt _thuisladenInput stil
+      // terug op 'Fluvius West'|LS (Vlaanderen). De app toont dit expliciet zodat de klant
+      // weet welke netbeheerder/regio verondersteld is (transport_* = 0 hoort bij VL/BR).
+      netbeheer: {
+        grd: (base.netbeheer && base.netbeheer.grd) || null,
+        spanning: (base.netbeheer && base.netbeheer.spanning) || null,
+        regio: (base.netbeheer && base.netbeheer.tarieven && base.netbeheer.tarieven._regio) || null,
+        default: !inv.grd,   // true = geen postcode/grd meegegeven → West-fallback
+      },
+      _meta: { server_version: '15.79.0', modus: 'thuisladen-parallel', elapsedMs: Date.now() - t0 },
     });
   } catch (e) {
     console.error('[thuisladen] fout:', e.message);
