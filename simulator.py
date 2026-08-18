@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.13.2 (2026-08-17 15:52 Europe/Brussels, Johan): THUISLADEN factuurdetail — _tl_detail geeft nu
+#                A_certificaten (GSC+WKK) apart terug (deelverzameling van A_energie), zodat de app de
+#                certificaten als eigen lijn kan tonen. A_energie zelf blijft het volledige groep-A-subtotaal.
 # Versie:        v1.13.1 (2026-08-17 14:09 Europe/Brussels, Johan): THUISLADEN factuurdetail-FIX. _tl_grp_sum telde het
 #                reeds-berekende '_subtotaal'-veld van elke groep MEE bovenop de componenten → factuurgroepen ~2× te hoog
 #                (kloppen niet met het totaal). Gebruikt nu '_subtotaal' (of enkel de niet-onderstreepte componenten).
@@ -4525,8 +4528,14 @@ def _tl_detail(res, rte_pct):
     PV-productie naar bestemming (direct/batterij/injectie)."""
     jf = (res.get('jaarfactuur') or {})
     grp = jf.get('groepen') or {}
+    _A = grp.get('A_energiekost') or {}
+    # v1.13.2: GSC + WKK-certificaten apart uit groep A lichten (blijven ONDERDEEL van A;
+    # de client toont "Energie (leverancier)" = A − certificaten en de certificaten als
+    # eigen lijn, zodat de sub-lijnen nog steeds naar het A-subtotaal sommeren).
+    _cert = float(_A.get('gsc', 0.0) or 0.0) + float(_A.get('wkk', 0.0) or 0.0)
     factuur = {
-        'A_energie':   round(_tl_grp_sum(grp.get('A_energiekost')), 1),
+        'A_energie':      round(_tl_grp_sum(_A), 1),
+        'A_certificaten': round(_cert, 1),           # GSC + WKK (deelverzameling van A_energie)
         'B_afname':    round(_tl_grp_sum(grp.get('B_netgebruik_afname')), 1),
         'C_injectie':  round(_tl_grp_sum(grp.get('C_netgebruik_injectie')), 1),
         'D_transport': round(_tl_grp_sum(grp.get('D_transport')), 1),
