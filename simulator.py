@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.1 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS — 'aantal_palen' begrenst de gelijktijdige
+#                sessies (fysieke palen); piek-vraag plein = aantal_palen × paal_kw, overvraag = gemist.
 # Versie:        v1.14.0 (2026-08-20 17:36 Europe/Brussels, Johan): NIEUW LAADPLEIN-TYPE 'betalende bezoekers'.
 #                Random sessies in 1..n vensters, elk een vaste duur aan het paalvermogen (AC22/DC160). De vraag
 #                wordt bediend uit de vrije aansluitruimte + batterij (grid-first), aansluiting NOOIT verzwaard →
@@ -686,15 +688,20 @@ def _is_laaddag(dt, dpw: int) -> bool:
     return wd <= 4       # ma-vr
 
 
-def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, base_seed=20260):
+def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen=1, base_seed=20260):
     """Betalende-bezoekers-plein: random sessies in 1..n vensters, elk `dur_min` lang aan
     `paal_kw`. Return per-kwartier VRAAG (kW) over de sim-periode. Reproduceerbaar (seed per dag).
-    vensters = lijst van (start_uur, eind_uur, aantal_sessies). Concurrency telt op."""
+    vensters = lijst van (start_uur, eind_uur, aantal_sessies).
+    v1.14.1: `aantal_palen` begrenst het aantal GELIJKTIJDIGE sessies (fysieke palen). Meer
+    gelijktijdige sessies dan palen kunnen niet laden → dat deel telt als gemist (geen vrije paal).
+    De piek-vraag van het plein is dus max aantal_palen × paal_kw."""
     N = len(sim_timestamps)
     dem = [0.0] * N
     if paal_kw <= 0 or not vensters:
         return dem
+    palen = max(1, int(aantal_palen or 1))
     dur_q = max(1, int(round(float(dur_min) / 15.0)))
+    cnt = [0] * N   # aantal gelijktijdige sessies per kwartier (ongecapt)
     per_dag = {}
     for i, ts in enumerate(sim_timestamps):
         per_dag.setdefault(ts.date(), []).append((i, ts.hour + ts.minute / 60.0))
@@ -716,7 +723,10 @@ def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, base_seed
             for _ in range(n):
                 k = rng.choice(starts)
                 for q in range(k, min(len(day_idx), k + dur_q)):
-                    dem[day_idx[q]] += paal_kw
+                    cnt[day_idx[q]] += 1
+    for i in range(N):
+        if cnt[i] > 0:
+            dem[i] = min(cnt[i], palen) * paal_kw   # begrensd op het aantal fysieke palen
     return dem
 
 
@@ -741,6 +751,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
         if str(p.get('type_plein', '')).lower() == 'bezoekers':
             paal_kw = _LAADPUNT_KW.get(p.get('paaltype', 'AC22'), float(p.get('paal_kw', 22) or 22))
             dur_min = float(p.get('duur_min', 30) or 30)
+            aantal_palen = max(1, int(p.get('aantal_palen', 1) or 1))
             dpw = int(p.get('dagen_per_week', 7) or 7)
             if dpw not in (5, 6, 7):
                 dpw = 7
@@ -750,7 +761,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
                 ns = int(v.get('sessies', 0) or 0)
                 if ns > 0 and ve > vs:
                     vensters.append((vs, ve, ns))
-            demand = _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw)
+            demand = _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen)
             periode_kwh = sum(demand) * 0.25
             sessies_dag = sum(ns for (_a, _b, ns) in vensters)
             dur_q = max(1, int(round(dur_min / 15.0)))
@@ -762,7 +773,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
                 'v_start': 0, 'v_eind': 24, 'wrap': False, 'dpw': dpw,
                 'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
                 'modus': 'bezoekers', 'demand_kw': demand, 'paal_kw': paal_kw,
-                'duur_min': dur_min, 'vensters': vensters,
+                'duur_min': dur_min, 'vensters': vensters, 'aantal_palen': aantal_palen,
             }
             out.append(rec)
             tot_cap_kw += rec['cap_kw']
