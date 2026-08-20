@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.80.0 (2026-08-18 Europe/Brussels, Johan): POSTCODE hoofdgemeente-override. Sommige postcodes
+//                werden met een deelgemeente gelabeld i.p.v. de hoofdgemeente (3800 → "Aalst (Limb.)" i.p.v.
+//                "Sint-Truiden"). HOOFDGEMEENTE_OVERRIDE zet de hoofdgemeente vooraan in PC_GEMEENTE_INDEX (additief).
 // Versie:        v15.79.0 (2026-08-17 14:26 Europe/Brussels, Johan): THUISLADEN — /api/thuisladen geeft nu netbeheer
 //                {grd, spanning, regio, default} terug. Zonder postcode valt de input stil terug op Fluvius West|LS
 //                (Vlaanderen); de app toont dit expliciet zodat de klant de veronderstelde regio/tariefkaart ziet.
@@ -800,6 +803,20 @@ if (POSTCODES_DATA) {
     }
   }
   console.log(`[postcodes] ${entries.length} postcodes geladen`);
+}
+
+// ─── HOOFDGEMEENTE-OVERRIDE (18-08) ─────────────────────────────────────────
+// De bron-data labelt sommige postcodes met een DEELGEMEENTE i.p.v. de
+// hoofdgemeente (bv. 3800 → "Aalst (Limb.)" i.p.v. "Sint-Truiden"). Deze
+// override zet de correcte hoofdgemeente VOORAAN in de gemeenten-lijst, zodat
+// de UI die als default toont. Deelgemeenten blijven als extra keuze staan.
+// Additief: alleen herordenen/prepend, geen data verwijderd. Uitbreidbaar.
+const HOOFDGEMEENTE_OVERRIDE = {
+  '3800': 'Sint-Truiden',
+};
+for (const [pc, hoofd] of Object.entries(HOOFDGEMEENTE_OVERRIDE)) {
+  const cur = PC_GEMEENTE_INDEX[pc] || [];
+  PC_GEMEENTE_INDEX[pc] = [hoofd, ...cur.filter(g => g !== hoofd)];
 }
 
 // ─── POSTCODE-FALLBACK INDEX (v15.10, BaseCase Uitbreiding Fase 2 sessie 3) ──
