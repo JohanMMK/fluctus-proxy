@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.81.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S. Nieuwe route
+//                POST /api/bezoekers-scenarios draait 6 varianten parallel (geen batt / batt / batt+plein @
+//                50/100/150/200% sessies) op dezelfde aansluiting → energieprijs, km gevraagd/geleverd,
+//                opbrengst (geleverd × tarief) en winst (opbrengst − factuur + factuur_basis).
 // Versie:        v15.80.0 (2026-08-18 Europe/Brussels, Johan): POSTCODE hoofdgemeente-override. Sommige postcodes
 //                werden met een deelgemeente gelabeld i.p.v. de hoofdgemeente (3800 → "Aalst (Limb.)" i.p.v.
 //                "Sint-Truiden"). HOOFDGEMEENTE_OVERRIDE zet de hoofdgemeente vooraan in PC_GEMEENTE_INDEX (additief).
@@ -4572,6 +4576,69 @@ async function _batterijSweepGebouw(input, cap, probe, job, startTime) {
            _meta: { elapsed_ms: Date.now() - startTime, server_version: '15.35.0',
                     modus: 'batterij_gebouw', nmax: Nmax, optimaal_k: beste.k } };
 }
+
+// ─── BEZOEKERS-SCENARIO'S (v15.81, Johan 20-08) ─────────────────────────────
+// Betalend-laadplein-analyse: 6 varianten naast elkaar op DEZELFDE aansluiting
+// (nooit verzwaren). Body: { input: <ui>, tarief_eur_mwh, kwh_km, percentages[] }.
+//  1) geen batterij, geen plein        → factuur_basis
+//  2) batterij, geen plein
+//  3..) batterij + bezoekersplein @ pct% sessies
+// Per variant: energieprijs (factuur/afname €/MWh), km gevraagd/geleverd (uit de
+// bezoekers-pleinen ÷ kwh_km), opbrengst (geleverd × tarief), winst = opbrengst −
+// factuur(variant) + factuur_basis. Draait elke variant als één dispatch (geen sweep).
+app.post('/api/bezoekers-scenarios', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const baseInput = b.input || b.ui || null;
+    if (!baseInput || typeof baseInput !== 'object') return res.status(400).json({ error: 'input (ui) is verplicht' });
+    if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 seconden opnieuw' });
+    const tarief = Number(b.tarief_eur_mwh) || 500;
+    const kwhKm = Number(b.kwh_km) || 0.16;
+    const pcts = (Array.isArray(b.percentages) && b.percentages.length) ? b.percentages.map(Number) : [50, 100, 150, 200];
+    const isBez = (p) => String((p && p.type_plein) || '').toLowerCase() === 'bezoekers';
+    const clone = () => JSON.parse(JSON.stringify(baseInput));
+    const prep = (ui) => { ui.geen_aansluiting_verhoging = true; delete ui._async; return ui; };  // aansluiting vast
+    const stripBez = (ui) => { ui.laadpleinen = (ui.laadpleinen || []).filter(p => !isBez(p)); };
+    const scaleBez = (ui, f) => { (ui.laadpleinen || []).forEach(p => { if (isBez(p)) (p.vensters || []).forEach(v => { v.sessies = Math.round((Number(v.sessies) || 0) * f); }); }); };
+    const noBatt = (ui) => { ui.batterijId = ''; ui.batterijCustom = null; };
+
+    const variants = [];
+    { const ui = prep(clone()); noBatt(ui); stripBez(ui); variants.push({ key: 'geen_batt', label: 'Geen batterij', ui, heeftPlein: false, pct: null }); }
+    { const ui = prep(clone()); stripBez(ui); variants.push({ key: 'batt', label: 'Batterij', ui, heeftPlein: false, pct: null }); }
+    for (const pct of pcts) { const ui = prep(clone()); scaleBez(ui, pct / 100); variants.push({ key: 'plein_' + pct, label: 'Batterij + laadplein · ' + pct + '% sessies', ui, heeftPlein: true, pct }); }
+
+    const runs = await _pmap(variants, async (v) => {
+      const r = await _runSimulatorOnce(buildSimInput(v.ui));
+      const jf = (r && (r.jaarfactuur || r.factuur)) || {};
+      const factuur = Number(jf.subtotaal_excl_btw) || 0;
+      const afnameMwh = Number((r && r.kpi || {}).totaal_afname_mwh) || 0;
+      const pl = (r && r.laadplein && Array.isArray(r.laadplein.pleinen)) ? r.laadplein.pleinen : [];
+      let gevrMwh = 0, gelMwh = 0;
+      pl.forEach(p => { gevrMwh += Number(p.gevraagd_mwh) || 0; gelMwh += Number(p.geladen_mwh) || 0; });
+      return Object.assign({}, v, { factuur, energieprijs: afnameMwh > 0 ? factuur / afnameMwh : 0, gevrMwh, gelMwh });
+    });
+
+    const basis = runs.find(x => x.key === 'geen_batt');
+    const factuurBasis = basis ? basis.factuur : 0;
+    const rows = runs.map(v => {
+      const opbrengst = v.gelMwh * tarief;
+      return {
+        key: v.key, label: v.label, pct: v.pct, heeftPlein: v.heeftPlein,
+        energieprijs_eur_mwh: Math.round(v.energieprijs),
+        km_gevraagd: kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : 0,
+        km_geleverd: kwhKm > 0 ? Math.round(v.gelMwh * 1000 / kwhKm) : 0,
+        opbrengst_eur: v.heeftPlein ? Math.round(opbrengst) : null,
+        winst_eur: v.heeftPlein ? Math.round(opbrengst - v.factuur + factuurBasis) : null,
+        factuur_eur: Math.round(v.factuur),
+      };
+    });
+    return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, factuur_basis: Math.round(factuurBasis),
+      rows, _meta: { server_version: '15.81.0', runs: runs.length } });
+  } catch (e) {
+    console.error('[bezoekers-scenarios] fout:', e.message);
+    return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
+  }
+});
 
 app.post('/api/nominatie-sim-3', async (req, res) => {
   const input = req.body;
