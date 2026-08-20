@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.83.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — DRIFT-FIX. Elke variant
+//                wordt nu op de sturing EXCL. onbalans gepind (_variantUi 'sturing'), exact dezelfde dispatch
+//                als de hoofdsim-tegel "factuur sturing zonder onbalans". Voorheen erfde de scenario-run de
+//                rauwe sturing-vlaggen uit STATE.lastSimInput → de 100%-rij kon een andere sturing draaien dan
+//                de tegel en week de jaarfactuur af. Nu reproduceert de 100%-rij exact de hoofdsim-factuur.
 // Versie:        v15.82.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — tabel per scenario nu met
 //                % geleverd (i.p.v. absolute geleverde km), TOTALE jaarfactuur van dat scenario, en winst t.o.v.
 //                scenario 1 (opbrengst − factuur_scenario + factuur_basis). De batterij-rij zonder sessies toont
@@ -4602,7 +4607,11 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     const pcts = (Array.isArray(b.percentages) && b.percentages.length) ? b.percentages.map(Number) : [50, 100, 150, 200];
     const isBez = (p) => String((p && p.type_plein) || '').toLowerCase() === 'bezoekers';
     const clone = () => JSON.parse(JSON.stringify(baseInput));
-    const prep = (ui) => { ui.geen_aansluiting_verhoging = true; delete ui._async; return ui; };  // aansluiting vast
+    // v15.83: PIN elke variant op de sturing EXCL. onbalans (_variantUi 'sturing') — exact dezelfde
+    // dispatch als de hoofdsim-tegel "factuur sturing zonder onbalans". Zonder deze normalisatie erfde
+    // de scenario-run de RAUWE sturing-vlaggen uit STATE.lastSimInput (bsp.actief/pvInjStrategie), waardoor
+    // de 100%-rij een ANDERE sturing (bv. incl. onbalans) kon draaien dan de tegel → cijfers liepen uiteen.
+    const prep = (ui) => { const v = _variantUi(ui, 'sturing'); v.geen_aansluiting_verhoging = true; delete v._async; return v; };  // aansluiting vast + sturing excl. onbalans
     const stripBez = (ui) => { ui.laadpleinen = (ui.laadpleinen || []).filter(p => !isBez(p)); };
     const scaleBez = (ui, f) => { (ui.laadpleinen || []).forEach(p => { if (isBez(p)) (p.vensters || []).forEach(v => { v.sessies = Math.round((Number(v.sessies) || 0) * f); }); }); };
     const noBatt = (ui) => { ui.batterijId = ''; ui.batterijCustom = null; };
@@ -4644,7 +4653,7 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       };
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.82.0', runs: runs.length } });
+      rows, _meta: { server_version: '15.83.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
