@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.82.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — tabel per scenario nu met
+//                % geleverd (i.p.v. absolute geleverde km), TOTALE jaarfactuur van dat scenario, en winst t.o.v.
+//                scenario 1 (opbrengst − factuur_scenario + factuur_basis). De batterij-rij zonder sessies toont
+//                zo het verbruiksvoordeel (piekshaving + spot-arbitrage). rows.map geeft is_basis/pct_geleverd/
+//                jaarfactuur_eur/winst_eur voor ELKE rij terug.
 // Versie:        v15.81.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S. Nieuwe route
 //                POST /api/bezoekers-scenarios draait 6 varianten parallel (geen batt / batt / batt+plein @
 //                50/100/150/200% sessies) op dezelfde aansluiting → energieprijs, km gevraagd/geleverd,
@@ -4621,19 +4626,25 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     const basis = runs.find(x => x.key === 'geen_batt');
     const factuurBasis = basis ? basis.factuur : 0;
     const rows = runs.map(v => {
-      const opbrengst = v.gelMwh * tarief;
+      const opbrengst = v.heeftPlein ? v.gelMwh * tarief : 0;
+      // Winst t.o.v. scenario 1 (geen batterij, geen plein), voor ELK scenario:
+      //   = opbrengst − factuur(scenario) + factuur(basis).
+      // Batterij-only rij: opbrengst=0 → winst = factuur_basis − factuur_batt = het batterijvoordeel
+      //   op het verbruik (piekshaving + spot-arbitrage), ook zonder laadsessies.
+      const winst = opbrengst - v.factuur + factuurBasis;
       return {
         key: v.key, label: v.label, pct: v.pct, heeftPlein: v.heeftPlein,
+        is_basis: v.key === 'geen_batt',
         energieprijs_eur_mwh: Math.round(v.energieprijs),
-        km_gevraagd: kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : 0,
-        km_geleverd: kwhKm > 0 ? Math.round(v.gelMwh * 1000 / kwhKm) : 0,
+        km_gevraagd: v.heeftPlein && kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : null,
+        pct_geleverd: v.heeftPlein && v.gevrMwh > 1e-9 ? Math.round(v.gelMwh / v.gevrMwh * 1000) / 10 : null,
         opbrengst_eur: v.heeftPlein ? Math.round(opbrengst) : null,
-        winst_eur: v.heeftPlein ? Math.round(opbrengst - v.factuur + factuurBasis) : null,
-        factuur_eur: Math.round(v.factuur),
+        jaarfactuur_eur: Math.round(v.factuur),
+        winst_eur: Math.round(winst),
       };
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.81.0', runs: runs.length } });
+      rows, _meta: { server_version: '15.82.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
