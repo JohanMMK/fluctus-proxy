@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.0 (2026-08-20 17:36 Europe/Brussels, Johan): NIEUW LAADPLEIN-TYPE 'betalende bezoekers'.
+#                Random sessies in 1..n vensters, elk een vaste duur aan het paalvermogen (AC22/DC160). De vraag
+#                wordt bediend uit de vrije aansluitruimte + batterij (grid-first), aansluiting NOOIT verzwaard →
+#                wat niet past = gemist (throttling). _bezoekers_demand() genereert het per-kwartier profiel;
+#                _laadplein_prep herkent type_plein='bezoekers'; _bouw_ev_load serveert het chronologisch;
+#                run_simulation slaat de auto-verzwaring over bij een bezoekersplein. Plein-output: modus+gemist.
 # Versie:        v1.13.2 (2026-08-17 15:52 Europe/Brussels, Johan): THUISLADEN factuurdetail — _tl_detail geeft nu
 #                A_certificaten (GSC+WKK) apart terug (deelverzameling van A_energie), zodat de app de
 #                certificaten als eigen lijn kan tonen. A_energie zelf blijft het volledige groep-A-subtotaal.
@@ -680,6 +686,40 @@ def _is_laaddag(dt, dpw: int) -> bool:
     return wd <= 4       # ma-vr
 
 
+def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, base_seed=20260):
+    """Betalende-bezoekers-plein: random sessies in 1..n vensters, elk `dur_min` lang aan
+    `paal_kw`. Return per-kwartier VRAAG (kW) over de sim-periode. Reproduceerbaar (seed per dag).
+    vensters = lijst van (start_uur, eind_uur, aantal_sessies). Concurrency telt op."""
+    N = len(sim_timestamps)
+    dem = [0.0] * N
+    if paal_kw <= 0 or not vensters:
+        return dem
+    dur_q = max(1, int(round(float(dur_min) / 15.0)))
+    per_dag = {}
+    for i, ts in enumerate(sim_timestamps):
+        per_dag.setdefault(ts.date(), []).append((i, ts.hour + ts.minute / 60.0))
+    for dag, items in per_dag.items():
+        if not _is_laaddag(sim_timestamps[items[0][0]], dpw):
+            continue
+        rng = random.Random(base_seed + dag.toordinal())
+        day_idx = [i for (i, _u) in items]
+        day_uur = [u for (_i, u) in items]
+        for (u0, u1, n) in vensters:
+            n = int(n or 0)
+            if n <= 0:
+                continue
+            starts = [k for k, u in enumerate(day_uur) if u0 <= u < u1 and k + dur_q <= len(day_idx)]
+            if not starts:
+                starts = [k for k, u in enumerate(day_uur) if u0 <= u < u1]
+            if not starts:
+                continue
+            for _ in range(n):
+                k = rng.choice(starts)
+                for q in range(k, min(len(day_idx), k + dur_q)):
+                    dem[day_idx[q]] += paal_kw
+    return dem
+
+
 def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
     """Normaliseer de laadpleinen + bereken per plein cap_kw, dagenergie en de
     energie over de sim-periode (via het aantal laaddagen in de periode)."""
@@ -696,6 +736,41 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
         return sum(1 for d, ts in datums.items() if _is_laaddag(ts, dpw))
 
     for p in pleinen_in:
+        # ── Betalende bezoekers (v1.14): random sessies in 2 vensters, vaste duur aan paalvermogen.
+        # Vraag komt uit vrije aansluitruimte + batterij (nooit verzwaren); rest = gemist. ──
+        if str(p.get('type_plein', '')).lower() == 'bezoekers':
+            paal_kw = _LAADPUNT_KW.get(p.get('paaltype', 'AC22'), float(p.get('paal_kw', 22) or 22))
+            dur_min = float(p.get('duur_min', 30) or 30)
+            dpw = int(p.get('dagen_per_week', 7) or 7)
+            if dpw not in (5, 6, 7):
+                dpw = 7
+            vensters = []
+            for v in (p.get('vensters') or []):
+                vs = float(v.get('start', 0) or 0); ve = float(v.get('eind', 24) or 24)
+                ns = int(v.get('sessies', 0) or 0)
+                if ns > 0 and ve > vs:
+                    vensters.append((vs, ve, ns))
+            demand = _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw)
+            periode_kwh = sum(demand) * 0.25
+            sessies_dag = sum(ns for (_a, _b, ns) in vensters)
+            dur_q = max(1, int(round(dur_min / 15.0)))
+            dag_kwh_req = sessies_dag * paal_kw * (dur_q * 0.25)
+            rec = {
+                'naam': p.get('naam', 'Bezoekersplein'), 'aantal': sessies_dag,
+                'jaar_kwh': dag_kwh_req * dpw * 52, 'dag_kwh': dag_kwh_req,
+                'cap_kw': (max(demand) if demand else 0.0),
+                'v_start': 0, 'v_eind': 24, 'wrap': False, 'dpw': dpw,
+                'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
+                'modus': 'bezoekers', 'demand_kw': demand, 'paal_kw': paal_kw,
+                'duur_min': dur_min, 'vensters': vensters,
+            }
+            out.append(rec)
+            tot_cap_kw += rec['cap_kw']
+            if rec['bestaand']:
+                bestaand_periode_kwh += periode_kwh
+            else:
+                nieuw_periode_kwh += periode_kwh
+            continue
         aantal = float(p.get('aantal', 0) or 0)
         kmj    = float(p.get('km_per_jaar', 0) or 0)
         kwh_km = float(p.get('kwh_per_km', 0) or 0)
@@ -797,8 +872,39 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
             _pp = {'naam': rec.get('naam', 'laadplein'), 'bestaand': bool(rec.get('bestaand')),
                    'cap_kw': rec.get('cap_kw', 0.0), 'dag_kwh': rec.get('dag_kwh', 0.0),
                    'periode_kwh': rec.get('periode_kwh', 0.0), 'aantal': rec.get('aantal', 0),
-                   'tekort_kwh': 0.0, 'load_kw': [0.0] * N}
+                   'modus': rec.get('modus'), 'tekort_kwh': 0.0, 'load_kw': [0.0] * N}
             per_plein_out.append(_pp)
+        # ── Betalende bezoekers: vaste per-kwartier vraag, chronologisch geserveerd uit
+        # vrije aansluitruimte + batterij (grid-first). Wat niet past = gemist (throttling). ──
+        if rec.get('modus') == 'bezoekers':
+            dem = rec.get('demand_kw') or []
+            for i in range(N):
+                d = dem[i] if i < len(dem) else 0.0
+                if d <= 1e-9:
+                    continue
+                dag = sim_timestamps[i].date()
+                if not _batt_ongebonden and dag not in _batt_budget:
+                    _batt_budget[dag] = max(0.0, battery_kwh)
+                conn = _conn_vrij_kw(i)
+                uit_grid = min(d, conn); rest = d - uit_grid
+                if _batt_ongebonden:
+                    batt_av = battery_kw
+                else:
+                    _rem = _batt_budget.get(dag, 0.0)
+                    batt_av = min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
+                uit_batt = min(rest, batt_av); served = uit_grid + uit_batt
+                if served > 0:
+                    ev[i] += served
+                    if _pp is not None:
+                        _pp['load_kw'][i] += served
+                    if not _batt_ongebonden:
+                        _batt_budget[dag] -= uit_batt * dt_h
+                gemist = d - served
+                if gemist > 1e-9:
+                    tekort_kwh += gemist * dt_h
+                    if _pp is not None:
+                        _pp['tekort_kwh'] += gemist * dt_h
+            continue
         if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
             continue
         cap, vs, ve, dpw = rec['cap_kw'], rec['v_start'], rec['v_eind'], rec['dpw']
@@ -2923,8 +3029,11 @@ def run_simulation(inp: dict) -> dict:
         # v1.8.11: vlag 'geen_aansluiting_verhoging' (groeipad) → NIET verhogen, wél clippen;
         # zo blijft de aansluiting vast en toont geladen_mwh wat er écht onder past.
         _conn_verhoogd_kw = 0.0
+        # v1.14: bij een BEZOEKERS-plein is tekort = gemiste sessies BY DESIGN (throttling) —
+        # de aansluiting wordt bewust NIET verhoogd; de batterij + vrije ruimte bepalen de service.
+        _has_bezoekers = any(r.get('modus') == 'bezoekers' for r in _lp_prep['pleinen'])
         if (not inp.get('geen_arbitrage', False)) and (not inp.get('geen_aansluiting_verhoging', False)) \
-                and _ev_tekort > 1e-6 and _ev_conn < 1e11:
+                and (not _has_bezoekers) and _ev_tekort > 1e-6 and _ev_conn < 1e11:
             _lo = _ev_conn
             _hi = _ev_conn + _lp_prep['tot_cap_kw'] + (max(consumption_kw) if consumption_kw else 0.0) + 1.0
             for _ in range(28):
@@ -3632,6 +3741,7 @@ def run_simulation(inp: dict) -> dict:
                     'naam': _p['naam'],
                     'aantal': _p['aantal'],
                     'bestaand': _p['bestaand'],
+                    'modus': _p.get('modus'),
                     'cap_kw': round(_p['cap_kw'], 1),
                     'dag_kwh': round(_p['dag_kwh'], 1),
                     'gevraagd_mwh': round(_p['periode_kwh'] / 1000.0, 3),
