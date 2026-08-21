@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.84.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — extra kolom "laadprijs
+//                marginaal" = (jaarfactuur_scenario − jaarfactuur_batterij) / geladen_mwh (kost van ENKEL de
+//                laadenergie; marge = tarief − dit). rows geven nu laadprijs_marg_eur_mwh terug. De bestaande
+//                energieprijs_eur_mwh blijft de all-in afnameprijs (factuur / totale afname).
 // Versie:        v15.83.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — DRIFT-FIX. Elke variant
 //                wordt nu op de sturing EXCL. onbalans gepind (_variantUi 'sturing'), exact dezelfde dispatch
 //                als de hoofdsim-tegel "factuur sturing zonder onbalans". Voorheen erfde de scenario-run de
@@ -4634,6 +4638,11 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
 
     const basis = runs.find(x => x.key === 'geen_batt');
     const factuurBasis = basis ? basis.factuur : 0;
+    // v15.84: referentie voor de MARGINALE laadprijs = de batterij-rij (batterij, GEEN plein).
+    //   marg. laadprijs = (factuur_scenario − factuur_batterij) / geladen_mwh = wat ENKEL de extra
+    //   laadenergie kost, los van gebouw/vaste kosten. Tarief − marg. laadprijs = marge per MWh.
+    const batt = runs.find(x => x.key === 'batt');
+    const factuurBatt = batt ? batt.factuur : factuurBasis;
     const rows = runs.map(v => {
       const opbrengst = v.heeftPlein ? v.gelMwh * tarief : 0;
       // Winst t.o.v. scenario 1 (geen batterij, geen plein), voor ELK scenario:
@@ -4641,19 +4650,21 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       // Batterij-only rij: opbrengst=0 → winst = factuur_basis − factuur_batt = het batterijvoordeel
       //   op het verbruik (piekshaving + spot-arbitrage), ook zonder laadsessies.
       const winst = opbrengst - v.factuur + factuurBasis;
+      const margLaadprijs = (v.heeftPlein && v.gelMwh > 1e-9) ? (v.factuur - factuurBatt) / v.gelMwh : null;
       return {
         key: v.key, label: v.label, pct: v.pct, heeftPlein: v.heeftPlein,
         is_basis: v.key === 'geen_batt',
-        energieprijs_eur_mwh: Math.round(v.energieprijs),
+        energieprijs_eur_mwh: Math.round(v.energieprijs),   // all-in afnameprijs = factuur / totale afname
         km_gevraagd: v.heeftPlein && kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : null,
         pct_geleverd: v.heeftPlein && v.gevrMwh > 1e-9 ? Math.round(v.gelMwh / v.gevrMwh * 1000) / 10 : null,
         opbrengst_eur: v.heeftPlein ? Math.round(opbrengst) : null,
         jaarfactuur_eur: Math.round(v.factuur),
         winst_eur: Math.round(winst),
+        laadprijs_marg_eur_mwh: (margLaadprijs == null) ? null : Math.round(margLaadprijs),
       };
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.83.0', runs: runs.length } });
+      rows, _meta: { server_version: '15.84.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
