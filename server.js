@@ -1,6 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.85.0 (2026-08-21 Europe/Brussels, Johan): MIX betalend + gewoon plein. De basisvarianten
+//                (geen batt / batt) strippen ENKEL de betalende (bezoekers) pleinen — het gewone (wagenpark) plein
+//                blijft vast in álle rijen, zodat de sensitiviteit (50–200%) puur over de betalende pleinen gaat.
+//                Winst (marginaal) = opbrengst(bezoekers × verkoopprijs) − factuur + factuur_basis (de wagenpark-
+//                CREG-besparing zit al in de referentie → niet dubbel geteld). Per rij komt de wagenpark-besparing
+//                (geleverd × CREG-forfait req.creg_eur_mwh) apart mee als besparing_wag_eur (informatief). Puur-
+//                bezoekers = identiek aan v15.84.
 // Versie:        v15.84.0 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS-SCENARIO'S — extra kolom "laadprijs
 //                marginaal" = (jaarfactuur_scenario − jaarfactuur_batterij) / geladen_mwh (kost van ENKEL de
 //                laadenergie; marge = tarief − dit). rows geven nu laadprijs_marg_eur_mwh terug. De bestaande
@@ -4616,9 +4623,14 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     // de scenario-run de RAUWE sturing-vlaggen uit STATE.lastSimInput (bsp.actief/pvInjStrategie), waardoor
     // de 100%-rij een ANDERE sturing (bv. incl. onbalans) kon draaien dan de tegel → cijfers liepen uiteen.
     const prep = (ui) => { const v = _variantUi(ui, 'sturing'); v.geen_aansluiting_verhoging = true; delete v._async; return v; };  // aansluiting vast + sturing excl. onbalans
+    // v15.85: MIX betalend + gewoon. De basis (geen batt / batt) strippen ENKEL de BETALENDE (bezoekers) pleinen —
+    //   de gewone (wagenpark) pleinen blijven vast in de installatie, zodat de sensitiviteit (50–200% sessies) puur
+    //   over de betalende pleinen gaat. De CREG-besparing van het gewone plein zit dus al in de referentie en wordt
+    //   NIET bij de marginale winst geteld (dubbeltelling); ze wordt apart als informatief cijfer teruggegeven.
     const stripBez = (ui) => { ui.laadpleinen = (ui.laadpleinen || []).filter(p => !isBez(p)); };
     const scaleBez = (ui, f) => { (ui.laadpleinen || []).forEach(p => { if (isBez(p)) (p.vensters || []).forEach(v => { v.sessies = Math.round((Number(v.sessies) || 0) * f); }); }); };
     const noBatt = (ui) => { ui.batterijId = ''; ui.batterijCustom = null; };
+    const cregEurMwh = Number(b.creg_eur_mwh) || 0;   // v15.85: CREG-forfait per MWh (client: _cregTarief*1000) → wagenpark-besparing (informatief)
 
     const variants = [];
     { const ui = prep(clone()); noBatt(ui); stripBez(ui); variants.push({ key: 'geen_batt', label: 'Geen batterij', ui, heeftPlein: false, pct: null }); }
@@ -4631,9 +4643,13 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       const factuur = Number(jf.subtotaal_excl_btw) || 0;
       const afnameMwh = Number((r && r.kpi || {}).totaal_afname_mwh) || 0;
       const pl = (r && r.laadplein && Array.isArray(r.laadplein.pleinen)) ? r.laadplein.pleinen : [];
-      let gevrMwh = 0, gelMwh = 0;
-      pl.forEach(p => { gevrMwh += Number(p.gevraagd_mwh) || 0; gelMwh += Number(p.geladen_mwh) || 0; });
-      return Object.assign({}, v, { factuur, energieprijs: afnameMwh > 0 ? factuur / afnameMwh : 0, gevrMwh, gelMwh });
+      // v15.85: splits bezoekers (opbrengst × tarief) en wagenpark (besparing × CREG).
+      let gevrBez = 0, gelBez = 0, gevrWag = 0, gelWag = 0;
+      pl.forEach(p => { const bez = String(p.modus || '').toLowerCase() === 'bezoekers';
+        const gv = Number(p.gevraagd_mwh) || 0, gl = Number(p.geladen_mwh) || 0;
+        if (bez) { gevrBez += gv; gelBez += gl; } else { gevrWag += gv; gelWag += gl; } });
+      return Object.assign({}, v, { factuur, energieprijs: afnameMwh > 0 ? factuur / afnameMwh : 0,
+        gevrMwh: gevrBez, gelMwh: gelBez, gevrWag, gelWag });
     });
 
     const basis = runs.find(x => x.key === 'geen_batt');
@@ -4644,13 +4660,16 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     const batt = runs.find(x => x.key === 'batt');
     const factuurBatt = batt ? batt.factuur : factuurBasis;
     const rows = runs.map(v => {
-      const opbrengst = v.heeftPlein ? v.gelMwh * tarief : 0;
-      // Winst t.o.v. scenario 1 (geen batterij, geen plein), voor ELK scenario:
-      //   = opbrengst − factuur(scenario) + factuur(basis).
-      // Batterij-only rij: opbrengst=0 → winst = factuur_basis − factuur_batt = het batterijvoordeel
-      //   op het verbruik (piekshaving + spot-arbitrage), ook zonder laadsessies.
-      const winst = opbrengst - v.factuur + factuurBasis;
+      const opbrengst = v.heeftPlein ? v.gelMwh * tarief : 0;               // bezoekers: geleverd × verkoopprijs
       const margLaadprijs = (v.heeftPlein && v.gelMwh > 1e-9) ? (v.factuur - factuurBatt) / v.gelMwh : null;
+      // v15.85: GEWOON plein → NETTO CREG-besparing = geleverd × (CREG-forfait − wat het je kost om te laden).
+      //   De on-site laadkost benaderen we met de marginale laadprijs (of de all-in afnameprijs als die er niet is).
+      //   Dit is een NETTO besparing (geen dubbeltelling met de factuur) en wordt bij de winst geteld, zodat de
+      //   gewoon-plein-besparing als totaal in de 6 scenario's meekomt (Johan 21-08). Constant over de rijen.
+      const sitePrice = (margLaadprijs != null) ? margLaadprijs : v.energieprijs;
+      const besparingWag = Math.max(0, (v.gelWag || 0) * (cregEurMwh - sitePrice));
+      // Marginale winst (batterij + betalend plein) + de vaste gewoon-plein besparing.
+      const winst = opbrengst - v.factuur + factuurBasis + besparingWag;
       return {
         key: v.key, label: v.label, pct: v.pct, heeftPlein: v.heeftPlein,
         is_basis: v.key === 'geen_batt',
@@ -4658,13 +4677,14 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
         km_gevraagd: v.heeftPlein && kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : null,
         pct_geleverd: v.heeftPlein && v.gevrMwh > 1e-9 ? Math.round(v.gelMwh / v.gevrMwh * 1000) / 10 : null,
         opbrengst_eur: v.heeftPlein ? Math.round(opbrengst) : null,
+        besparing_wag_eur: (besparingWag > 1e-9) ? Math.round(besparingWag) : null,   // v15.85: wagenpark-besparing (mix)
         jaarfactuur_eur: Math.round(v.factuur),
         winst_eur: Math.round(winst),
         laadprijs_marg_eur_mwh: (margLaadprijs == null) ? null : Math.round(margLaadprijs),
       };
     });
-    return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.84.0', runs: runs.length } });
+    return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, creg_eur_mwh: cregEurMwh, factuur_basis: Math.round(factuurBasis),
+      rows, _meta: { server_version: '15.85.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
