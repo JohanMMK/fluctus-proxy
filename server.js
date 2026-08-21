@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.87.0 (2026-08-21 Europe/Brussels, Johan): CREG-besparing gewoon plein nu ÉÉN CONSTANTE (netto).
+//                Besparing = geleverd_wag × (CREG-forfait − all-in laadkost van de BASIS geen_batt). Voorheen per rij
+//                variërend (marg. vs all-in) → €1036–1416 voor hetzelfde plein. Nu constant + gelijk aan scherm/rapport;
+//                nog steeds netto (geen bruto geleverd×CREG, dat zou dubbeltellen met de factuur). Response: extra
+//                velden besparing_wag_const_eur + basis_energieprijs_eur_mwh.
 // Versie:        v15.86.0 (2026-08-21 Europe/Brussels, Johan): COHERENTIE bezoekers-scenario's. (1) Omzet betalend
 //                plein = Σ GELEVERD MWh per plein × de VERKOOPPRIJS van DÁT plein (opbrengst_eur_mwh), niet één
 //                globaal tarief. (2) km nu expliciet gevraagd én geleverd (bezoekers), plus km_wag + geleverd_wag_mwh
@@ -4666,15 +4671,19 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     //   laadenergie kost, los van gebouw/vaste kosten. Tarief − marg. laadprijs = marge per MWh.
     const batt = runs.find(x => x.key === 'batt');
     const factuurBatt = batt ? batt.factuur : factuurBasis;
+    // v15.87: GEWOON (wagenpark) plein → NETTO CREG-besparing, nu ÉÉN CONSTANTE over alle rijen.
+    //   Besparing = geleverd_wag × (CREG-forfait − je EIGEN laadkost). Als eigen laadkost nemen we de
+    //   all-in afnameprijs van de BASIS (geen_batt) — één vaste referentie, want de CREG-saving van het
+    //   wagenpark hangt niet af van de bezoekers-schaal. Voorheen varieerde dit per rij (marg. vs all-in)
+    //   → verwarrend (€1036–1416 voor hetzelfde plein). Nu constant en gelijk aan het scherm/rapport.
+    //   NIET bruto (geleverd × CREG) — dat zou doen alsof laden gratis is (dubbeltelling met de factuur).
+    const basisEnergieprijs = basis ? basis.energieprijs : 0;
+    const basisGelWag = basis ? (basis.gelWag || 0) : 0;
+    const besparingWagConst = Math.max(0, basisGelWag * (cregEurMwh - basisEnergieprijs));
     const rows = runs.map(v => {
       const opbrengst = v.heeftPlein ? (v.opbrengstBez || 0) : 0;           // v15.86: Σ GELEVERD per bezoekers-plein × verkoopprijs van DAT plein
       const margLaadprijs = (v.heeftPlein && v.gelMwh > 1e-9) ? (v.factuur - factuurBatt) / v.gelMwh : null;
-      // v15.85: GEWOON plein → NETTO CREG-besparing = geleverd × (CREG-forfait − wat het je kost om te laden).
-      //   De on-site laadkost benaderen we met de marginale laadprijs (of de all-in afnameprijs als die er niet is).
-      //   Dit is een NETTO besparing (geen dubbeltelling met de factuur) en wordt bij de winst geteld, zodat de
-      //   gewoon-plein-besparing als totaal in de 6 scenario's meekomt (Johan 21-08). Constant over de rijen.
-      const sitePrice = (margLaadprijs != null) ? margLaadprijs : v.energieprijs;
-      const besparingWag = Math.max(0, (v.gelWag || 0) * (cregEurMwh - sitePrice));
+      const besparingWag = besparingWagConst;   // constant (zie boven)
       // Marginale winst (batterij + betalend plein) + de vaste gewoon-plein besparing.
       const winst = opbrengst - v.factuur + factuurBasis + besparingWag;
       return {
@@ -4695,7 +4704,8 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       };
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, creg_eur_mwh: cregEurMwh, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.86.0', runs: runs.length } });
+      besparing_wag_const_eur: Math.round(besparingWagConst), basis_energieprijs_eur_mwh: Math.round(basisEnergieprijs),
+      rows, _meta: { server_version: '15.87.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
