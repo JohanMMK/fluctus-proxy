@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.86.0 (2026-08-21 Europe/Brussels, Johan): COHERENTIE bezoekers-scenario's. (1) Omzet betalend
+//                plein = Σ GELEVERD MWh per plein × de VERKOOPPRIJS van DÁT plein (opbrengst_eur_mwh), niet één
+//                globaal tarief. (2) km nu expliciet gevraagd én geleverd (bezoekers), plus km_wag + geleverd_wag_mwh
+//                zodat de levering van de niet-betalende pleinen in ELKE rij zichtbaar is, met besparing_wag_eur.
 // Versie:        v15.85.0 (2026-08-21 Europe/Brussels, Johan): MIX betalend + gewoon plein. De basisvarianten
 //                (geen batt / batt) strippen ENKEL de betalende (bezoekers) pleinen — het gewone (wagenpark) plein
 //                blijft vast in álle rijen, zodat de sensitiviteit (50–200%) puur over de betalende pleinen gaat.
@@ -4643,13 +4647,16 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       const factuur = Number(jf.subtotaal_excl_btw) || 0;
       const afnameMwh = Number((r && r.kpi || {}).totaal_afname_mwh) || 0;
       const pl = (r && r.laadplein && Array.isArray(r.laadplein.pleinen)) ? r.laadplein.pleinen : [];
-      // v15.85: splits bezoekers (opbrengst × tarief) en wagenpark (besparing × CREG).
-      let gevrBez = 0, gelBez = 0, gevrWag = 0, gelWag = 0;
+      // v15.86: splits bezoekers en wagenpark. Opbrengst = Σ GELEVERD per bezoekers-plein × de VERKOOPPRIJS van
+      //   DAT plein (niet één globaal tarief). Wagenpark → besparing via CREG (verderop).
+      const bezTar = (v.ui.laadpleinen || []).filter(isBez).map(p => Number(p.opbrengst_eur_mwh) || tarief);
+      let gevrBez = 0, gelBez = 0, gevrWag = 0, gelWag = 0, opbrengstBez = 0, bezIdx = 0;
       pl.forEach(p => { const bez = String(p.modus || '').toLowerCase() === 'bezoekers';
         const gv = Number(p.gevraagd_mwh) || 0, gl = Number(p.geladen_mwh) || 0;
-        if (bez) { gevrBez += gv; gelBez += gl; } else { gevrWag += gv; gelWag += gl; } });
+        if (bez) { gevrBez += gv; gelBez += gl; opbrengstBez += gl * ((bezTar[bezIdx] != null) ? bezTar[bezIdx] : tarief); bezIdx++; }
+        else { gevrWag += gv; gelWag += gl; } });
       return Object.assign({}, v, { factuur, energieprijs: afnameMwh > 0 ? factuur / afnameMwh : 0,
-        gevrMwh: gevrBez, gelMwh: gelBez, gevrWag, gelWag });
+        gevrMwh: gevrBez, gelMwh: gelBez, gevrWag, gelWag, opbrengstBez });
     });
 
     const basis = runs.find(x => x.key === 'geen_batt');
@@ -4660,7 +4667,7 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     const batt = runs.find(x => x.key === 'batt');
     const factuurBatt = batt ? batt.factuur : factuurBasis;
     const rows = runs.map(v => {
-      const opbrengst = v.heeftPlein ? v.gelMwh * tarief : 0;               // bezoekers: geleverd × verkoopprijs
+      const opbrengst = v.heeftPlein ? (v.opbrengstBez || 0) : 0;           // v15.86: Σ GELEVERD per bezoekers-plein × verkoopprijs van DAT plein
       const margLaadprijs = (v.heeftPlein && v.gelMwh > 1e-9) ? (v.factuur - factuurBatt) / v.gelMwh : null;
       // v15.85: GEWOON plein → NETTO CREG-besparing = geleverd × (CREG-forfait − wat het je kost om te laden).
       //   De on-site laadkost benaderen we met de marginale laadprijs (of de all-in afnameprijs als die er niet is).
@@ -4675,8 +4682,12 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
         is_basis: v.key === 'geen_batt',
         energieprijs_eur_mwh: Math.round(v.energieprijs),   // all-in afnameprijs = factuur / totale afname
         km_gevraagd: v.heeftPlein && kwhKm > 0 ? Math.round(v.gevrMwh * 1000 / kwhKm) : null,
+        km_geleverd: v.heeftPlein && kwhKm > 0 ? Math.round(v.gelMwh * 1000 / kwhKm) : null,   // v15.86: bezoekers, GELEVERD
         pct_geleverd: v.heeftPlein && v.gevrMwh > 1e-9 ? Math.round(v.gelMwh / v.gevrMwh * 1000) / 10 : null,
         opbrengst_eur: v.heeftPlein ? Math.round(opbrengst) : null,
+        // v15.86: levering van de NIET-betalende (wagenpark) pleinen komt in ELKE rij mee, met hun CREG-besparing.
+        geleverd_wag_mwh: (v.gelWag > 1e-9) ? Math.round(v.gelWag * 10) / 10 : null,
+        km_wag: (v.gelWag > 1e-9 && kwhKm > 0) ? Math.round(v.gelWag * 1000 / kwhKm) : null,
         besparing_wag_eur: (besparingWag > 1e-9) ? Math.round(besparingWag) : null,   // v15.85: wagenpark-besparing (mix)
         jaarfactuur_eur: Math.round(v.factuur),
         winst_eur: Math.round(winst),
@@ -4684,7 +4695,7 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
       };
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, creg_eur_mwh: cregEurMwh, factuur_basis: Math.round(factuurBasis),
-      rows, _meta: { server_version: '15.85.0', runs: runs.length } });
+      rows, _meta: { server_version: '15.86.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
