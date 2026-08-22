@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.88.0 (2026-08-22 Europe/Brussels, Johan): bezoekers-scenario's — als er GEEN betalende pleinen
+//                zijn (of client stuurt alleen_basis), enkel scenario 1 (geen batterij) + 2 (batterij), telkens MET
+//                de gewone (wagenpark) pleinen; de 50–200%-sessieschaling wordt overgeslagen (niets te schalen → 4
+//                zware sims minder). Response draagt heeft_betalend + alleen_basis.
 // Versie:        v15.87.0 (2026-08-21 Europe/Brussels, Johan): CREG-besparing gewoon plein nu ÉÉN CONSTANTE (netto).
 //                Besparing = geleverd_wag × (CREG-forfait − all-in laadkost van de BASIS geen_batt). Voorheen per rij
 //                variërend (marg. vs all-in) → €1036–1416 voor hetzelfde plein. Nu constant + gelijk aan scherm/rapport;
@@ -4641,10 +4645,18 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     const noBatt = (ui) => { ui.batterijId = ''; ui.batterijCustom = null; };
     const cregEurMwh = Number(b.creg_eur_mwh) || 0;   // v15.85: CREG-forfait per MWh (client: _cregTarief*1000) → wagenpark-besparing (informatief)
 
+    // v15.88: als er GEEN betalende (bezoekers) pleinen zijn (of client vraagt alleen_basis), heeft het geen zin
+    //   de sessie-schaling 50–200% te draaien (er valt niets te schalen). Dan enkel scenario 1 (geen batterij) +
+    //   scenario 2 (batterij), telkens MET de gewone (wagenpark) pleinen. Scheelt 4 zware sims.
+    const heeftBetalend = (baseInput.laadpleinen || []).some(isBez);
+    const alleenBasis = !!b.alleen_basis || !heeftBetalend;
+
     const variants = [];
     { const ui = prep(clone()); noBatt(ui); stripBez(ui); variants.push({ key: 'geen_batt', label: 'Geen batterij', ui, heeftPlein: false, pct: null }); }
     { const ui = prep(clone()); stripBez(ui); variants.push({ key: 'batt', label: 'Batterij', ui, heeftPlein: false, pct: null }); }
-    for (const pct of pcts) { const ui = prep(clone()); scaleBez(ui, pct / 100); variants.push({ key: 'plein_' + pct, label: 'Batterij + laadplein · ' + pct + '% sessies', ui, heeftPlein: true, pct }); }
+    if (!alleenBasis) {
+      for (const pct of pcts) { const ui = prep(clone()); scaleBez(ui, pct / 100); variants.push({ key: 'plein_' + pct, label: 'Batterij + laadplein · ' + pct + '% sessies', ui, heeftPlein: true, pct }); }
+    }
 
     const runs = await _pmap(variants, async (v) => {
       const r = await _runSimulatorOnce(buildSimInput(v.ui));
@@ -4705,7 +4717,8 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     });
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, creg_eur_mwh: cregEurMwh, factuur_basis: Math.round(factuurBasis),
       besparing_wag_const_eur: Math.round(besparingWagConst), basis_energieprijs_eur_mwh: Math.round(basisEnergieprijs),
-      rows, _meta: { server_version: '15.87.0', runs: runs.length } });
+      heeft_betalend: heeftBetalend, alleen_basis: alleenBasis,
+      rows, _meta: { server_version: '15.88.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
