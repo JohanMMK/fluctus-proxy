@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.89.0 (2026-08-22 Europe/Brussels, Johan): DRIFT-FIX 100%-factuur. scaleBez rondde de sessies
+//                op hele getallen af (Math.round), maar de AC-default is 1,5 sessies/paal → 4,5 werd 5, óók bij 100%
+//                → de 100%-scenariofactuur lag ~€529 hoger dan de hoofdsim. Nu op 0,1 sessie afgerond → 100% = hoofdsim.
 // Versie:        v15.88.0 (2026-08-22 Europe/Brussels, Johan): bezoekers-scenario's — als er GEEN betalende pleinen
 //                zijn (of client stuurt alleen_basis), enkel scenario 1 (geen batterij) + 2 (batterij), telkens MET
 //                de gewone (wagenpark) pleinen; de 50–200%-sessieschaling wordt overgeslagen (niets te schalen → 4
@@ -4641,7 +4644,10 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     //   over de betalende pleinen gaat. De CREG-besparing van het gewone plein zit dus al in de referentie en wordt
     //   NIET bij de marginale winst geteld (dubbeltelling); ze wordt apart als informatief cijfer teruggegeven.
     const stripBez = (ui) => { ui.laadpleinen = (ui.laadpleinen || []).filter(p => !isBez(p)); };
-    const scaleBez = (ui, f) => { (ui.laadpleinen || []).forEach(p => { if (isBez(p)) (p.vensters || []).forEach(v => { v.sessies = Math.round((Number(v.sessies) || 0) * f); }); }); };
+    // v15.89: schaal op 0,1 sessie i.p.v. hele sessies. De defaults kunnen fractioneel zijn (AC = 1,5 sessies/paal),
+    //   dus Math.round(...) naar een integer rondde bv. 4,5 → 5, óók bij 100% (×1) → de 100%-rij vroeg/leverde méér
+    //   dan de hoofdsim (restverschil ~€529 op de jaarfactuur). Op 0,1 afronden houdt 100% exact gelijk aan de hoofdsim.
+    const scaleBez = (ui, f) => { (ui.laadpleinen || []).forEach(p => { if (isBez(p)) (p.vensters || []).forEach(v => { v.sessies = Math.round((Number(v.sessies) || 0) * f * 10) / 10; }); }); };
     const noBatt = (ui) => { ui.batterijId = ''; ui.batterijCustom = null; };
     const cregEurMwh = Number(b.creg_eur_mwh) || 0;   // v15.85: CREG-forfait per MWh (client: _cregTarief*1000) → wagenpark-besparing (informatief)
 
@@ -4718,7 +4724,7 @@ app.post('/api/bezoekers-scenarios', async (req, res) => {
     return res.json({ ok: true, tarief_eur_mwh: tarief, kwh_km: kwhKm, creg_eur_mwh: cregEurMwh, factuur_basis: Math.round(factuurBasis),
       besparing_wag_const_eur: Math.round(besparingWagConst), basis_energieprijs_eur_mwh: Math.round(basisEnergieprijs),
       heeft_betalend: heeftBetalend, alleen_basis: alleenBasis,
-      rows, _meta: { server_version: '15.88.0', runs: runs.length } });
+      rows, _meta: { server_version: '15.89.0', runs: runs.length } });
   } catch (e) {
     console.error('[bezoekers-scenarios] fout:', e.message);
     return res.status(500).json({ error: 'bezoekers-scenarios gefaald: ' + e.message });
