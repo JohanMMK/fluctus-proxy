@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.90.0 (2026-08-26, Fase 1 kern-persistentie): (1) /api/kamino/project bewaart nu ook `input`
+//                (volledige invoer-snapshot per flow — universele save). (2) /api/kamino/project-get is niet langer
+//                manager-only: toegang = manager OF eigenaar/adviseur/klant (helper `_magProjectOpenen`). (3) NIEUW
+//                GET /api/kamino/projecten: rol-gefilterde lijst van kamino-records voor de terughaal-dropdown
+//                (naast het bestaande /api/projecten met scenario-namen). Volledig additief + geguard.
 // Versie:        v15.89.0 (2026-08-22 Europe/Brussels, Johan): DRIFT-FIX 100%-factuur. scaleBez rondde de sessies
 //                op hele getallen af (Math.round), maar de AC-default is 1,5 sessies/paal → 4,5 werd 5, óók bij 100%
 //                → de 100%-scenariofactuur lag ~€529 hoger dan de hoofdsim. Nu op 0,1 sessie afgerond → 100% = hoofdsim.
@@ -1791,6 +1796,19 @@ function _isManager(u) {
   return !!(u && u.role === 'manager' && u.status === 'active');
 }
 
+// v15.90 (Fase 1): mag deze gebruiker het kamino-projectrecord openen?
+// Manager = altijd; anders enkel eigenaar (door=auth-uid), adviseur- of klant-e-mail.
+function _magProjectOpenen(u, rec) {
+  if (!u || !rec) return false;
+  if (_isManager(u)) return true;
+  if (rec.door && (rec.door === u.id || rec.door === u.naam)) return true;
+  const em = String(u.email || '').toLowerCase();
+  if (!em) return false;
+  const adv = String((rec.adviseur && rec.adviseur.email) || '').toLowerCase();
+  const kl = String((rec.klant && rec.klant.email) || '').toLowerCase();
+  return em === adv || em === kl;
+}
+
 async function _heeftAppToegang(u, appId) {
   // Enkel een gedeactiveerde gebruiker wordt geblokkeerd. 'invited' (uitgenodigd,
   // nog niet geactiveerd) én 'active' krijgen toegang volgens hun toekenningen —
@@ -3168,6 +3186,7 @@ app.post('/api/kamino/project', async (req, res) => {
       adviseur: b.adviseur || bestaand.adviseur || {},
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
+      input: b.input || bestaand.input || null,                              // v15.90 (Fase 1): volledige invoer-snapshot per flow (universele save)
       profiel: b.profiel || bestaand.profiel || null,                        // v15.57 (Johan 03-08): gekozen verbruiksprofiel — nodig voor carryover naar de interactieve simulator (manager-open)
       pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
@@ -3323,13 +3342,14 @@ app.get('/api/kamino/project-get', async (req, res) => {
     if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
     const u = await resolveUser(req);
     if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
-    if (!_isManager(u)) return res.status(403).json({ error: 'Alleen managers kunnen een project rechtstreeks openen.' });
     const id = String(req.query.id || '').trim().toUpperCase();
     if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
     const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
     let rec;
     try { rec = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); }
     catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
+    // v15.90 (Fase 1): toegang = manager OF eigenaar/adviseur/klant (niet langer manager-only).
+    if (!_magProjectOpenen(u, rec)) return res.status(403).json({ error: 'Geen toegang tot dit project.' });
     let pdfs = [], studies = [];
     try {
       const lijst = await _bucketList(`rapporten/${veilig}/`);
@@ -3344,10 +3364,46 @@ app.get('/api/kamino/project-get', async (req, res) => {
         }
       }
     } catch (e) { /* niet-blokkerend */ }
-    console.log(`[kamino/project-get] ${id} geopend door manager ${u.name || u.id}`);
+    console.log(`[kamino/project-get] ${id} geopend door ${u.role || 'user'} ${u.naam || u.id}`);
     return res.json({ ok: true, project: rec, rapporten: { pdfs, studies } });
   } catch (e) {
     console.error('[kamino/project-get] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ─── v15.90 (Fase 1) — GET /api/kamino/projecten ────────────────────────────────────────────
+// Rol-gefilterde lijst van kamino-projectrecords voor de dropdown "project terughalen".
+// Manager: alle projecten; anders enkel projecten waar de gebruiker eigenaar/adviseur/klant is.
+// Additief — laat het bestaande /api/projecten (scenario-namen) ongemoeid.
+app.get('/api/kamino/projecten', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req);
+    if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    let lijst = [];
+    try { lijst = await _bucketList('kamino/'); } catch (e) { lijst = []; }
+    const jsons = (Array.isArray(lijst) ? lijst : []).filter(o => o.name && /\.json$/i.test(o.name));
+    const out = [];
+    for (const o of jsons) {
+      let rec; try { rec = JSON.parse(await _factuurDownload(`kamino/${o.name}`)); } catch (e) { continue; }
+      if (!rec || !rec.id) continue;
+      if (!_magProjectOpenen(u, rec)) continue;
+      out.push({
+        id: rec.id,
+        naam: rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id,
+        klant: (rec.klant && (rec.klant.naam || rec.klant.name)) || '',
+        adviseur: (rec.adviseur && (rec.adviseur.naam || rec.adviseur.name || rec.adviseur.email)) || '',
+        bijgewerkt: rec.bijgewerkt || rec.aangemaakt || null,
+        heeftInput: !!rec.input, heeftBaseCase: !!rec.baseCase
+      });
+    }
+    out.sort((a, b) => String(b.bijgewerkt || '').localeCompare(String(a.bijgewerkt || '')));
+    const afgekapt = jsons.length >= 100;
+    if (afgekapt) console.warn('[kamino/projecten] bucket-list op limiet 100 — mogelijk afgekapt');
+    return res.json({ projecten: out, afgekapt });
+  } catch (e) {
+    console.error('[kamino/projecten] faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
 });
