@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.93.0 (2026-08-26, Fase 2): rollen & bedrijf beheerbaar in de Gebruikers-app. EPC/bedrijf-
+//                sleutel = `profiles.company`. `action:'role'` aanvaardt nu manager/seller/adviseur/partnermanager/
+//                klant (+ zet optioneel company mee); nieuw `action:'company'`; nieuw GET /api/manager/partners
+//                (distinct bedrijven). Partnermanager ziet alle projecten met rec.partner === zijn company.
 // Versie:        v15.92.0 (2026-08-26, Fase 2 rollen & toegang — FUNDERING): resolveUser leest nu `partner`
 //                (EPC-id) uit profiles; `_magProjectOpenen` geeft een **partnermanager** toegang tot alle
 //                projecten van zijn eigen EPC (rec.partner === u.partner); elke save registreert de opslaande
@@ -1791,7 +1795,7 @@ async function resolveUser(req) {
       email: user.email || (profiel && profiel.email) || '',
       naam: (profiel && (profiel.name || profiel.naam || profiel.full_name)) || user.email || user.id,
       role: (profiel && profiel.role) || 'seller',
-      partner: (profiel && (profiel.partner || profiel.epc)) || null,   // v15.92 (Fase 2): EPC/partner-id voor partnermanager-scoping
+      partner: (profiel && (profiel.company || profiel.partner || profiel.epc)) || null,   // v15.92/93 (Fase 2): EPC/bedrijf-sleutel = 'company' (partnermanager-scoping)
       // profiles heeft geen status-kolom → default 'active'
       status: (profiel && profiel.status) || 'active',
     };
@@ -1994,6 +1998,20 @@ app.get('/api/manager/users', async (req, res) => {
 });
 
 // POST /api/manager/app-access   { user_id, app_id }   → toegang toekennen
+// GET /api/manager/partners → distinct bedrijven/EPC's (uit profiles.company) voor de partner-datalists. v15.93.
+app.get('/api/manager/partners', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const rows = await _sbRest('profiles?select=company');
+    const set = new Set();
+    (rows || []).forEach(r => { const c = String(r.company || '').trim(); if (c) set.add(c); });
+    return res.json({ partners: [...set].sort() });
+  } catch (e) {
+    console.error('[manager/partners] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
+});
+
 app.post('/api/manager/app-access', async (req, res) => {
   const u = await _managerGuard(req, res); if (!u) return;
   const b = req.body || {};
@@ -2098,13 +2116,25 @@ app.post('/api/manager/user', async (req, res) => {
     if (action === 'role') {
       const email = String(b.email || '').trim().toLowerCase();
       const role = String(b.role || '').toLowerCase();
+      const geldig = ['manager', 'seller', 'adviseur', 'partnermanager', 'klant'];   // v15.93 (Fase 2): 4 rollen (adviseur = seller-gedrag)
       if (!email) return res.status(400).json({ error: 'email verplicht' });
-      if (role !== 'manager' && role !== 'seller') return res.status(400).json({ error: "role moet 'manager' of 'seller' zijn" });
+      if (!geldig.includes(role)) return res.status(400).json({ error: 'ongeldige rol' });
+      const patch = { role };
+      if (b.company !== undefined) patch.company = String(b.company || '');   // v15.93: bedrijf/EPC in één keer mee zetten
       await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}`, {
-        method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: { role },
+        method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: patch,
       });
       _AUTH_CACHE.clear(); // rol-wijziging meteen laten doorwerken
-      return res.json({ ok: true, email, role });
+      return res.json({ ok: true, email, role, company: patch.company });
+    }
+    if (action === 'company') {   // v15.93 (Fase 2): bedrijf/EPC van een gebruiker instellen (scopingsleutel)
+      const email = String(b.email || '').trim().toLowerCase();
+      if (!email) return res.status(400).json({ error: 'email verplicht' });
+      await _sbRest(`profiles?email=eq.${encodeURIComponent(email)}`, {
+        method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: { company: String(b.company || '') },
+      });
+      _AUTH_CACHE.clear();
+      return res.json({ ok: true, email, company: String(b.company || '') });
     }
 
     if (action === 'status') {
