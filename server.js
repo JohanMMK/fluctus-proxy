@@ -1,6 +1,9 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.91.1 (2026-08-26, Fase 1): PERF /api/kamino/projecten — records nu PARALLEL gedownload
+//                (Promise.all) + 20s in-memory cache (bust bij elke save). Was 50× sequentieel ≈ 3,1s → de
+//                terughaal-dropdown vulde te traag ("2× openen"). Nu < 0,5s (koud) / instant (warm).
 // Versie:        v15.91.0 (2026-08-26, Fase 1): MEERDERE invoer-scenario's per project. Het kamino-record
 //                krijgt een `scenarios`-map (<key> → {scenario,input,baseCase,bijgewerkt}); elke save accumuleert
 //                onder de scenario-naam i.p.v. te overschrijven. GET /api/kamino/projecten geeft één rij per
@@ -3176,6 +3179,7 @@ app.get('/api/rapporten', async (req, res) => {
 // zonder mailverkeer. Record = kamino/<id>.json in de private bucket: id, naam, klant/adviseur (incl.
 // e-mail), factuurref en de reeds gedane studies. Bewaren vereist login; heropenen mag zonder login
 // maar de e-mail moet matchen met klant of adviseur (tweede factor naast het ondoorzichtige FLX-id).
+let _kaminoLijstCache = { ts: 0, records: [] };   // v15.91.1: in-memory cache voor /api/kamino/projecten (was 50× sequentieel → ~3s)
 app.post('/api/kamino/project', async (req, res) => {
   try {
     if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
@@ -3216,6 +3220,7 @@ app.post('/api/kamino/project', async (req, res) => {
       bijgewerkt: new Date().toISOString(), door: u.name || u.id || null
     };
     await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    try { _kaminoLijstCache.ts = 0; } catch (e) {}   // v15.91.1: dropdown-cache verversen zodat het nieuwe project meteen verschijnt
     return res.json({ ok: true, id });
   } catch (e) {
     console.error('[kamino/project] bewaren faalde:', e.message);
@@ -3409,13 +3414,20 @@ app.get('/api/kamino/projecten', async (req, res) => {
     if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
     const u = await resolveUser(req);
     if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
-    let lijst = [];
-    try { lijst = await _bucketList('kamino/'); } catch (e) { lijst = []; }
-    const jsons = (Array.isArray(lijst) ? lijst : []).filter(o => o.name && /\.json$/i.test(o.name));
+    // v15.91.1: parallelle download + korte in-memory cache (was 50× sequentieel → ~3s).
+    let records = _kaminoLijstCache.records, afgekapt = false;
+    if (Date.now() - _kaminoLijstCache.ts > 20000 || !records.length) {
+      let lijst = [];
+      try { lijst = await _bucketList('kamino/'); } catch (e) { lijst = []; }
+      const jsons = (Array.isArray(lijst) ? lijst : []).filter(o => o.name && /\.json$/i.test(o.name));
+      afgekapt = jsons.length >= 100;
+      const downloaded = await Promise.all(jsons.map(o =>
+        _factuurDownload(`kamino/${o.name}`).then(t => { try { return JSON.parse(t); } catch (e) { return null; } }).catch(() => null)));
+      records = downloaded.filter(r => r && r.id);
+      _kaminoLijstCache = { ts: Date.now(), records };
+    }
     const out = [];
-    for (const o of jsons) {
-      let rec; try { rec = JSON.parse(await _factuurDownload(`kamino/${o.name}`)); } catch (e) { continue; }
-      if (!rec || !rec.id) continue;
+    for (const rec of records) {
       if (!_magProjectOpenen(u, rec)) continue;
       const naam = rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id;
       const klant = (rec.klant && (rec.klant.naam || rec.klant.name)) || '';
@@ -3438,7 +3450,6 @@ app.get('/api/kamino/projecten', async (req, res) => {
       }
     }
     out.sort((a, b) => String(b.bijgewerkt || '').localeCompare(String(a.bijgewerkt || '')));
-    const afgekapt = jsons.length >= 100;
     if (afgekapt) console.warn('[kamino/projecten] bucket-list op limiet 100 — mogelijk afgekapt');
     return res.json({ projecten: out, afgekapt });
   } catch (e) {
