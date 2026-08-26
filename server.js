@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.92.0 (2026-08-26, Fase 2 rollen & toegang — FUNDERING): resolveUser leest nu `partner`
+//                (EPC-id) uit profiles; `_magProjectOpenen` geeft een **partnermanager** toegang tot alle
+//                projecten van zijn eigen EPC (rec.partner === u.partner); elke save registreert de opslaande
+//                adviseur (als er nog geen is) + het partner-id (uit de ?partner=-schil). Additief — zonder
+//                partner-data (schil komt in Fase 4) verandert er niets aan het huidige gedrag.
 // Versie:        v15.91.1 (2026-08-26, Fase 1): PERF /api/kamino/projecten — records nu PARALLEL gedownload
 //                (Promise.all) + 20s in-memory cache (bust bij elke save). Was 50× sequentieel ≈ 3,1s → de
 //                terughaal-dropdown vulde te traag ("2× openen"). Nu < 0,5s (koud) / instant (warm).
@@ -1786,6 +1791,7 @@ async function resolveUser(req) {
       email: user.email || (profiel && profiel.email) || '',
       naam: (profiel && (profiel.name || profiel.naam || profiel.full_name)) || user.email || user.id,
       role: (profiel && profiel.role) || 'seller',
+      partner: (profiel && (profiel.partner || profiel.epc)) || null,   // v15.92 (Fase 2): EPC/partner-id voor partnermanager-scoping
       // profiles heeft geen status-kolom → default 'active'
       status: (profiel && profiel.status) || 'active',
     };
@@ -1811,6 +1817,8 @@ function _isManager(u) {
 function _magProjectOpenen(u, rec) {
   if (!u || !rec) return false;
   if (_isManager(u)) return true;
+  // v15.92 (Fase 2): partnermanager ziet alle projecten van zijn eigen EPC (zelfde partner-id).
+  if (u.role === 'partnermanager' && u.partner && rec.partner && u.partner === rec.partner) return true;
   if (rec.door && (rec.door === u.id || rec.door === u.naam)) return true;
   const em = String(u.email || '').toLowerCase();
   if (!em) return false;
@@ -3206,7 +3214,8 @@ app.post('/api/kamino/project', async (req, res) => {
     const rec = {
       id, naam: b.naam || bestaand.naam || '',
       klant: b.klant || bestaand.klant || {},
-      adviseur: b.adviseur || bestaand.adviseur || {},
+      adviseur: b.adviseur || bestaand.adviseur || { id: u.id, naam: u.naam, email: u.email },   // v15.92 (Fase 2): registreer de opslaande adviseur als er nog geen is
+      partner: b.partner || bestaand.partner || null,                        // v15.92 (Fase 2): EPC/partner-id (uit de ?partner=-schil) voor partnermanager-scoping
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
       input: b.input || bestaand.input || null,                              // v15.90 (Fase 1): volledige invoer-snapshot per flow (universele save)
