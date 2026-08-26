@@ -1,6 +1,8 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.90.1 (2026-08-26, Fase 1): + `scenario`-veld in het kamino-record en in
+//                GET /api/kamino/projecten, zodat de terughaal-dropdown "naam · scenario · datum · code" toont.
 // Versie:        v15.90.0 (2026-08-26, Fase 1 kern-persistentie): (1) /api/kamino/project bewaart nu ook `input`
 //                (volledige invoer-snapshot per flow — universele save). (2) /api/kamino/project-get is niet langer
 //                manager-only: toegang = manager OF eigenaar/adviseur/klant (helper `_magProjectOpenen`). (3) NIEUW
@@ -3187,6 +3189,7 @@ app.post('/api/kamino/project', async (req, res) => {
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
       input: b.input || bestaand.input || null,                              // v15.90 (Fase 1): volledige invoer-snapshot per flow (universele save)
+      scenario: b.scenario || (b.input && b.input.scenario) || bestaand.scenario || '',   // v15.90.1: scenario-label voor de terughaal-dropdown
       profiel: b.profiel || bestaand.profiel || null,                        // v15.57 (Johan 03-08): gekozen verbruiksprofiel — nodig voor carryover naar de interactieve simulator (manager-open)
       pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
@@ -3394,6 +3397,7 @@ app.get('/api/kamino/projecten', async (req, res) => {
         naam: rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id,
         klant: (rec.klant && (rec.klant.naam || rec.klant.name)) || '',
         adviseur: (rec.adviseur && (rec.adviseur.naam || rec.adviseur.name || rec.adviseur.email)) || '',
+        scenario: rec.scenario || (rec.input && rec.input.scenario) || '',
         bijgewerkt: rec.bijgewerkt || rec.aangemaakt || null,
         heeftInput: !!rec.input, heeftBaseCase: !!rec.baseCase
       });
