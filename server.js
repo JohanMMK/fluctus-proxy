@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.91.0 (2026-08-26, Fase 1): MEERDERE invoer-scenario's per project. Het kamino-record
+//                krijgt een `scenarios`-map (<key> → {scenario,input,baseCase,bijgewerkt}); elke save accumuleert
+//                onder de scenario-naam i.p.v. te overschrijven. GET /api/kamino/projecten geeft één rij per
+//                scenario; GET /api/kamino/project-get?...&scenario=<key> overlayt dat scenario op input/baseCase.
+//                Volledig additief — records zonder scenarios-map vallen terug op het oude gedrag.
 // Versie:        v15.90.1 (2026-08-26, Fase 1): + `scenario`-veld in het kamino-record en in
 //                GET /api/kamino/projecten, zodat de terughaal-dropdown "naam · scenario · datum · code" toont.
 // Versie:        v15.90.0 (2026-08-26, Fase 1 kern-persistentie): (1) /api/kamino/project bewaart nu ook `input`
@@ -3182,6 +3187,18 @@ app.post('/api/kamino/project', async (req, res) => {
     const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
     let bestaand = {};
     try { bestaand = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); } catch (e) {}
+    // v15.91 (Fase 1): meerdere invoer-scenario's náást elkaar onder één project.
+    const _scNaam = String(b.scenario || (b.input && b.input.scenario) || '').trim();
+    const _scKey = (_scNaam ? _scNaam.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') : 'standaard').slice(0, 60) || 'standaard';
+    const scenarios = Object.assign({}, bestaand.scenarios || {});
+    if (b.input || b.baseCase) {
+      scenarios[_scKey] = {
+        scenario: _scNaam || 'standaard',
+        input: b.input || (scenarios[_scKey] && scenarios[_scKey].input) || null,
+        baseCase: b.baseCase || (scenarios[_scKey] && scenarios[_scKey].baseCase) || null,
+        bijgewerkt: new Date().toISOString(), door: u.name || u.id || null
+      };
+    }
     const rec = {
       id, naam: b.naam || bestaand.naam || '',
       klant: b.klant || bestaand.klant || {},
@@ -3189,7 +3206,8 @@ app.post('/api/kamino/project', async (req, res) => {
       factuur: b.factuur || bestaand.factuur || '',
       baseCase: b.baseCase || bestaand.baseCase || null,                     // factuurgegevens voor een volgende studie
       input: b.input || bestaand.input || null,                              // v15.90 (Fase 1): volledige invoer-snapshot per flow (universele save)
-      scenario: b.scenario || (b.input && b.input.scenario) || bestaand.scenario || '',   // v15.90.1: scenario-label voor de terughaal-dropdown
+      scenario: b.scenario || (b.input && b.input.scenario) || bestaand.scenario || '',   // v15.90.1: scenario-label voor de terughaal-dropdown (laatst bewaarde)
+      scenarios,                                                             // v15.91: map <scenarioKey> → {scenario,input,baseCase,bijgewerkt} — meerdere scenario's per project
       profiel: b.profiel || bestaand.profiel || null,                        // v15.57 (Johan 03-08): gekozen verbruiksprofiel — nodig voor carryover naar de interactieve simulator (manager-open)
       pv: b.pv || bestaand.pv || null,                                       // bestaande-PV (kWp + injectie MWh/jr) voor SolarActive
       studies: Object.assign({}, bestaand.studies || {}, b.studies || {}),   // gedane studies accumuleren
@@ -3353,6 +3371,13 @@ app.get('/api/kamino/project-get', async (req, res) => {
     catch (e) { return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' }); }
     // v15.90 (Fase 1): toegang = manager OF eigenaar/adviseur/klant (niet langer manager-only).
     if (!_magProjectOpenen(u, rec)) return res.status(403).json({ error: 'Geen toegang tot dit project.' });
+    // v15.91 (Fase 1): optioneel een specifiek invoer-scenario overlayen op input/baseCase.
+    const scq = String(req.query.scenario || '').trim();
+    if (scq && rec.scenarios && rec.scenarios[scq]) {
+      rec.input = rec.scenarios[scq].input || rec.input;
+      rec.baseCase = rec.scenarios[scq].baseCase || rec.baseCase;
+      rec.scenario = rec.scenarios[scq].scenario || rec.scenario;
+    }
     let pdfs = [], studies = [];
     try {
       const lijst = await _bucketList(`rapporten/${veilig}/`);
@@ -3392,15 +3417,25 @@ app.get('/api/kamino/projecten', async (req, res) => {
       let rec; try { rec = JSON.parse(await _factuurDownload(`kamino/${o.name}`)); } catch (e) { continue; }
       if (!rec || !rec.id) continue;
       if (!_magProjectOpenen(u, rec)) continue;
-      out.push({
-        id: rec.id,
-        naam: rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id,
-        klant: (rec.klant && (rec.klant.naam || rec.klant.name)) || '',
-        adviseur: (rec.adviseur && (rec.adviseur.naam || rec.adviseur.name || rec.adviseur.email)) || '',
-        scenario: rec.scenario || (rec.input && rec.input.scenario) || '',
-        bijgewerkt: rec.bijgewerkt || rec.aangemaakt || null,
-        heeftInput: !!rec.input, heeftBaseCase: !!rec.baseCase
-      });
+      const naam = rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id;
+      const klant = (rec.klant && (rec.klant.naam || rec.klant.name)) || '';
+      const adviseur = (rec.adviseur && (rec.adviseur.naam || rec.adviseur.name || rec.adviseur.email)) || '';
+      const scKeys = rec.scenarios ? Object.keys(rec.scenarios) : [];
+      if (scKeys.length) {
+        // v15.91: één rij per bewaard invoer-scenario
+        for (const k of scKeys) {
+          const sc = rec.scenarios[k] || {};
+          out.push({ id: rec.id, scenarioKey: k, naam, klant, adviseur,
+            scenario: sc.scenario || k,
+            bijgewerkt: sc.bijgewerkt || rec.bijgewerkt || rec.aangemaakt || null,
+            heeftInput: !!sc.input, heeftBaseCase: !!sc.baseCase });
+        }
+      } else {
+        out.push({ id: rec.id, scenarioKey: '', naam, klant, adviseur,
+          scenario: rec.scenario || (rec.input && rec.input.scenario) || '',
+          bijgewerkt: rec.bijgewerkt || rec.aangemaakt || null,
+          heeftInput: !!rec.input, heeftBaseCase: !!rec.baseCase });
+      }
     }
     out.sort((a, b) => String(b.bijgewerkt || '').localeCompare(String(a.bijgewerkt || '')));
     const afgekapt = jsons.length >= 100;
