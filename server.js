@@ -1,6 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.96.0 (2026-08-26, Fase 2c — klant-onboarding & scoped toegang): (1) resolveUser matcht
+//                nu ook op E-MAIL als er geen auth_uid-profiel is (uitgenodigd/klant-profiel) en self-healt
+//                auth_uid → de rol (bv. 'klant') klopt meteen bij de eerste OTP-login. (2) POST /api/kamino/
+//                project maakt best-effort een AUTO klant-account (profiles role 'klant', status 'invited')
+//                als rec.klant.email gezet is — non-blocking. (3) GET /api/kamino/rapport-open kreeg de
+//                `_magProjectOpenen`-gate (externe klant-accounts mogen niet elk rapport lezen). Additief +
+//                geguard; klant opent via /apps/klant.html?project=<code> enkel zijn eigen project (OTP-login).
 // Versie:        v15.95.0 (2026-08-26, Fase 2b — Johan-correctie): een **partnermanager** ziet AUTOMATISCH
 //                enkel de **EnergieKompas**-schil (app_id 'energiekompas'), niet de losse interne tools.
 //                `_PARTNER_APPS` = {'energiekompas'}. Zowel de portal-launcher als de in-app toegangsgate
@@ -1798,6 +1805,26 @@ async function resolveUser(req) {
         profiel = Array.isArray(rows) && rows.length ? rows[0] : null;
       } catch (_) { /* fallback-tabel bestaat niet — ok */ }
     }
+    // v15.96 (Fase 2c): fallback op E-MAIL. Een uitgenodigd/klant-profiel wordt aangemaakt met enkel
+    // een e-mail (nog géén auth_uid — die ontstaat pas bij de eerste OTP-login). Match dan op e-mail
+    // zodat de rol (bv. 'klant') meteen klopt, en self-heal auth_uid zodat volgende lookups direct raak zijn.
+    if (!profiel) {
+      try {
+        const em = String(user.email || '').trim().toLowerCase();
+        if (em) {
+          const rows = await _sbRest(`profiles?email=eq.${encodeURIComponent(em)}&select=*`);
+          profiel = Array.isArray(rows) && rows.length ? rows[0] : null;
+          if (profiel && !profiel.auth_uid) {
+            try {
+              await _sbRest(`profiles?email=eq.${encodeURIComponent(em)}`, {
+                method: 'PATCH', headers: { 'Prefer': 'return=minimal' }, body: { auth_uid: user.id },
+              });
+              profiel.auth_uid = user.id;
+            } catch (e) { /* self-heal niet-blokkerend */ }
+          }
+        }
+      } catch (e) { /* e-mail-fallback faalde — ok, val terug op default-rol */ }
+    }
     const val = {
       id: user.id,
       email: user.email || (profiel && profiel.email) || '',
@@ -3278,6 +3305,23 @@ app.post('/api/kamino/project', async (req, res) => {
     };
     await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
     try { _kaminoLijstCache.ts = 0; } catch (e) {}   // v15.91.1: dropdown-cache verversen zodat het nieuwe project meteen verschijnt
+    // v15.96 (Fase 2c): AUTO klant-account (best-effort, non-blocking). Maakt enkel een profiles-rij
+    // (role 'klant') als er nog geen profiel is met dat e-mail; de auth.users-rij ontstaat vanzelf bij
+    // de eerste OTP-login (shouldCreateUser). De klant kan zo via /apps/klant.html enkel dit project
+    // openen (_magProjectOpenen matcht op rec.klant.email). Blokkeert de save NOOIT.
+    try {
+      const kEmail = String((rec.klant && rec.klant.email) || '').trim().toLowerCase();
+      if (kEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(kEmail)) {
+        const bestaat = await _sbRest(`profiles?email=eq.${encodeURIComponent(kEmail)}&select=email`);
+        if (!(Array.isArray(bestaat) && bestaat.length)) {
+          await _sbRest('profiles', {
+            method: 'POST', headers: { 'Prefer': 'return=minimal' },
+            body: { email: kEmail, name: (rec.klant && (rec.klant.naam || rec.klant.name)) || '', company: rec.partner || '', role: 'klant', status: 'invited' },
+          });
+          console.log(`[kamino/project] auto klant-account aangemaakt: ${kEmail} (${id})`);
+        }
+      }
+    } catch (e) { console.warn('[kamino/project] auto klant-account faalde (niet-blokkerend):', e.message); }
     return res.json({ ok: true, id });
   } catch (e) {
     console.error('[kamino/project] bewaren faalde:', e.message);
@@ -3406,6 +3450,13 @@ app.get('/api/kamino/rapport-open', async (req, res) => {
     const pid = String(req.query.project_id || '').replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
     const tegel = String(req.query.tegel || '').replace(/[^a-z]/gi, '').slice(0, 20);
     if (!pid || !tegel) return res.status(400).json({ error: 'project_id en tegel verplicht' });
+    // v15.96 (Fase 2c): toegangsgate. Nu er externe klant-accounts zijn, mag niet elke ingelogde
+    // gebruiker elk rapport-artefact opvragen — enkel wie het project mag openen (manager/partnermanager/
+    // eigenaar/adviseur/klant). Additief: legitieme callers (Kamino/simulator manager-open) passeren gewoon.
+    try {
+      const rec = JSON.parse(await _factuurDownload(`kamino/${pid}.json`));
+      if (!_magProjectOpenen(u, rec)) return res.status(403).json({ error: 'Geen toegang tot dit rapport.' });
+    } catch (e) { /* geen projectrecord (los rapport) → val terug op login-only, zoals voorheen */ }
     let art;
     try { art = JSON.parse(await _factuurDownload(`rapporten/${pid}/kamino-${tegel}.json`)); }
     catch (e) { return res.status(404).json({ error: 'geen bewaard rapport' }); }
