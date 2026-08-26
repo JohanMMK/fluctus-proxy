@@ -1,6 +1,14 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.95.0 (2026-08-26, Fase 2b — Johan-correctie): een **partnermanager** ziet AUTOMATISCH
+//                enkel de **EnergieKompas**-schil (app_id 'energiekompas'), niet de losse interne tools.
+//                `_PARTNER_APPS` = {'energiekompas'}. Zowel de portal-launcher als de in-app toegangsgate
+//                volgen dit. Fluctus-interne apps (energiemarkt, gemeenteplan) + Gebruikers blijven manager-
+//                only; adviseurs blijven grant-gebaseerd (zoals sellers). Additief + geguard.
+// Versie:        v15.94.0 (2026-08-26, Fase 2b — RBAC nieuwe rollen): een **partnermanager** kreeg
+//                automatisch de klant-toolset (simulator/betaalplein/kamino/thuisladen). Vervangen door
+//                v15.95.0 (enkel EnergieKompas) — zie boven.
 // Versie:        v15.93.0 (2026-08-26, Fase 2): rollen & bedrijf beheerbaar in de Gebruikers-app. EPC/bedrijf-
 //                sleutel = `profiles.company`. `action:'role'` aanvaardt nu manager/seller/adviseur/partnermanager/
 //                klant (+ zet optioneel company mee); nieuw `action:'company'`; nieuw GET /api/manager/partners
@@ -1831,6 +1839,14 @@ function _magProjectOpenen(u, rec) {
   return em === adv || em === kl;
 }
 
+// v15.95 (Fase 2b, Johan-correctie): een partnermanager ziet AUTOMATISCH enkel de
+// EnergieKompas-schil — niet de losse interne tools. EnergieKompas is de partner-
+// gerichte ingang (particulier|bedrijf, thema per partner); de onderliggende tools
+// (simulator, kamino, thuisladen …) blijven Fluctus-intern of grant-gebaseerd.
+// Fluctus-interne apps (energiemarkt, gemeenteplan) en Gebruikers blijven manager-only.
+// Adviseurs blijven grant-gebaseerd (zoals sellers) — zij werken via de ingebedde schil.
+const _PARTNER_APPS = new Set(['energiekompas']);
+
 async function _heeftAppToegang(u, appId) {
   // Enkel een gedeactiveerde gebruiker wordt geblokkeerd. 'invited' (uitgenodigd,
   // nog niet geactiveerd) én 'active' krijgen toegang volgens hun toekenningen —
@@ -1838,6 +1854,8 @@ async function _heeftAppToegang(u, appId) {
   // 'Deactiveren' (status inactive) is de blokkeer-schakelaar.
   if (!u || u.status === 'inactive') return false;
   if (_isManager(u)) return true; // managers impliciet alle apps
+  // v15.95 (Fase 2b): partnermanager = automatische toegang tot ENKEL EnergieKompas.
+  if (u.role === 'partnermanager' && _PARTNER_APPS.has(appId)) return true;
   try {
     const rows = await _sbRest(
       `user_app_access?user_id=eq.${encodeURIComponent(u.id)}&app_id=eq.${encodeURIComponent(appId)}&select=app_id`);
