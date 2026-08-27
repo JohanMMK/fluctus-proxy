@@ -1,6 +1,14 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.98.0 (2026-08-27, Fase 3 — MANDAAT-WACHTRIJ): mandaat-aanvragen worden nu op het
+//                projectrecord bewaard (`rec.mandaat`) zodat ze NIET verloren gaan als de PC/Chrome/Fluvius-
+//                sessie niet live is (nog geen always-on VPS). Nieuw: POST /api/mandaat/aanvraag (enqueue,
+//                toegang = wie het project mag openen), GET /api/mandaat/status?project_id (per project),
+//                GET /api/mandaat/wachtrij?status= (MANAGER — alle openstaande EAN's over alle projecten, wat
+//                de Fluvius-skill ophaalt), POST /api/mandaat/status (MANAGER — skill schrijft referentienr/
+//                gemaskeerd mail/adres-match/status per EAN terug = de controlelijst). Statussen: wachtrij →
+//                aangevraagd → actief → geleverd (+ adres_mismatch/fout). Additief + geguard.
 // Versie:        v15.97.0 (2026-08-27, Fase 3 — profiel-ladder OPEN): het gemeten kwartierprofiel
 //                (`_opgeladenProfiel` → `_pasOpgeladenAfnameToe/_InjectieToe`) wordt niet langer enkel voor
 //                MANAGERS toegepast maar voor ALLE gebruikers zodra er een profiel bij het project staat
@@ -1011,7 +1019,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.97.0'; // v15.97.0 (27-08, Fase 3): profiel-ladder open voor alle gebruikers. LET OP: houd dit gelijk aan de Versie-header bovenaan bij elke release (runtime-versie = wat /'' en de sim-_meta tonen, zodat een deploy verifieerbaar is).
+const SERVER_VERSIE = '15.98.0'; // v15.98.0 (27-08, Fase 3): mandaat-wachtrij (rec.mandaat + endpoints). LET OP: houd dit gelijk aan de Versie-header bovenaan bij elke release (runtime-versie = wat / en de sim-_meta tonen, zodat een deploy verifieerbaar is).
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -3570,6 +3578,147 @@ app.get('/api/kamino/projecten', async (req, res) => {
     console.error('[kamino/projecten] faalde:', e.message);
     return res.status(500).json({ error: e.message });
   }
+});
+
+// ─── v15.98 (Fase 3) — MANDAAT-WACHTRIJ ──────────────────────────────────────────
+// De mandaat-aanvraag wordt op het projectrecord bewaard (rec.mandaat) zodat een aanvraag NIET verloren gaat
+// wanneer de PC/Chrome/Fluvius-sessie niet live is (er is nog geen always-on VPS — zie KB Fase 3). De Fluvius-
+// flow (skill/watchdog) haalt de wachtrij op zodra hij ingelogd is, verwerkt EAN per EAN en schrijft de status
+// terug. Additief + geguard. Statussen: wachtrij → aangevraagd → actief → geleverd (+ adres_mismatch / fout).
+const _MANDAAT_STATUSSEN = ['wachtrij', 'aangevraagd', 'actief', 'geleverd', 'adres_mismatch', 'fout'];
+async function _kaminoRecLaden(id) {
+  const veilig = String(id).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+  try { return { veilig, rec: JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)) }; }
+  catch (e) { return { veilig, rec: null }; }
+}
+function _mandaatOverallStatus(eans) {
+  if (eans.some(x => x.status === 'wachtrij')) return 'wachtrij';
+  if (eans.some(x => x.status === 'adres_mismatch')) return 'adres_mismatch';
+  if (eans.some(x => x.status === 'aangevraagd')) return 'aangevraagd';
+  if (eans.some(x => x.status === 'actief')) return 'actief';
+  if (eans.length && eans.every(x => x.status === 'geleverd')) return 'geleverd';
+  return 'aangevraagd';
+}
+
+// POST /api/mandaat/aanvraag  { project_id, ean | eans:[{ean,richting?}], meter_type?, factuuradres? }
+// Zet één of meer EAN's in de wachtrij op het projectrecord. Toegang = wie het project mag openen.
+app.post('/api/mandaat/aanvraag', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req); if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const b = req.body || {};
+    const id = String(b.project_id || '').trim().toUpperCase();
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+    let items = Array.isArray(b.eans) ? b.eans : (b.ean ? [{ ean: b.ean, richting: b.richting }] : []);
+    items = items.map(x => ({ ean: String((x && x.ean) || '').replace(/\s/g, ''), richting: (x && x.richting) || null }))
+                 .filter(x => /^\d{18}$/.test(x.ean));
+    if (!items.length) return res.status(400).json({ error: 'minstens één geldig EAN (18 cijfers) verplicht' });
+    const { veilig, rec } = await _kaminoRecLaden(id);
+    if (!rec) return res.status(404).json({ error: 'Geen project gevonden met dit nummer.' });
+    if (!_magProjectOpenen(u, rec)) return res.status(403).json({ error: 'Geen toegang tot dit project.' });
+    const m = rec.mandaat || { status: 'wachtrij', meter_type: null, factuuradres: null, eans: [], aangemaakt: new Date().toISOString() };
+    if (b.meter_type) m.meter_type = (String(b.meter_type).toUpperCase() === 'AMR' ? 'AMR' : 'SMR');
+    if (b.factuuradres) m.factuuradres = String(b.factuuradres).slice(0, 300);
+    else if (!m.factuuradres && rec.input && rec.input.adres) m.factuuradres = String(rec.input.adres).slice(0, 300);
+    m.aangevraagd_door = m.aangevraagd_door || { id: u.id, naam: u.naam, email: u.email, rol: u.role };
+    m.eans = m.eans || [];
+    for (const it of items) {
+      const best = m.eans.find(x => x.ean === it.ean);
+      if (best) { if (it.richting && !best.richting) best.richting = it.richting; continue; }   // niet dupliceren
+      m.eans.push({ ean: it.ean, richting: it.richting || null, status: 'wachtrij',
+        referentienummer: null, titularis_mail_masked: null, fluvius_adres: null, adres_match: null,
+        bevestigd_door: null, opmerking: null, in_wachtrij_sinds: new Date().toISOString(),
+        aangevraagd_op: null, actief_op: null, geleverd_op: null });
+    }
+    m.status = _mandaatOverallStatus(m.eans);
+    m.bijgewerkt = new Date().toISOString();
+    rec.mandaat = m; rec.bijgewerkt = new Date().toISOString();
+    await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    try { _kaminoLijstCache.ts = 0; } catch (e) {}
+    console.log(`[mandaat/aanvraag] ${id}: ${items.length} EAN(s) in wachtrij door ${u.role} ${u.naam || u.id}`);
+    return res.json({ ok: true, project_id: id, mandaat: m });
+  } catch (e) { console.error('[mandaat/aanvraag] faalde:', e.message); return res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/mandaat/status?project_id=FLX-...  → mandaatblok van dit project (toegang = wie het mag openen).
+app.get('/api/mandaat/status', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ error: 'Opslag niet geconfigureerd' });
+    const u = await resolveUser(req); if (!u) return res.status(401).json({ error: 'Niet ingelogd' });
+    const id = String(req.query.project_id || '').trim().toUpperCase();
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+    const { rec } = await _kaminoRecLaden(id);
+    if (!rec) return res.status(404).json({ error: 'Geen project gevonden.' });
+    if (!_magProjectOpenen(u, rec)) return res.status(403).json({ error: 'Geen toegang tot dit project.' });
+    return res.json({ ok: true, project_id: id, mandaat: rec.mandaat || null });
+  } catch (e) { console.error('[mandaat/status] faalde:', e.message); return res.status(500).json({ error: e.message }); }
+});
+
+// GET /api/mandaat/wachtrij?status=wachtrij,aangevraagd,actief  → MANAGER-ONLY. Alle mandaat-EAN's over alle
+// projecten met een van de gevraagde statussen. Dit is wat de Fluvius-skill/watchdog ophaalt om te verwerken.
+app.get('/api/mandaat/wachtrij', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const gevraagd = String(req.query.status || 'wachtrij').split(',').map(s => s.trim()).filter(Boolean);
+    let lijst = [];
+    try { lijst = await _bucketList('kamino/'); } catch (e) { lijst = []; }
+    const jsons = (Array.isArray(lijst) ? lijst : []).filter(o => o.name && /\.json$/i.test(o.name));
+    const recs = await Promise.all(jsons.map(o =>
+      _factuurDownload(`kamino/${o.name}`).then(t => { try { return JSON.parse(t); } catch (e) { return null; } }).catch(() => null)));
+    const out = [];
+    for (const rec of recs) {
+      if (!rec || !rec.id || !rec.mandaat || !Array.isArray(rec.mandaat.eans)) continue;
+      for (const en of rec.mandaat.eans) {
+        if (gevraagd.indexOf(en.status) < 0) continue;
+        out.push({ project_id: rec.id, project_naam: rec.naam || (rec.klant && (rec.klant.naam || rec.klant.name)) || rec.id,
+          factuuradres: rec.mandaat.factuuradres || (rec.input && rec.input.adres) || null,
+          meter_type: rec.mandaat.meter_type || null,
+          ean: en.ean, richting: en.richting || null, status: en.status,
+          referentienummer: en.referentienummer || null, fluvius_adres: en.fluvius_adres || null,
+          adres_match: en.adres_match, titularis_mail_masked: en.titularis_mail_masked || null,
+          in_wachtrij_sinds: en.in_wachtrij_sinds || null, aangevraagd_op: en.aangevraagd_op || null, actief_op: en.actief_op || null });
+      }
+    }
+    out.sort((a, b) => String(a.in_wachtrij_sinds || '').localeCompare(String(b.in_wachtrij_sinds || '')));
+    return res.json({ ok: true, statussen: gevraagd, aantal: out.length, items: out });
+  } catch (e) { console.error('[mandaat/wachtrij] faalde:', e.message); return res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/mandaat/status  { project_id, ean, patch:{status?,referentienummer?,titularis_mail_masked?,fluvius_adres?,adres_match?,bevestigd_door?,opmerking?} }
+// MANAGER-ONLY. De Fluvius-skill schrijft de uitkomst per EAN terug → rec.mandaat groeit mee = de controlelijst.
+app.post('/api/mandaat/status', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const b = req.body || {};
+    const id = String(b.project_id || '').trim().toUpperCase();
+    const ean = String(b.ean || '').replace(/\s/g, '');
+    if (!/^FLX-[A-Z0-9]{3}-[A-Z0-9]{3,4}$/.test(id)) return res.status(400).json({ error: 'geldig project-id verplicht' });
+    if (!/^\d{18}$/.test(ean)) return res.status(400).json({ error: 'geldig EAN verplicht' });
+    const patch = b.patch || {};
+    const { veilig, rec } = await _kaminoRecLaden(id);
+    if (!rec || !rec.mandaat || !Array.isArray(rec.mandaat.eans)) return res.status(404).json({ error: 'Geen mandaat-wachtrij voor dit project.' });
+    const ent = rec.mandaat.eans.find(x => x.ean === ean);
+    if (!ent) return res.status(404).json({ error: 'EAN niet in de wachtrij van dit project.' });
+    ['referentienummer', 'titularis_mail_masked', 'fluvius_adres', 'bevestigd_door', 'opmerking'].forEach(k => {
+      if (patch[k] !== undefined) ent[k] = (patch[k] === null ? null : String(patch[k]).slice(0, 300));
+    });
+    if (patch.adres_match !== undefined) ent.adres_match = (patch.adres_match === null ? null : !!patch.adres_match);
+    if (patch.status !== undefined) {
+      const st = String(patch.status);
+      if (_MANDAAT_STATUSSEN.indexOf(st) < 0) return res.status(400).json({ error: 'ongeldige status' });
+      ent.status = st;
+      const nu = new Date().toISOString();
+      if (st === 'aangevraagd' && !ent.aangevraagd_op) ent.aangevraagd_op = nu;
+      if (st === 'actief' && !ent.actief_op) ent.actief_op = nu;
+      if (st === 'geleverd' && !ent.geleverd_op) ent.geleverd_op = nu;
+    }
+    rec.mandaat.status = _mandaatOverallStatus(rec.mandaat.eans);
+    rec.mandaat.bijgewerkt = new Date().toISOString(); rec.bijgewerkt = new Date().toISOString();
+    await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    try { _kaminoLijstCache.ts = 0; } catch (e2) {}
+    console.log(`[mandaat/status] ${id} ${ean} → ${ent.status} (door ${u.naam || u.id})`);
+    return res.json({ ok: true, project_id: id, ean, eanStatus: ent, mandaat: rec.mandaat });
+  } catch (e) { console.error('[mandaat/status] faalde:', e.message); return res.status(500).json({ error: e.message }); }
 });
 
 // ─── v15.46: KAMINO studie 1 — onderhandelingsmarge (echte run, drift-vrij) ──────
