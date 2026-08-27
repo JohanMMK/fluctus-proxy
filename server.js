@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.102.0 (2026-08-27, Fase 4 — EnergieKompas publieke KPI's): nieuw PUBLIEK (geen login)
+//                POST /api/energiekompas/kpi — 4 eerste-feedback-KPI's (kost afname · waarde injectie ·
+//                restcapaciteit · kilometerkost) op de LIVE markt (MARKT.spot_q, goedkoopste ~30%% voor slim
+//                laden) + de door de gebruiker ingegeven factuurwaarden. Geen PII/opslag. Additief.
 // Versie:        v15.101.0 (2026-08-27, Fase 3 — KOPPEL LOSSE BIJ AANVRAAG): POST /api/mandaat/aanvraag checkt
 //                nu eerst of de EAN al in de LOSSE lijst staat (= onze Fluvius-kennis na sync); zo ja → die
 //                bestaande mandaat KOPPELEN aan het project (status/referentienr behouden) i.p.v. opnieuw aan te
@@ -1032,7 +1036,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.101.0'; // v15.101.0 (27-08, Fase 3): koppel losse mandaat bij aanvraag. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.102.0'; // v15.102.0 (27-08, Fase 4): publiek EnergieKompas-KPI-endpoint. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2419,6 +2423,63 @@ app.post('/api/markt-reload', (req, res) => {
   console.log('[markt] Handmatige reload aangevraagd via /api/markt-reload');
   setImmediate(() => laadMarktdata(true));
   res.json({ status: 'reload_gestart', vorige_status: MARKT_STATUS, pogingen: MARKT_POGINGEN });
+});
+
+// ─── v15.102 (Fase 4 — EnergieKompas publieke KPI's) ─────────────────────────────────────────
+// PUBLIEK (geen login): eerste-feedback-KPI's voor de EnergieKompas-schil, op de LIVE markt (MARKT.spot_q,
+// €/MWh) + de door de gebruiker ingegeven factuurwaarden. Geen PII, geen opslag — enkel 4 aggregaten terug.
+// De PRECIEZE studie (op het werkelijke kwartierprofiel na mandaat) draait later via de bestaande sim.
+app.post('/api/energiekompas/kpi', (req, res) => {
+  try {
+    if (!MARKT || !Array.isArray(MARKT.spot_q) || !MARKT.spot_q.length) {
+      return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw', markt_status: MARKT_STATUS });
+    }
+    const b = req.body || {};
+    const _n = (v, mx) => { let x = Number(v); if (!isFinite(x) || x < 0) x = 0; if (mx != null && x > mx) x = mx; return x; };
+    const afname = _n(b.afname_mwh, 100000);
+    const injectie = _n(b.injectie_mwh, 100000);
+    const kva = _n(b.aansluiting_kva, 100000);
+    const huidigeKost = _n(b.huidige_kost, 100000000);
+    const wagens = Math.max(0, Math.round(_n(b.wagens, 100000)));
+    const km = _n(b.km, 1000000);
+    const KWH_PER_KM = 0.16;
+    // Marktankers uit spot_q (€/MWh)
+    const spot = MARKT.spot_q.filter(x => isFinite(x));
+    const avgSpot = spot.reduce((a, c) => a + c, 0) / spot.length;
+    const sorted = spot.slice().sort((a, c) => a - c);
+    const goedkoopN = Math.max(1, Math.round(sorted.length * 0.30));   // slim laden mikt op de goedkoopste ~30%
+    const dynLaad = sorted.slice(0, goedkoopN).reduce((a, c) => a + c, 0) / goedkoopN;
+    const injWaarde = Math.max(0, avgSpot * 0.9);   // injectievergoeding ≈ spot (indicatief)
+    const NET_HEFFING = 90;   // €/MWh all-in netkosten/heffingen bovenop energie (indicatief) als er geen factuurkost is
+    // KPI's
+    const kostAfname = huidigeKost > 0 ? huidigeKost : afname * (avgSpot + NET_HEFFING);
+    const waardeInjectie = injectie * injWaarde;
+    const toegangKw = kva * 0.9;
+    const gemKw = afname * 1000 / 8760;
+    const restPct = toegangKw > 0 ? Math.max(0, Math.min(95, Math.round((1 - gemKw / toegangKw) * 100))) : null;
+    const laadMwh = wagens * km * KWH_PER_KM / 1000;
+    const kmKost = (dynLaad / 1000) * KWH_PER_KM;   // €/km bij dynamisch laden op de goedkoopste uren
+    return res.json({
+      ok: true,
+      kpi: {
+        kost_afname_eur: Math.round(kostAfname),
+        waarde_injectie_eur: Math.round(waardeInjectie),
+        restcapaciteit_pct: restPct,
+        kilometerkost_eur_per_km: Math.round(kmKost * 1000) / 1000,
+        laadvraag_mwh: Math.round(laadMwh * 10) / 10,
+      },
+      markt: {
+        avg_spot_eur_mwh: Math.round(avgSpot * 10) / 10,
+        dyn_laadkost_eur_mwh: Math.round(dynLaad * 10) / 10,
+        injectiewaarde_eur_mwh: Math.round(injWaarde * 10) / 10,
+        van: MARKT.van, tot: MARKT.tot,
+      },
+      indicatief: true,
+    });
+  } catch (e) {
+    console.error('[energiekompas/kpi] faalde:', e.message);
+    return res.status(500).json({ error: e.message });
+  }
 });
 
 app.get('/api/postcode-grd', (req, res) => {
