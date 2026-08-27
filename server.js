@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.108.0 (2026-08-27, Fase 4 — GENERATOR twee-bakjes-netting): referentie bij een generator =
+//                gebouw-elektriciteit ZONDER de generator-last (draait vandaag op diesel) + de vermeden dieselkost;
+//                de sweep-cellen draaien mét de generator-last (batterij dekt de shots) → besparing = ref − cel nettot
+//                vermeden diesel én bijgekomen stroomkost. Batterij-as start op de vervang-batterij P_gen (§3.2).
 // Versie:        v15.107.0 (2026-08-27, Fase 4 — GENERATOR-component): de generator wordt in de bedrijf-sweep
 //                gemodelleerd als een synthetische 'plein'-last (§3): shots op de kVA-piek, genset 3,3 kWh_e/L,
 //                C-factor 2 (batterij-seed P_gen / 2u). De echte laadplein-engine waardeert zo de batterij+PV die
@@ -1055,7 +1059,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.107.0'; // v15.107.0 (27-08, Fase 4): GENERATOR-component in bedrijf-sweep — synthetische 'plein'-last (shots op kVA-piek, genset 3,3 kWh/L) + diesel-economics + eigen 24×365-heatmap. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.108.0'; // v15.108.0 (27-08, Fase 4): GENERATOR twee-bakjes-netting — referentie = gebouw-elektriciteit zónder generator-last + vermeden diesel; batterij-as start op de vervang-batterij P_gen (§3.2). LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2620,16 +2624,18 @@ function _ekBedrijfCtx(b) {
     };
   }
   const pleinenSim = genPlein ? pleinen.concat([genPlein]) : pleinen;
-  const baseUi = () => ({
+  const _mkBaseUi = (pl) => ({
     grd, postcode, spanning, profielNaam, jaarverbruik_mwh: afname,
     aansluiting_kva: kva, toegangsvermogen_kw: toegang,
-    laadpleinen: pleinenSim, jaar: 'rolling12', geen_aansluiting_verhoging: true,
+    laadpleinen: pl, jaar: 'rolling12', geen_aansluiting_verhoging: true,
     pv_curtailment: { actief: false }, bsp: { actief: false },
     contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
       staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
       vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
   });
-  return { afname, kva, spanning, toegang, profielNaam, grd, postcode, pleinen, pleinenSim, genKva, generator, lpKw, bessMaxKw, pvMaxKwp, PV_KOST, BATT_KWH_KOST, CRATE, baseUi };
+  const baseUi = () => _mkBaseUi(pleinenSim);        // mét generator-last (de cellen)
+  const baseUiNoGen = () => _mkBaseUi(pleinen);      // zónder generator-last (de diesel-referentie)
+  return { afname, kva, spanning, toegang, profielNaam, grd, postcode, pleinen, pleinenSim, genKva, generator, lpKw, bessMaxKw, pvMaxKwp, PV_KOST, BATT_KWH_KOST, CRATE, baseUi, baseUiNoGen };
 }
 // Eén echte dispatch voor combinatie (pv kWp, bkw kW-batterij) → {kost, capex, …}.
 async function _ekBedrijfCel(ctx, pv, bkw) {
@@ -2651,11 +2657,26 @@ app.post('/api/energiekompas/bedrijf-sweep', async (req, res) => {
     // Het 75%-PV-anker (v15.105) halveert het brede interieur-gat 50→100%: de bilineaire interpolatie in de
     // schil zakt daar van ~13% naar ~3-5% afwijking. De schil interpoleert de tussencellen; klik = echte cel.
     const pvAs = [0]; [0.25, 0.5, 0.75, 1].forEach(f => { const v = Math.round(ctx.pvMaxKwp * f); if (v > (pvAs[pvAs.length - 1] || 0)) pvAs.push(v); });
-    const bkwAs = [0]; [0.5, 1].forEach(f => { const v = Math.round(ctx.bessMaxKw * f); if (v > (bkwAs[bkwAs.length - 1] || 0)) bkwAs.push(v); });
+    // Batterij-as: normaal 0→bessMax. Bij een generator start ze op de vervang-batterij P_gen (§3.2) — kleiner
+    // vervangt de generator fysiek niet, dus die cellen zijn geen geldige replace-scenario's.
+    const bkwFloor = ctx.generator ? (ctx.generator.batterij_seed_kw || 0) : 0;
+    const bkwAs = [bkwFloor]; [0.5, 1].forEach(f => { const v = Math.round(bkwFloor + (ctx.bessMaxKw - bkwFloor) * f); if (v > (bkwAs[bkwAs.length - 1] || 0)) bkwAs.push(v); });
     const cellDefs = []; for (const bkw of bkwAs) for (const pv of pvAs) cellDefs.push({ bkw, pv });
     const t0 = Date.now();
     const raw = await _pmap(cellDefs, ({ bkw, pv }) => _ekBedrijfCel(ctx, pv, bkw));
-    const ref = raw.find(c => c.battKw === 0 && c.pvKwp === 0); const refKost = ref ? ref.kost : null;
+    // Referentie. Twee-bakjes (dieselbasis-doc) bij een generator: de HUIDIGE situatie is gebouw-elektriciteit
+    // ZONDER de generator-last (die draait vandaag op diesel) PLUS de vermeden dieselkost. De sweep-cellen draaien
+    // mét de generator-last (de batterij dekt de shots), zodat besparing = ref − cel zowel de vermeden diesel als
+    // de bijgekomen stroomkost correct nettot. Zonder generator = gewoon de (0,0)-cel.
+    let refKost;
+    if (ctx.generator) {
+      const uiRef = ctx.baseUiNoGen(); uiRef.pv_kwp = 0; uiRef.batterijId = ''; uiRef.batterijCustom = null;
+      const rRef = await _runSimulatorOnce(buildSimInput(_variantUi(uiRef, 'sturing')));
+      const elekRef = Number((rRef.jaarfactuur || rRef.factuur || {}).subtotaal_excl_btw) || 0;
+      refKost = Math.round(elekRef + (ctx.generator.diesel_vermeden_eur_jaar || 0));
+    } else {
+      const ref = raw.find(c => c.battKw === 0 && c.pvKwp === 0); refKost = ref ? ref.kost : null;
+    }
     const anchors = raw.map(c => { const besp = (refKost != null) ? (refKost - c.kost) : null;
       const rend = (besp != null && c.capex > 0) ? (besp / c.capex * 100) : null;
       return Object.assign({}, c, { ref_kost: refKost, besparing: (besp != null ? Math.round(besp) : null), rendement: (rend != null ? Math.round(rend * 100) / 100 : null) }); });
