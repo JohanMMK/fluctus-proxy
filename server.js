@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.106.0 (2026-08-27, Fase 4 slice D — onderhandelingsnota-heatmaps): /api/kamino/onderhandel
+//                geeft OPT-IN (b.heatmaps=true) drie 24×365-kalenderheatmaps voor "huidige situatie": afname-profiel
+//                (kW), dynamische prijs (spot €/MWh), afnamekost (afname×spot). Helper _contractHeatmaps, zelfde
+//                vorm/index als de injectie-heatmaps. Tegel-1-respons blijft licht zonder de vlag. Additief.
 // Versie:        v15.105.0 (2026-08-27, Fase 4 slice B/C): bedrijf-sweep PV-as fijner — 0/25/50/75/100% (≤5×3=15
 //                cellen). Het 75%-PV-anker halveert het brede interieur-gat 50→100%, waar de bilineaire interpolatie
 //                in de schil het meest afweek (~13% → ~3-5%). Batterij-as en schil ongewijzigd.
@@ -1047,7 +1051,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.105.0'; // v15.105.0 (27-08, Fase 4 slice B/C): bedrijf-sweep PV-as fijner (0/25/50/75/100% = ≤5×3) — halveert interieur-interpolatiegat. + /api/energiekompas/bedrijf-cel. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.106.0'; // v15.106.0 (27-08, Fase 4 slice D): /api/kamino/onderhandel opt-in contract-heatmaps (afname · spot · afnamekost, 24×365) voor de EnergieKompas-onderhandelingsnota. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -1332,6 +1336,43 @@ function _analyseerInjectieOptimalisatie(MARKT, p){
                bespaard_curtail_eur:hm2.map(v=>Math.round(v*100)/100),
                verdiend_onbalans_eur:hm3.map(v=>Math.round(v*100)/100) }
   };
+}
+
+// ─── CONTRACT-HEATMAPS (Kamino-tegel 1 / EnergieKompas onderhandelingsnota) ──────
+// Drie 24×365-kalenderheatmaps voor "huidige situatie" uit het standaard/opgeladen afnameprofiel
+// × de marktdata: (1) afname-profiel (kW gem./uur), (2) dynamische prijs (spot €/MWh), (3) afnamekost
+// (afname × spot, € dat uur = waar je geld verliest/wint). Zelfde vorm/index als de injectie-heatmaps
+// hierboven (platte array, cel = uur*365 + dag, uur 0-23 · dag 0-364 = 1 jan→31 dec). Render = heatmapSvg.
+function _contractHeatmaps(MARKT, profielNaam, volumeMwh){
+  if(!MARKT || !Array.isArray(MARKT.spot_q) || !MARKT.spot_q.length) return null;
+  const spot = MARKT.spot_q, N = spot.length;
+  const pk = _laadProfielKwartier(profielNaam);
+  if(!(pk && pk.length===35040)) return null;
+  const van = new Date(MARKT.van + 'T00:00:00Z');
+  const HR=24, DG=365, LEN=HR*DG;
+  // afnameprofiel-fracties op de MARKT-timeline, genormaliseerd (som=1 over de window)
+  const pf = new Array(N); let pSum=0;
+  for(let i=0;i<N;i++){ const d=new Date(van.getTime()+i*15*60*1000); const idx=_idx2025(d);
+    const v=(idx>=0&&idx<pk.length)?(+pk[idx]||0):0; pf[i]=v; pSum+=v; }
+  if(pSum>0) for(let i=0;i<N;i++) pf[i]/=pSum;
+  const volKwh = (+volumeMwh||0)*1000;
+  const afnKwh = new Array(LEN).fill(0), spSum = new Array(LEN).fill(0), spCnt = new Array(LEN).fill(0);
+  for(let i=0;i<N;i++){
+    const d=new Date(van.getTime()+i*15*60*1000);
+    const yStart=Date.UTC(d.getUTCFullYear(),0,1);
+    const dag=Math.min(364,Math.max(0,Math.floor((d.getTime()-yStart)/86400000)));
+    const uur=Math.floor((i%96)/4), cel=uur*DG+dag;
+    afnKwh[cel]+=pf[i]*volKwh;   // kWh dat kwartier → som over het uur ≈ kW gem.
+    spSum[cel]+=spot[i]; spCnt[cel]++;
+  }
+  const afname_kw=new Array(LEN), spot_eur_mwh=new Array(LEN), afnamekost_eur=new Array(LEN);
+  for(let c=0;c<LEN;c++){
+    const sp = spCnt[c]>0 ? spSum[c]/spCnt[c] : 0;
+    afname_kw[c]=Math.round(afnKwh[c]*10)/10;                   // ≈ kW gem. dat uur
+    spot_eur_mwh[c]=Math.round(sp*10)/10;                       // €/MWh gem. dat uur
+    afnamekost_eur[c]=Math.round(afnKwh[c]*sp/1000*100)/100;    // € dat uur (kWh × €/MWh /1000)
+  }
+  return { uren:HR, dagen:DG, afname_kw, spot_eur_mwh, afnamekost_eur };
 }
 
 // Batterijen
@@ -4172,6 +4213,10 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
       effectief_jaarverbruik_mwh: result.effectief_jaarverbruik_mwh || jf.effectief_jaarverbruik_mwh || result.effectief_jaarverbruik || null
     };
     out.geen_factuur = _geenFactuur; if (_geenFactuur) out.referentie_eur_mwh = Math.round(_refEurMwh);   // v15.70
+    // v15.106: OPT-IN contract-heatmaps (huidige situatie) — enkel als de caller ze vraagt (b.heatmaps),
+    // zodat de Kamino-tegel-1-respons licht blijft. De EnergieKompas-onderhandelingsnota zet b.heatmaps=true.
+    if (b.heatmaps) { try { const ch = _contractHeatmaps(MARKT, profielNaam, volumeMwh); if (ch) out.heatmaps = ch; }
+      catch (e) { console.warn('[kamino/onderhandel] contract-heatmaps faalde (niet-blokkerend):', e.message); } }
     console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam} · vergroening=${ui.contract.vergroening_eur_per_mwh} · geproj=${out.geprojecteerd_mwh} · schijf=${out.schijf})`);
     return res.json(out);
   } catch (e) {
