@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.107.0 (2026-08-27, Fase 4 — GENERATOR-component): de generator wordt in de bedrijf-sweep
+//                gemodelleerd als een synthetische 'plein'-last (§3): shots op de kVA-piek, genset 3,3 kWh_e/L,
+//                C-factor 2 (batterij-seed P_gen / 2u). De echte laadplein-engine waardeert zo de batterij+PV die
+//                de diesel vervangt; diesel_vermeden = liter × €/L. + eigen 24×365 generator-heatmap. Additief/opt-in.
 // Versie:        v15.106.0 (2026-08-27, Fase 4 slice D — onderhandelingsnota-heatmaps): /api/kamino/onderhandel
 //                geeft OPT-IN (b.heatmaps=true) drie 24×365-kalenderheatmaps voor "huidige situatie": afname-profiel
 //                (kW), dynamische prijs (spot €/MWh), afnamekost (afname×spot). Helper _contractHeatmaps, zelfde
@@ -1051,7 +1055,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.106.0'; // v15.106.0 (27-08, Fase 4 slice D): /api/kamino/onderhandel opt-in contract-heatmaps (afname · spot · afnamekost, 24×365) voor de EnergieKompas-onderhandelingsnota. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.107.0'; // v15.107.0 (27-08, Fase 4): GENERATOR-component in bedrijf-sweep — synthetische 'plein'-last (shots op kVA-piek, genset 3,3 kWh/L) + diesel-economics + eigen 24×365-heatmap. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2542,10 +2546,31 @@ app.post('/api/energiekompas/kpi', (req, res) => {
 // STANDAARDprofiel + de laadpleinen. Referentie = cel (0 PV, 0 batterij). besparing = ref − kost;
 // rendement = besparing/capex. Zelfde vorm als /api/thuisladen (anchors + grid) → de schil tekent er de
 // heatmap mee. De PRECIEZE run komt later op het werkelijke kwartierprofiel (na mandaat). Additief.
+// ─── GENERATOR-heatmap (24×365): wanneer de shots vallen / de last die de batterij moet leveren ──────
+// Zelfde vorm/index als de andere heatmaps (platte array, cel = uur*365 + dag). De dagelijkse generator-
+// energie wordt gelijkmatig over het draaivenster gespreid, op de werkdagen (regime dagen/week, ma-eerst).
+function _ekGeneratorHeatmap(genStarts, egenKwh, venS, venE, dagenWeek) {
+  const HR = 24, DG = 365, LEN = HR * DG; const hm = new Array(LEN).fill(0);
+  const wS = Math.max(0, Math.min(23, Math.round(venS))), wE = Math.max(wS + 1, Math.min(24, Math.round(venE)));
+  const uren = wE - wS, dw = Math.max(1, Math.min(7, Math.round(dagenWeek)));
+  if (!(uren > 0) || !(egenKwh > 0)) return null;
+  const dagEgen = egenKwh / (dw * 52);          // energie op één werkdag
+  const perUur = dagEgen / uren;
+  for (let dag = 0; dag < DG; dag++) {
+    const js = new Date(Date.UTC(2025, 0, 1 + dag)).getUTCDay();   // 0=zo..6=za
+    const iso = ((js + 6) % 7) + 1;                                 // 1=ma..7=zo
+    if (iso > dw) continue;
+    for (let u = wS; u < wE; u++) hm[u * DG + dag] = Math.round(perUur * 100) / 100;
+  }
+  return { uren: HR, dagen: DG, last_kwh: hm };
+}
+
 // ─── EnergieKompas bedrijf — gedeelde context (coarse sweep + losse cel) ──────
 // De sweep berekent nu een GROVE ankergrid (≤4×3). De schil interpoleert tussen
 // de ankers voor een fijnere heatmap; bij klik op een cel roept ze /bedrijf-cel
 // aan voor de ECHTE berekening van die ene combinatie. Zo blijft de sweep snel.
+// GENERATOR (§3, Johan): opt-in, gemodelleerd als een synthetische 'plein'-last (shots op kVA-piek),
+// zodat de bestaande laadplein-engine de batterij+PV-vervanging waardeert. GENSET 3,3 kWh_e/L, C-factor 2.
 function _ekBedrijfCtx(b) {
   const _n = (v) => { const x = Number(v); return (isFinite(x) && x > 0) ? x : 0; };
   const afname = _n(b.afname_mwh);
@@ -2565,16 +2590,46 @@ function _ekBedrijfCtx(b) {
   const bessMaxKw = Math.max(0, Math.round(genKva + lpKw + toegang));
   const pvMaxKwp = Math.max(0, Math.round(1.25 * afname));   // PV tot 125% van de jaarafname
   const PV_KOST = 600, BATT_KWH_KOST = 350, CRATE = 2;   // €/kWp · €/kWh · uur (kWh = kW × C-rate)
+  // ── GENERATOR → synthetische last (§3) ──
+  const gen = b.generator || {};
+  const genStarts = _n(gen.starts || gen.starts_per_dag || gen.n_dag) || 1;
+  const genLiter = _n(gen.liter_jaar || gen.l_per_jaar || gen.brandstof_l_jaar);
+  const GENSET_KWH_PER_L = _n(gen.kwh_per_l) || 3.3;          // elektrische genset-opbrengst (Johan)
+  const DIESEL_EUR_L = _n(gen.diesel_eur_l) || 1.58;          // professionele diesel (€/L)
+  const genVenS = Number.isFinite(+gen.venster_start) ? +gen.venster_start : 7;
+  const genVenE = Number.isFinite(+gen.venster_eind) ? +gen.venster_eind : 18;
+  const genDagen = _n(gen.dagen_per_week) || 5;
+  const genEgenKwh = genLiter * GENSET_KWH_PER_L;             // elektrische output kWh/jaar
+  const genMomenten = genStarts * genDagen * 52;
+  const genKwhPerMoment = genMomenten > 0 ? genEgenKwh / genMomenten : 0;
+  let genPlein = null, generator = null;
+  if (genKva > 0 && genEgenKwh > 0) {
+    // shots op de kVA-piek; per-sessie-energie op 365-dagenbasis zodat de engine ≈ het jaarvolume egen levert.
+    const sessieKwh = genEgenKwh / (genStarts * 365);
+    const duurMin = Math.max(1, Math.round(sessieKwh / genKva * 60));
+    genPlein = { naam: 'Generator (vervanging)', type_plein: 'bezoekers', betalend: false, paaltype: 'GEN',
+      paal_kw: genKva, aantal_palen: 1, duur_min: duurMin, opbrengst_eur_mwh: 0, sessies_paal_dag: genStarts,
+      vensters: [{ start: genVenS, eind: genVenE, sessies: genStarts }], _generator: true };
+    generator = {
+      kva: genKva, liter_jaar: Math.round(genLiter), kwh_per_l: GENSET_KWH_PER_L, egen_kwh_jaar: Math.round(genEgenKwh),
+      starts_per_dag: genStarts, momenten_jaar: genMomenten, kwh_per_moment: Math.round(genKwhPerMoment * 10) / 10,
+      venster: [genVenS, genVenE], dagen_per_week: genDagen, diesel_eur_l: DIESEL_EUR_L,
+      diesel_vermeden_eur_jaar: Math.round(genLiter * DIESEL_EUR_L),
+      batterij_seed_kw: genKva, batterij_seed_kwh: Math.round(2 * genKva),   // vervang-batterij (§3.2: P_gen / 2u)
+      heatmap: _ekGeneratorHeatmap(genStarts, genEgenKwh, genVenS, genVenE, genDagen),
+    };
+  }
+  const pleinenSim = genPlein ? pleinen.concat([genPlein]) : pleinen;
   const baseUi = () => ({
     grd, postcode, spanning, profielNaam, jaarverbruik_mwh: afname,
     aansluiting_kva: kva, toegangsvermogen_kw: toegang,
-    laadpleinen: pleinen, jaar: 'rolling12', geen_aansluiting_verhoging: true,
+    laadpleinen: pleinenSim, jaar: 'rolling12', geen_aansluiting_verhoging: true,
     pv_curtailment: { actief: false }, bsp: { actief: false },
     contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
       staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
       vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
   });
-  return { afname, kva, spanning, toegang, profielNaam, grd, postcode, pleinen, genKva, lpKw, bessMaxKw, pvMaxKwp, PV_KOST, BATT_KWH_KOST, CRATE, baseUi };
+  return { afname, kva, spanning, toegang, profielNaam, grd, postcode, pleinen, pleinenSim, genKva, generator, lpKw, bessMaxKw, pvMaxKwp, PV_KOST, BATT_KWH_KOST, CRATE, baseUi };
 }
 // Eén echte dispatch voor combinatie (pv kWp, bkw kW-batterij) → {kost, capex, …}.
 async function _ekBedrijfCel(ctx, pv, bkw) {
@@ -2607,6 +2662,7 @@ app.post('/api/energiekompas/bedrijf-sweep', async (req, res) => {
     console.log(`[bedrijf-sweep] ${anchors.length} cellen in ${Date.now() - t0}ms (pvMax ${ctx.pvMaxKwp} kWp, bessMax ${ctx.bessMaxKw} kW, profiel ${ctx.profielNaam})`);
     return res.json({ ok: true, anchors, grid: { batt_kw_as: bkwAs, pv_kwp_as: pvAs }, referentie_kost: refKost,
       dimensionering: { pv_max_kwp: ctx.pvMaxKwp, bess_max_kw: ctx.bessMaxKw, generator_kva: ctx.genKva, laadplein_kw: Math.round(ctx.lpKw), toegangsvermogen_kw: ctx.toegang, profiel: ctx.profielNaam },
+      generator: ctx.generator || null,
       indicatief: true, _meta: { server_version: SERVER_VERSIE, cellen: anchors.length, elapsed_ms: Date.now() - t0 } });
   } catch (e) { console.error('[bedrijf-sweep] faalde:', e.message); return res.status(500).json({ error: e.message }); }
 });
