@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.97.0 (2026-08-27, Fase 3 — profiel-ladder OPEN): het gemeten kwartierprofiel
+//                (`_opgeladenProfiel` → `_pasOpgeladenAfnameToe/_InjectieToe`) wordt niet langer enkel voor
+//                MANAGERS toegepast maar voor ALLE gebruikers zodra er een profiel bij het project staat
+//                (Johan-keuze). Enkel `project_id` + opgeladen profiel vereist; `_mgr_ok` wordt niet meer
+//                gecheckt in de twee helpers + de toegangsvermogen-check. Fallback = standaard-SLP (ongewijzigd).
+//                Opladen/aanvragen van meetdata blijft een managerhandeling (Fluvius-itsme + profiel-upload).
 // Versie:        v15.96.0 (2026-08-26, Fase 2c — klant-onboarding & scoped toegang): (1) resolveUser matcht
 //                nu ook op E-MAIL als er geen auth_uid-profiel is (uitgenodigd/klant-profiel) en self-healt
 //                auth_uid → de rol (bv. 'klant') klopt meteen bij de eerste OTP-login. (2) POST /api/kamino/
@@ -1005,7 +1011,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.49.0'; // T3 /aansluiting: kern = VOLLEDIGE besparing vs vandaag (_kpiEngine-headline), niet groeipad-marginaal (Johan-keuze A 28-07) · T1 vergroening→0 · T2 /productie
+const SERVER_VERSIE = '15.97.0'; // v15.97.0 (27-08, Fase 3): profiel-ladder open voor alle gebruikers. LET OP: houd dit gelijk aan de Versie-header bovenaan bij elke release (runtime-versie = wat /'' en de sim-_meta tonen, zodat een deploy verifieerbaar is).
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2358,7 +2364,7 @@ function _magScenarioZien(u, data) {
 
 // ─── ROUTES ───────────────────────────────────────────────────────────────────
 app.get('/',       (req, res) => res.json({
-  status:'ok', version:'15.15.2', ts:new Date().toISOString(), markt_geladen: !!MARKT,
+  status:'ok', version: SERVER_VERSIE, ts:new Date().toISOString(), markt_geladen: !!MARKT,
   markt_status: MARKT_STATUS, markt_pogingen: MARKT_POGINGEN,
   markt_laatste_fout: MARKT_LAATSTE_FOUT,
   markt_periode: MARKT ? { van: MARKT.van, tot: MARKT.tot, n_kwartieren: MARKT.n_kwartieren } : null,
@@ -3640,7 +3646,7 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
     // v15.67 (fase 3): TOEGANGSVERMOGEN-CHECK. Ligt de echte maandpiek over 12 maanden onder het
     // gecontracteerde toegangsvermogen, dan kan dat in het nieuwe/optimale contract lager → extra besparing.
     try {
-      const op = ui._mgr_ok ? await _opgeladenProfiel(b.project_id, 'afname') : null;
+      const op = await _opgeladenProfiel(b.project_id, 'afname');   // v15.97: toegangsvermogen-advies ook voor alle gebruikers
       const toegangKw = Number(bc.toegangsvermogenKw || bc.toegangsvermogen_kw || 0) || Math.round((+bc.aansluitVermogenKva || 0) * 0.9);
       if (op && op.maandpiek_kw > 0 && toegangKw > 0 && (op.maanden || 0) >= 6) {
         const piek = op.maandpiek_kw;
@@ -4085,7 +4091,7 @@ app.post('/api/nominatie-sim', async (req, res) => {
     let result;
     try { result = JSON.parse(stdout.slice(s, e+1)); }
     catch (err) { return res.status(500).json({ error:'JSON parse fout', detail:err.message }); }
-    result._meta = { elapsed_ms:elapsed, server_version:'15.11.1' };
+    result._meta = { elapsed_ms:elapsed, server_version: SERVER_VERSIE };
     result._serverLog = stderr;
     if (_piNom) result.profiel_bron = { bron:'opgeladen_afname', ean:_piNom.ean, mwh:_piNom.mwh, maanden:_piNom.maanden, maandpiek_kw:_piNom.maandpiek_kw };   // v15.70 label
     res.json(result);
@@ -5752,7 +5758,10 @@ async function _isManagerReq(req) {
 // De caller zet input._mgr_ok = true (via _isManagerReq) wanneer de aanvrager een manager is.
 async function _pasOpgeladenAfnameToe(input) {
   try {
-    if (!input || !input.project_id || !input._mgr_ok) return null;
+    // v15.97 (Johan 27-08): profiel-ladder OPEN voor alle gebruikers (niet langer manager-only).
+    // Zodra er een gemeten profiel bij het project staat, gebruikt élke sim het i.p.v. het standaard-SLP.
+    // Vereist enkel een project_id + een opgeladen profiel; `_mgr_ok` wordt niet meer gecheckt.
+    if (!input || !input.project_id) return null;
     const op = await _opgeladenProfiel(input.project_id, 'afname');
     if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) {
       input._opgeladen_profiel_kwartier = op.kwartier;
@@ -5768,7 +5777,8 @@ async function _pasOpgeladenAfnameToe(input) {
 // + p.injectie_profiel_mwh (gemeten volume). Bij geen manager / geen profiel / fout → null → zonvorm-fallback.
 async function _pasOpgeladenInjectieToe(p) {
   try {
-    if (!p || !p.project_id || !p._mgr_ok) return null;
+    // v15.97 (Johan 27-08): OPEN voor alle gebruikers (niet langer manager-only). Enkel project_id + profiel nodig.
+    if (!p || !p.project_id) return null;
     const op = await _opgeladenProfiel(p.project_id, 'injectie');
     if (op && Array.isArray(op.kwartier) && op.kwartier.length === 35040) {
       p.injectie_kwartier = op.kwartier;
