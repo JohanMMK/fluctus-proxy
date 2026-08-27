@@ -1041,7 +1041,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.104.0'; // v15.104.0 (27-08, Fase 4 slice B/C): GROVE bedrijf-sweep (≤4×3) + /api/energiekompas/bedrijf-cel (losse echte cel voor klik-interpolatie). LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.105.0'; // v15.105.0 (27-08, Fase 4 slice B/C): bedrijf-sweep PV-as fijner (0/25/50/75/100% = ≤5×3) — halveert interieur-interpolatiegat. + /api/energiekompas/bedrijf-cel. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2545,9 +2545,10 @@ app.post('/api/energiekompas/bedrijf-sweep', async (req, res) => {
     if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw', markt_status: MARKT_STATUS });
     const ctx = _ekBedrijfCtx(req.body || {});
     if (!(ctx.afname > 0)) return res.status(400).json({ error: 'afname_mwh (jaarverbruik) verplicht' });
-    // GROVE ankergrid: PV op 0/25/50/100% van max (≤4), batterij op 0/50/100% van max (≤3) = ≤12 cellen.
-    // De schil interpoleert de tussenliggende cellen; klik = echte /bedrijf-cel-berekening.
-    const pvAs = [0]; [0.25, 0.5, 1].forEach(f => { const v = Math.round(ctx.pvMaxKwp * f); if (v > (pvAs[pvAs.length - 1] || 0)) pvAs.push(v); });
+    // GROVE ankergrid: PV op 0/25/50/75/100% van max (≤5), batterij op 0/50/100% van max (≤3) = ≤15 cellen.
+    // Het 75%-PV-anker (v15.105) halveert het brede interieur-gat 50→100%: de bilineaire interpolatie in de
+    // schil zakt daar van ~13% naar ~3-5% afwijking. De schil interpoleert de tussencellen; klik = echte cel.
+    const pvAs = [0]; [0.25, 0.5, 0.75, 1].forEach(f => { const v = Math.round(ctx.pvMaxKwp * f); if (v > (pvAs[pvAs.length - 1] || 0)) pvAs.push(v); });
     const bkwAs = [0]; [0.5, 1].forEach(f => { const v = Math.round(ctx.bessMaxKw * f); if (v > (bkwAs[bkwAs.length - 1] || 0)) bkwAs.push(v); });
     const cellDefs = []; for (const bkw of bkwAs) for (const pv of pvAs) cellDefs.push({ bkw, pv });
     const t0 = Date.now();
