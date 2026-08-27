@@ -1041,7 +1041,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.103.0'; // v15.103.0 (27-08, Fase 4 slice B/C bedrijf): PV×batterij-sweep op de bedrijfslast. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.104.0'; // v15.104.0 (27-08, Fase 4 slice B/C): GROVE bedrijf-sweep (≤4×3) + /api/energiekompas/bedrijf-cel (losse echte cel voor klik-interpolatie). LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2495,60 +2495,90 @@ app.post('/api/energiekompas/kpi', (req, res) => {
 // STANDAARDprofiel + de laadpleinen. Referentie = cel (0 PV, 0 batterij). besparing = ref − kost;
 // rendement = besparing/capex. Zelfde vorm als /api/thuisladen (anchors + grid) → de schil tekent er de
 // heatmap mee. De PRECIEZE run komt later op het werkelijke kwartierprofiel (na mandaat). Additief.
+// ─── EnergieKompas bedrijf — gedeelde context (coarse sweep + losse cel) ──────
+// De sweep berekent nu een GROVE ankergrid (≤4×3). De schil interpoleert tussen
+// de ankers voor een fijnere heatmap; bij klik op een cel roept ze /bedrijf-cel
+// aan voor de ECHTE berekening van die ene combinatie. Zo blijft de sweep snel.
+function _ekBedrijfCtx(b) {
+  const _n = (v) => { const x = Number(v); return (isFinite(x) && x > 0) ? x : 0; };
+  const afname = _n(b.afname_mwh);
+  const kva = _n(b.aansluiting_kva) || 100;
+  const spanning = (b.spanning === 'MS' || b.spanning === 'LS') ? b.spanning : (kva >= 100 ? 'MS' : 'LS');
+  const toegang = _n(b.toegangsvermogen_kw) || Math.round(kva * 0.9);
+  const profielNaam = String(b.profielNaam || 'kantoor');
+  const grd = b.grd || '', postcode = String(b.postcode || '');
+  const pleinen = Array.isArray(b.pleinen) ? b.pleinen : [];
+  const genKva = _n((b.generator || {}).kva);
+  // Σ laadplein-vermogen (kW): betalend = palen × paal_kw; wagenpark = aantal × 11 kW (nominaal AC).
+  let lpKw = 0;
+  pleinen.forEach(p => {
+    if (String(p.type_plein) === 'bezoekers') lpKw += (_n(p.aantal_palen) || 1) * (_n(p.paal_kw) || (p.paaltype === 'DC160' ? 160 : 22));
+    else lpKw += _n(p.aantal) * 11;
+  });
+  const bessMaxKw = Math.max(0, Math.round(genKva + lpKw + toegang));
+  const pvMaxKwp = Math.max(0, Math.round(1.25 * afname));   // PV tot 125% van de jaarafname
+  const PV_KOST = 600, BATT_KWH_KOST = 350, CRATE = 2;   // €/kWp · €/kWh · uur (kWh = kW × C-rate)
+  const baseUi = () => ({
+    grd, postcode, spanning, profielNaam, jaarverbruik_mwh: afname,
+    aansluiting_kva: kva, toegangsvermogen_kw: toegang,
+    laadpleinen: pleinen, jaar: 'rolling12', geen_aansluiting_verhoging: true,
+    pv_curtailment: { actief: false }, bsp: { actief: false },
+    contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
+      staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
+      vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
+  });
+  return { afname, kva, spanning, toegang, profielNaam, grd, postcode, pleinen, genKva, lpKw, bessMaxKw, pvMaxKwp, PV_KOST, BATT_KWH_KOST, CRATE, baseUi };
+}
+// Eén echte dispatch voor combinatie (pv kWp, bkw kW-batterij) → {kost, capex, …}.
+async function _ekBedrijfCel(ctx, pv, bkw) {
+  const ui = ctx.baseUi(); ui.pv_kwp = pv;
+  if (bkw > 0) { ui.batterijId = 'CUSTOM'; ui.batterijCustom = { naam: 'ek-bedrijf', kw: bkw, kwh: bkw * ctx.CRATE, aantal_batterijen: 1, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 }; }
+  else { ui.batterijId = ''; ui.batterijCustom = null; }
+  const r = await _runSimulatorOnce(buildSimInput(_variantUi(ui, 'sturing')));
+  const kost = Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0;
+  const capex = pv * ctx.PV_KOST + bkw * ctx.CRATE * ctx.BATT_KWH_KOST;
+  return { battKw: bkw, battKwh: bkw * ctx.CRATE, pvKwp: pv, kost: Math.round(kost), capex: Math.round(capex) };
+}
+
 app.post('/api/energiekompas/bedrijf-sweep', async (req, res) => {
   try {
     if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw', markt_status: MARKT_STATUS });
-    const b = req.body || {};
-    const _n = (v) => { const x = Number(v); return (isFinite(x) && x > 0) ? x : 0; };
-    const afname = _n(b.afname_mwh);
-    if (!(afname > 0)) return res.status(400).json({ error: 'afname_mwh (jaarverbruik) verplicht' });
-    const kva = _n(b.aansluiting_kva) || 100;
-    const spanning = (b.spanning === 'MS' || b.spanning === 'LS') ? b.spanning : (kva >= 100 ? 'MS' : 'LS');
-    const toegang = _n(b.toegangsvermogen_kw) || Math.round(kva * 0.9);
-    const profielNaam = String(b.profielNaam || 'kantoor');
-    const grd = b.grd || '', postcode = String(b.postcode || '');
-    const pleinen = Array.isArray(b.pleinen) ? b.pleinen : [];
-    const genKva = _n((b.generator || {}).kva);
-    // Σ laadplein-vermogen (kW): betalend = palen × paal_kw; wagenpark = aantal × 11 kW (nominaal AC).
-    let lpKw = 0;
-    pleinen.forEach(p => {
-      if (String(p.type_plein) === 'bezoekers') lpKw += (_n(p.aantal_palen) || 1) * (_n(p.paal_kw) || (p.paaltype === 'DC160' ? 160 : 22));
-      else lpKw += _n(p.aantal) * 11;
-    });
-    const bessMaxKw = Math.max(0, Math.round(genKva + lpKw + toegang));
-    const pvMaxKwp = Math.max(0, Math.round(1.25 * afname));   // PV tot 125% van de jaarafname
-    const pvAs = [0]; for (let i = 1; i <= 4; i++) { const v = Math.round(pvMaxKwp * i / 4); if (v > (pvAs[pvAs.length - 1] || 0)) pvAs.push(v); }
-    const bkwAs = [0]; for (let i = 1; i <= 5; i++) { const v = Math.round(bessMaxKw * i / 5); if (v > (bkwAs[bkwAs.length - 1] || 0)) bkwAs.push(v); }
-    const PV_KOST = 600, BATT_KWH_KOST = 350, CRATE = 2;   // €/kWp · €/kWh · uur (kWh = kW × C-rate)
-    const baseUi = () => ({
-      grd, postcode, spanning, profielNaam, jaarverbruik_mwh: afname,
-      aansluiting_kva: kva, toegangsvermogen_kw: toegang,
-      laadpleinen: pleinen, jaar: 'rolling12', geen_aansluiting_verhoging: true,
-      pv_curtailment: { actief: false }, bsp: { actief: false },
-      contract: { leverancier: (CONTRACT_RAW && CONTRACT_RAW.leverancier) || 'Enwyse', modus: 'passthrough',
-        staffel: CONTRACT_STAFFEL || [], vergroening_eur_per_mwh: 0,
-        vaste_kost_eur_maand: (CONTRACT_RAW && CONTRACT_RAW.vast_eur_per_maand) || 10.00, injectie_toegelaten: true, gsc_eur_mwh: 0, wkk_eur_mwh: 0 },
-    });
+    const ctx = _ekBedrijfCtx(req.body || {});
+    if (!(ctx.afname > 0)) return res.status(400).json({ error: 'afname_mwh (jaarverbruik) verplicht' });
+    // GROVE ankergrid: PV op 0/25/50/100% van max (≤4), batterij op 0/50/100% van max (≤3) = ≤12 cellen.
+    // De schil interpoleert de tussenliggende cellen; klik = echte /bedrijf-cel-berekening.
+    const pvAs = [0]; [0.25, 0.5, 1].forEach(f => { const v = Math.round(ctx.pvMaxKwp * f); if (v > (pvAs[pvAs.length - 1] || 0)) pvAs.push(v); });
+    const bkwAs = [0]; [0.5, 1].forEach(f => { const v = Math.round(ctx.bessMaxKw * f); if (v > (bkwAs[bkwAs.length - 1] || 0)) bkwAs.push(v); });
     const cellDefs = []; for (const bkw of bkwAs) for (const pv of pvAs) cellDefs.push({ bkw, pv });
     const t0 = Date.now();
-    const raw = await _pmap(cellDefs, async ({ bkw, pv }) => {
-      const ui = baseUi(); ui.pv_kwp = pv;
-      if (bkw > 0) { ui.batterijId = 'CUSTOM'; ui.batterijCustom = { naam: 'ek-bedrijf-sweep', kw: bkw, kwh: bkw * CRATE, aantal_batterijen: 1, dod_pct: 90, rte_pct: 92, capex_eur: 0, max_cycli: 8000 }; }
-      else { ui.batterijId = ''; ui.batterijCustom = null; }
-      const r = await _runSimulatorOnce(buildSimInput(_variantUi(ui, 'sturing')));
-      const kost = Number((r.jaarfactuur || r.factuur || {}).subtotaal_excl_btw) || 0;
-      const capex = pv * PV_KOST + bkw * CRATE * BATT_KWH_KOST;
-      return { battKw: bkw, battKwh: bkw * CRATE, pvKwp: pv, kost: Math.round(kost), capex: Math.round(capex) };
-    });
+    const raw = await _pmap(cellDefs, ({ bkw, pv }) => _ekBedrijfCel(ctx, pv, bkw));
     const ref = raw.find(c => c.battKw === 0 && c.pvKwp === 0); const refKost = ref ? ref.kost : null;
     const anchors = raw.map(c => { const besp = (refKost != null) ? (refKost - c.kost) : null;
       const rend = (besp != null && c.capex > 0) ? (besp / c.capex * 100) : null;
       return Object.assign({}, c, { ref_kost: refKost, besparing: (besp != null ? Math.round(besp) : null), rendement: (rend != null ? Math.round(rend * 100) / 100 : null) }); });
-    console.log(`[bedrijf-sweep] ${anchors.length} cellen in ${Date.now() - t0}ms (pvMax ${pvMaxKwp} kWp, bessMax ${bessMaxKw} kW, profiel ${profielNaam})`);
+    console.log(`[bedrijf-sweep] ${anchors.length} cellen in ${Date.now() - t0}ms (pvMax ${ctx.pvMaxKwp} kWp, bessMax ${ctx.bessMaxKw} kW, profiel ${ctx.profielNaam})`);
     return res.json({ ok: true, anchors, grid: { batt_kw_as: bkwAs, pv_kwp_as: pvAs }, referentie_kost: refKost,
-      dimensionering: { pv_max_kwp: pvMaxKwp, bess_max_kw: bessMaxKw, generator_kva: genKva, laadplein_kw: Math.round(lpKw), toegangsvermogen_kw: toegang, profiel: profielNaam },
+      dimensionering: { pv_max_kwp: ctx.pvMaxKwp, bess_max_kw: ctx.bessMaxKw, generator_kva: ctx.genKva, laadplein_kw: Math.round(ctx.lpKw), toegangsvermogen_kw: ctx.toegang, profiel: ctx.profielNaam },
       indicatief: true, _meta: { server_version: SERVER_VERSIE, cellen: anchors.length, elapsed_ms: Date.now() - t0 } });
   } catch (e) { console.error('[bedrijf-sweep] faalde:', e.message); return res.status(500).json({ error: e.message }); }
+});
+
+// Losse cel: één echte dispatch voor een door de klant gekozen (pv_kwp, batt_kw)-combinatie.
+// De schil berekent besparing/rendement zelf met de referentiekost uit de sweep.
+app.post('/api/energiekompas/bedrijf-cel', async (req, res) => {
+  try {
+    if (!MARKT) return res.status(503).json({ error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw', markt_status: MARKT_STATUS });
+    const b = req.body || {};
+    const ctx = _ekBedrijfCtx(b);
+    if (!(ctx.afname > 0)) return res.status(400).json({ error: 'afname_mwh (jaarverbruik) verplicht' });
+    const _n0 = (v) => { const x = Number(v); return (isFinite(x) && x > 0) ? x : 0; };
+    const pv = Math.round(_n0(b.pv_kwp));
+    const bkw = Math.round(_n0(b.batt_kw));
+    const t0 = Date.now();
+    const cel = await _ekBedrijfCel(ctx, pv, bkw);
+    console.log(`[bedrijf-cel] pv ${pv} kWp · batt ${bkw} kW → kost ${cel.kost} in ${Date.now() - t0}ms`);
+    return res.json({ ok: true, cel, _meta: { server_version: SERVER_VERSIE, elapsed_ms: Date.now() - t0 } });
+  } catch (e) { console.error('[bedrijf-cel] faalde:', e.message); return res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/postcode-grd', (req, res) => {
