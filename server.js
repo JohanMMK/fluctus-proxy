@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.100.0 (2026-08-27, Fase 3 — FLUVIUS-SYNC + LOSSE LIJST): nieuw POST /api/mandaat/sync
+//                (MANAGER) — de skill schrijft de live Fluvius-status in bulk terug; EAN's zonder overeenkomstig
+//                project komen in de LOSSE lijst (`mandaat_los/los.json`) die ook in GET /api/mandaat/wachtrij +
+//                de Mandaten-app verschijnt (project_id 'LOS'). Additief + geguard.
 // Versie:        v15.99.0 (2026-08-27, Fase 3 — ADRES-BEVESTIGING): nieuw POST /api/mandaat/bevestig-adres —
 //                wie het mandaat startte (klant/adviseur, projecttoegang) bevestigt/weigert een adres-mismatch;
 //                akkoord → EAN terug in de wachtrij met `adres_bevestigd:true` (skill dient in → mail buiten),
@@ -1024,7 +1028,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.99.0'; // v15.99.0 (27-08, Fase 3): adres-bevestiging bij mismatch. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.100.0'; // v15.100.0 (27-08, Fase 3): Fluvius-sync + losse lijst. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -3690,6 +3694,22 @@ app.get('/api/mandaat/wachtrij', async (req, res) => {
           actief_op: en.actief_op || null, geleverd_op: en.geleverd_op || null });
       }
     }
+    // v15.100 (Fase 3): LOSSE Fluvius-mandaten (via sync ontdekt, geen overeenkomstig project) meenemen.
+    try {
+      const los = JSON.parse(await _factuurDownload('mandaat_los/los.json'));
+      for (const en of (los && los.eans) || []) {
+        if (gevraagd.indexOf(en.status) < 0) continue;
+        out.push({ project_id: 'LOS', project_naam: 'Fluvius — los (geen project)', los: true, klant: null,
+          factuuradres: null, meter_type: en.meter_type || null,
+          ean: en.ean, richting: en.richting || null, status: en.status,
+          referentienummer: en.referentienummer || null, fluvius_adres: en.fluvius_adres || null,
+          adres_match: en.adres_match, adres_bevestigd: !!en.adres_bevestigd,
+          bevestigd_door: en.bevestigd_door || null, bevestigd_op: en.bevestigd_op || null,
+          titularis_mail_masked: en.titularis_mail_masked || null, opmerking: en.opmerking || null,
+          in_wachtrij_sinds: en.in_wachtrij_sinds || null, aangevraagd_op: en.aangevraagd_op || null,
+          actief_op: en.actief_op || null, geleverd_op: en.geleverd_op || null });
+      }
+    } catch (e) { /* geen losse lijst — ok */ }
     out.sort((a, b) => String(a.in_wachtrij_sinds || '').localeCompare(String(b.in_wachtrij_sinds || '')));
     return res.json({ ok: true, statussen: gevraagd, aantal: out.length, items: out });
   } catch (e) { console.error('[mandaat/wachtrij] faalde:', e.message); return res.status(500).json({ error: e.message }); }
@@ -3768,6 +3788,81 @@ app.post('/api/mandaat/bevestig-adres', async (req, res) => {
     console.log(`[mandaat/bevestig-adres] ${id} ${ean} → ${b.akkoord ? 'BEVESTIGD (terug in wachtrij)' : 'GEWEIGERD (geannuleerd)'} door ${u.role} ${u.naam || u.id}`);
     return res.json({ ok: true, project_id: id, ean, akkoord: !!b.akkoord, eanStatus: ent, mandaat: rec.mandaat });
   } catch (e) { console.error('[mandaat/bevestig-adres] faalde:', e.message); return res.status(500).json({ error: e.message }); }
+});
+
+// POST /api/mandaat/sync  { items:[{ ean, status?, referentienummer?, titularis_mail_masked?, fluvius_adres?, adres_match?, richting?, meter_type? }] }
+// MANAGER-ONLY. De Fluvius-skill (statuscheck) schrijft hiermee de LIVE Fluvius-status in bulk terug:
+//  - EAN die al bij een project in `rec.mandaat` staat → dat projectrecord bijwerken.
+//  - EAN die nergens in een project staat (bestaand/lopend mandaat bij Fluvius, geen app-project) → in de
+//    LOSSE lijst (`mandaat_los/los.json`), zodat hij tóch in de Mandaten-app verschijnt.
+app.post('/api/mandaat/sync', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const items = Array.isArray((req.body || {}).items) ? req.body.items : [];
+    const genorm = items.map(x => ({
+      ean: String((x && x.ean) || '').replace(/\s/g, ''),
+      status: (x && x.status && _MANDAAT_STATUSSEN.indexOf(String(x.status)) >= 0) ? String(x.status) : 'aangevraagd',
+      referentienummer: (x && x.referentienummer != null) ? String(x.referentienummer).slice(0, 120) : null,
+      titularis_mail_masked: (x && x.titularis_mail_masked != null) ? String(x.titularis_mail_masked).slice(0, 160) : null,
+      fluvius_adres: (x && x.fluvius_adres != null) ? String(x.fluvius_adres).slice(0, 300) : null,
+      adres_match: (x && x.adres_match != null) ? !!x.adres_match : null,
+      richting: (x && x.richting) || null, meter_type: (x && x.meter_type) || null,
+    })).filter(x => /^\d{18}$/.test(x.ean));
+    if (!genorm.length) return res.status(400).json({ error: 'geen geldige items (elk met een 18-cijferig EAN)' });
+    // Alle projecten laden + EAN-index (ean → projectrecord + entry)
+    let lijst = []; try { lijst = await _bucketList('kamino/'); } catch (e) { lijst = []; }
+    const jsons = (Array.isArray(lijst) ? lijst : []).filter(o => o.name && /\.json$/i.test(o.name));
+    const paren = await Promise.all(jsons.map(o =>
+      _factuurDownload(`kamino/${o.name}`).then(t => { try { return { veilig: o.name.replace(/\.json$/i, ''), rec: JSON.parse(t) }; } catch (e) { return null; } }).catch(() => null)));
+    const index = {};
+    for (const p of paren) {
+      if (!p || !p.rec || !p.rec.mandaat || !Array.isArray(p.rec.mandaat.eans)) continue;
+      for (const en of p.rec.mandaat.eans) index[en.ean] = { veilig: p.veilig, rec: p.rec, en };
+    }
+    const nu = new Date().toISOString();
+    function _patchEntry(en, it) {
+      if (it.referentienummer != null) en.referentienummer = it.referentienummer;
+      if (it.titularis_mail_masked != null) en.titularis_mail_masked = it.titularis_mail_masked;
+      if (it.fluvius_adres != null) en.fluvius_adres = it.fluvius_adres;
+      if (it.adres_match != null) en.adres_match = it.adres_match;
+      if (it.richting && !en.richting) en.richting = it.richting;
+      en.status = it.status;
+      if (it.status === 'aangevraagd' && !en.aangevraagd_op) en.aangevraagd_op = nu;
+      if (it.status === 'actief' && !en.actief_op) en.actief_op = nu;
+      if (it.status === 'geleverd' && !en.geleverd_op) en.geleverd_op = nu;
+    }
+    const teBewaren = {}; const los = [];
+    for (const it of genorm) {
+      const hit = index[it.ean];
+      if (hit) { _patchEntry(hit.en, it); teBewaren[hit.veilig] = hit.rec; }
+      else los.push(it);
+    }
+    let bijgewerkt = 0;
+    for (const veilig of Object.keys(teBewaren)) {
+      const rec = teBewaren[veilig];
+      rec.mandaat.status = _mandaatOverallStatus(rec.mandaat.eans);
+      rec.mandaat.bijgewerkt = nu; rec.bijgewerkt = nu;
+      await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+      bijgewerkt++;
+    }
+    let losToegevoegd = 0;
+    if (los.length) {
+      let losRec = { eans: [] };
+      try { losRec = JSON.parse(await _factuurDownload('mandaat_los/los.json')); } catch (e) {}
+      losRec.eans = losRec.eans || [];
+      for (const it of los) {
+        let en = losRec.eans.find(x => x.ean === it.ean);
+        if (!en) { en = { ean: it.ean, in_wachtrij_sinds: nu, adres_bevestigd: false, bevestigd_door: null, bevestigd_op: null, opmerking: null, aangevraagd_op: null, actief_op: null, geleverd_op: null }; losRec.eans.push(en); losToegevoegd++; }
+        _patchEntry(en, it);
+        if (it.meter_type) en.meter_type = it.meter_type;
+      }
+      losRec.bijgewerkt = nu;
+      await _factuurUpload(Buffer.from(JSON.stringify(losRec), 'utf8').toString('base64'), 'application/json', 'mandaat_los/los.json');
+    }
+    try { _kaminoLijstCache.ts = 0; } catch (e) {}
+    console.log(`[mandaat/sync] ${genorm.length} items → ${bijgewerkt} project(en) bijgewerkt, ${losToegevoegd} los toegevoegd (door ${u.naam || u.id})`);
+    return res.json({ ok: true, ontvangen: genorm.length, projecten_bijgewerkt: bijgewerkt, los_toegevoegd: losToegevoegd });
+  } catch (e) { console.error('[mandaat/sync] faalde:', e.message); return res.status(500).json({ error: e.message }); }
 });
 
 // ─── v15.46: KAMINO studie 1 — onderhandelingsmarge (echte run, drift-vrij) ──────
