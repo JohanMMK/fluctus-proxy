@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.105.0 (2026-08-27, Fase 4 slice B/C): bedrijf-sweep PV-as fijner — 0/25/50/75/100% (≤5×3=15
+//                cellen). Het 75%-PV-anker halveert het brede interieur-gat 50→100%, waar de bilineaire interpolatie
+//                in de schil het meest afweek (~13% → ~3-5%). Batterij-as en schil ongewijzigd.
+// Versie:        v15.104.0 (2026-08-27, Fase 4 slice B/C): GROVE bedrijf-sweep (≤4×3) + nieuw PUBLIEK
+//                POST /api/energiekompas/bedrijf-cel — één echte dispatch voor een gekozen (pv_kwp, batt_kw). De
+//                schil interpoleert tussen de sweep-ankers en roept bedrijf-cel aan bij klik voor de EXACTE cel.
 // Versie:        v15.103.0 (2026-08-27, Fase 4 slice B/C BEDRIJF — PV×BATTERIJ-SWEEP): nieuw PUBLIEK
 //                POST /api/energiekompas/bedrijf-sweep — echte laadplein-engine (buildSimInput → _runSimulatorOnce)
 //                over een PV×batterij-rooster op de bedrijfslast + laadpleinen. Assen (Johan): PV 0→1,25×afname (kWp);
