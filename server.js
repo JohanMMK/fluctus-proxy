@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.101.0 (2026-08-27, Fase 3 — KOPPEL LOSSE BIJ AANVRAAG): POST /api/mandaat/aanvraag checkt
+//                nu eerst of de EAN al in de LOSSE lijst staat (= onze Fluvius-kennis na sync); zo ja → die
+//                bestaande mandaat KOPPELEN aan het project (status/referentienr behouden) i.p.v. opnieuw aan te
+//                vragen, en uit de losse lijst halen. Antwoord bevat {nieuw, gekoppeld}. Additief + geguard.
 // Versie:        v15.100.0 (2026-08-27, Fase 3 — FLUVIUS-SYNC + LOSSE LIJST): nieuw POST /api/mandaat/sync
 //                (MANAGER) — de skill schrijft de live Fluvius-status in bulk terug; EAN's zonder overeenkomstig
 //                project komen in de LOSSE lijst (`mandaat_los/los.json`) die ook in GET /api/mandaat/wachtrij +
@@ -1028,7 +1032,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.100.0'; // v15.100.0 (27-08, Fase 3): Fluvius-sync + losse lijst. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.101.0'; // v15.101.0 (27-08, Fase 3): koppel losse mandaat bij aanvraag. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -3633,21 +3637,42 @@ app.post('/api/mandaat/aanvraag', async (req, res) => {
     else if (!m.factuuradres && rec.input && rec.input.adres) m.factuuradres = String(rec.input.adres).slice(0, 300);
     m.aangevraagd_door = m.aangevraagd_door || { id: u.id, naam: u.naam, email: u.email, rol: u.role };
     m.eans = m.eans || [];
+    // v15.101 (Johan 27-08): vóór een NIEUWE aanvraag checken of we die EAN al kennen in de LOSSE lijst
+    // (= onze Fluvius-kennis na sync). Zo ja → die bestaande mandaat KOPPELEN aan dit project (status/
+    // referentienr behouden) i.p.v. opnieuw aan te vragen, en uit de losse lijst halen.
+    let losRec = null; let losGewijzigd = false;
+    try { losRec = JSON.parse(await _factuurDownload('mandaat_los/los.json')); } catch (e) { losRec = null; }
+    let gekoppeld = 0, nieuw = 0;
     for (const it of items) {
       const best = m.eans.find(x => x.ean === it.ean);
       if (best) { if (it.richting && !best.richting) best.richting = it.richting; continue; }   // niet dupliceren
-      m.eans.push({ ean: it.ean, richting: it.richting || null, status: 'wachtrij',
-        referentienummer: null, titularis_mail_masked: null, fluvius_adres: null, adres_match: null,
-        adres_bevestigd: false, bevestigd_door: null, bevestigd_op: null, opmerking: null,
-        in_wachtrij_sinds: new Date().toISOString(), aangevraagd_op: null, actief_op: null, geleverd_op: null });
+      let losHit = null;
+      if (losRec && Array.isArray(losRec.eans)) {
+        const idx = losRec.eans.findIndex(x => x.ean === it.ean);
+        if (idx >= 0) { losHit = losRec.eans[idx]; losRec.eans.splice(idx, 1); losGewijzigd = true; }
+      }
+      if (losHit) {   // bestaande (bv. actieve) mandaat koppelen — geen her-aanvraag, status blijft
+        m.eans.push(Object.assign({}, losHit, { richting: losHit.richting || it.richting || null }));
+        gekoppeld++;
+      } else {
+        m.eans.push({ ean: it.ean, richting: it.richting || null, status: 'wachtrij',
+          referentienummer: null, titularis_mail_masked: null, fluvius_adres: null, adres_match: null,
+          adres_bevestigd: false, bevestigd_door: null, bevestigd_op: null, opmerking: null,
+          in_wachtrij_sinds: new Date().toISOString(), aangevraagd_op: null, actief_op: null, geleverd_op: null });
+        nieuw++;
+      }
     }
     m.status = _mandaatOverallStatus(m.eans);
     m.bijgewerkt = new Date().toISOString();
     rec.mandaat = m; rec.bijgewerkt = new Date().toISOString();
     await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    if (losGewijzigd) {   // gekoppelde EAN's uit de losse lijst verwijderen
+      try { await _factuurUpload(Buffer.from(JSON.stringify(losRec), 'utf8').toString('base64'), 'application/json', 'mandaat_los/los.json'); }
+      catch (e) { console.warn('[mandaat/aanvraag] losse lijst bijwerken faalde (niet-blokkerend):', e.message); }
+    }
     try { _kaminoLijstCache.ts = 0; } catch (e) {}
-    console.log(`[mandaat/aanvraag] ${id}: ${items.length} EAN(s) in wachtrij door ${u.role} ${u.naam || u.id}`);
-    return res.json({ ok: true, project_id: id, mandaat: m });
+    console.log(`[mandaat/aanvraag] ${id}: ${nieuw} nieuw in wachtrij + ${gekoppeld} gekoppeld uit losse lijst (door ${u.role} ${u.naam || u.id})`);
+    return res.json({ ok: true, project_id: id, nieuw, gekoppeld, mandaat: m });
   } catch (e) { console.error('[mandaat/aanvraag] faalde:', e.message); return res.status(500).json({ error: e.message }); }
 });
 
