@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.109.0 (2026-08-28, Fase 4 — COHERENTIE onderhandel): de contract-heatmaps in /api/kamino/onderhandel
+//                schalen nu op het GEPROJECTEERDE JAARvolume (geprojecteerd_mwh, fallback volumeMwh×365/dagen) i.p.v.
+//                het factuur-maandvolume — anders stond de afname-heatmap ~12× te laag bij een maandfactuur. Zo geeft
+//                de EnergieKompas-nota, gevoed met de factuur-baseCase, identieke cijfers als Kamino tegel 1.
 // Versie:        v15.108.0 (2026-08-27, Fase 4 — GENERATOR twee-bakjes-netting): referentie bij een generator =
 //                gebouw-elektriciteit ZONDER de generator-last (draait vandaag op diesel) + de vermeden dieselkost;
 //                de sweep-cellen draaien mét de generator-last (batterij dekt de shots) → besparing = ref − cel nettot
@@ -1059,7 +1063,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.108.0'; // v15.108.0 (27-08, Fase 4): GENERATOR twee-bakjes-netting — referentie = gebouw-elektriciteit zónder generator-last + vermeden diesel; batterij-as start op de vervang-batterij P_gen (§3.2). LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.109.0'; // v15.109.0 (28-08, Fase 4): onderhandel contract-heatmaps schalen op geprojecteerd JAARvolume (niet factuur-maandvolume). Coherentie EnergieKompas ↔ Kamino tegel 1. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -4292,7 +4296,10 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
     out.geen_factuur = _geenFactuur; if (_geenFactuur) out.referentie_eur_mwh = Math.round(_refEurMwh);   // v15.70
     // v15.106: OPT-IN contract-heatmaps (huidige situatie) — enkel als de caller ze vraagt (b.heatmaps),
     // zodat de Kamino-tegel-1-respons licht blijft. De EnergieKompas-onderhandelingsnota zet b.heatmaps=true.
-    if (b.heatmaps) { try { const ch = _contractHeatmaps(MARKT, profielNaam, volumeMwh); if (ch) out.heatmaps = ch; }
+    // v15.109: heatmaps schalen op het GEPROJECTEERDE JAARvolume (niet het factuur-maandvolume) — anders staat de
+    // afname-heatmap ~12× te laag bij een maandfactuur. geprojecteerd_mwh valt terug op volumeMwh × (365/dagen).
+    if (b.heatmaps) { try { const hmVol = (out.geprojecteerd_mwh > 0) ? out.geprojecteerd_mwh : (volumeMwh * (365 / (dagen || 365)));
+      const ch = _contractHeatmaps(MARKT, profielNaam, hmVol); if (ch) out.heatmaps = ch; }
       catch (e) { console.warn('[kamino/onderhandel] contract-heatmaps faalde (niet-blokkerend):', e.message); } }
     console.log(`[kamino/onderhandel] marge/jaar=${out.marge_jaar} (energie ${out.energie_nu}→${out.energie_dyn} · ${dagen}d · profiel=${profielNaam} · vergroening=${ui.contract.vergroening_eur_per_mwh} · geproj=${out.geprojecteerd_mwh} · schijf=${out.schijf})`);
     return res.json(out);
