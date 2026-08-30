@@ -1,7 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.110.0 (2026-08-30, Fase 4 — EnergieKompas LEAD-CAPTURE): nieuwe publieke endpoints /api/lead
+// Versie:        v15.111.0 (2026-08-30, Fase 4 — EnergieKompas €/km ALL-IN): /api/energiekompas/kpi rekent de
+//                kilometerkost nu ALL-IN achter de meter = energiecomponent (goedkoopste ~30% spot) + netkosten/
+//                heffingen (NET_HEFFING 90 €/MWh), i.p.v. enkel de commodity (die gaf ~0,006 €/km). De energie-
+//                component blijft apart terug (kilometerkost_energie_eur_per_km); markt: laadkost_allin_eur_mwh +
+//                net_heffing_eur_mwh toegevoegd. ── v15.110.0 (2026-08-30, Fase 4 — EnergieKompas LEAD-CAPTURE): nieuwe publieke endpoints /api/lead
 //                (bewaart de onderhandelingsnota-data onder een token, mailt de klant een persoonlijke nota-link via
 //                Brevo + notificeert de lead-mailbox), /api/lead-interesse (verrijkt de lead met de diepte-analyse-
 //                interesses → "WARME LEAD"-mail) en GET /api/lead/:token (nota-pagina haalt D op via ?lead=<token>).
@@ -1068,7 +1072,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.110.0'; // v15.110.0 (30-08, Fase 4): EnergieKompas lead-capture — /api/lead (+ -interesse, GET /:token): bewaart nota-data, mailt klant de nota-link + notificeert lead-mailbox (Brevo). LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.111.0'; // v15.111.0 (30-08, Fase 4): EnergieKompas kpi €/km ALL-IN achter de meter (energiecomponent + NET_HEFFING); energiecomponent apart. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -2527,19 +2531,26 @@ app.post('/api/energiekompas/kpi', (req, res) => {
     const gemKw = afname * 1000 / 8760;
     const restPct = toegangKw > 0 ? Math.max(0, Math.min(95, Math.round((1 - gemKw / toegangKw) * 100))) : null;
     const laadMwh = wagens * km * KWH_PER_KM / 1000;
-    const kmKost = (dynLaad / 1000) * KWH_PER_KM;   // €/km bij dynamisch laden op de goedkoopste uren
+    // €/km bij dynamisch laden op de goedkoopste uren. ALL-IN achter de meter = energiecomponent (dynLaad)
+    // + netkosten/heffingen (NET_HEFFING). De energiecomponent apart voor transparantie.
+    const laadAllIn = dynLaad + NET_HEFFING;                       // €/MWh all-in aan de laadpaal
+    const kmKost = (laadAllIn / 1000) * KWH_PER_KM;                // €/km all-in
+    const kmKostEnergie = (dynLaad / 1000) * KWH_PER_KM;          // €/km enkel commodity
     return res.json({
       ok: true,
       kpi: {
         kost_afname_eur: Math.round(kostAfname),
         waarde_injectie_eur: Math.round(waardeInjectie),
         restcapaciteit_pct: restPct,
-        kilometerkost_eur_per_km: Math.round(kmKost * 1000) / 1000,
+        kilometerkost_eur_per_km: Math.round(kmKost * 1000) / 1000,          // all-in achter de meter
+        kilometerkost_energie_eur_per_km: Math.round(kmKostEnergie * 1000) / 1000,   // enkel energiecomponent
         laadvraag_mwh: Math.round(laadMwh * 10) / 10,
       },
       markt: {
         avg_spot_eur_mwh: Math.round(avgSpot * 10) / 10,
-        dyn_laadkost_eur_mwh: Math.round(dynLaad * 10) / 10,
+        dyn_laadkost_eur_mwh: Math.round(dynLaad * 10) / 10,          // enkel commodity (goedkoopste ~30%)
+        laadkost_allin_eur_mwh: Math.round((dynLaad + NET_HEFFING) * 10) / 10,   // all-in achter de meter
+        net_heffing_eur_mwh: NET_HEFFING,
         injectiewaarde_eur_mwh: Math.round(injWaarde * 10) / 10,
         van: MARKT.van, tot: MARKT.tot,
       },
