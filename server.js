@@ -1,7 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.111.0 (2026-08-30, Fase 4 — EnergieKompas €/km ALL-IN): /api/energiekompas/kpi rekent de
+// Versie:        v15.112.0 (2026-08-30, Fase 4 — SCHIL-LEAD → KAMINO-PROJECT): /api/lead seedt (service-role, best-
+//                effort, enkel bij factuur-baseCase) een studieklaar Kamino-project onder kamino/<FLX-id>.json met de
+//                baseCase + profiel + PV + klant + partner + samenvatting (bron:'energiekompas-schil'). Zo wordt elke
+//                warme lead een voorgevuld project waarop de volledige studie (nominatie-sim → laadplein-rapport) kan
+//                draaien; project_id komt in het lead-antwoord én de lead-notificatiemail. ── v15.111.0 (2026-08-30, Fase 4 — EnergieKompas €/km ALL-IN): /api/energiekompas/kpi rekent de
 //                kilometerkost nu ALL-IN achter de meter = energiecomponent (goedkoopste ~30% spot) + netkosten/
 //                heffingen (NET_HEFFING 90 €/MWh), i.p.v. enkel de commodity (die gaf ~0,006 €/km). De energie-
 //                component blijft apart terug (kilometerkost_energie_eur_per_km); markt: laadkost_allin_eur_mwh +
@@ -1072,7 +1076,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.111.0'; // v15.111.0 (30-08, Fase 4): EnergieKompas kpi €/km ALL-IN achter de meter (energiecomponent + NET_HEFFING); energiecomponent apart. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.112.0'; // v15.112.0 (30-08, Fase 4): schil-lead → studieklaar Kamino-project (_seedKaminoProject: seedt kamino/<FLX-id>.json met baseCase+profiel+pv+klant+partner). /api/lead geeft project_id terug. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7178,6 +7182,30 @@ async function _brevoMail(to, subject, textContent, htmlContent, senderNaam) {
 }
 function _eurTxt(n) { const v = Math.round(+n || 0); try { return '€ ' + v.toLocaleString('nl-BE'); } catch (e) { return '€ ' + v; } }
 function esc2(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+// v15.112 (Fase 4): schil-lead → studieklaar Kamino-project. Seedt (service-role, best-effort) een projectrecord
+// onder kamino/<FLX-id>.json met de factuur-baseCase + profiel + PV + klant + partner, zodat een lead met factuur
+// meteen als voorgevuld project in Kamino verschijnt en de volledige studie (nominatie-sim → rapport) erop kan draaien.
+async function _seedKaminoProject(token, lead, km) {
+  if (!SUPABASE_OK || !km || !km.baseCase) return null;
+  try {
+    const id = _projectId('ek-lead-' + token);
+    const veilig = id.replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+    const nu = new Date().toISOString();
+    const rec = {
+      id, naam: lead.naam || 'EnergieKompas-lead',
+      klant: { naam: lead.naam || '', email: lead.mail, tel: lead.tel || '' },
+      adviseur: null, partner: lead.partner || null, bron: 'energiekompas-schil',
+      baseCase: km.baseCase || null, input: km.input || null,
+      profiel: km.profielNaam || null, pv: km.pv || null,
+      scenarios: { standaard: { scenario: 'standaard', baseCase: km.baseCase || null, input: km.input || null, bijgewerkt: nu, door: 'EnergieKompas' } },
+      studies: {}, lead_token: token, samenvatting: lead.samenvatting || null,
+      aangemaakt: nu, bijgewerkt: nu, door: 'EnergieKompas',
+    };
+    await _factuurUpload(Buffer.from(JSON.stringify(rec), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`);
+    try { _kaminoLijstCache.ts = 0; } catch (e) {}   // dropdown-cache verversen zodat het project meteen verschijnt
+    return id;
+  } catch (e) { console.warn('[lead] kamino-seed faalde (niet-blokkerend):', e.message); return null; }
+}
 app.post('/api/lead', async (req, res) => {
   try {
     const b = req.body || {};
@@ -7191,6 +7219,9 @@ app.post('/api/lead', async (req, res) => {
         energiekost_nu_mwh: +s.energiekost_nu_mwh || 0, energiekost_dyn_mwh: +s.energiekost_dyn_mwh || 0 },
       interesses: [], ts: Date.now() };
     _leadOpslaan(token, rec);
+    // Schil → studieklaar Kamino-project (best-effort, enkel bij een factuur-baseCase).
+    let kaminoProjectId = null;
+    try { kaminoProjectId = await _seedKaminoProject(token, rec, b.kamino); if (kaminoProjectId) { rec.kamino_project_id = kaminoProjectId; _leadOpslaan(token, rec); } } catch (e) {}
     const thema = rec.partner ? ('&thema=' + encodeURIComponent(rec.partner)) : '';
     const notaUrl = `${WEB_BASE}/apps/energiekompas-nota.html?lead=${token}${thema}`;
     // 1) Klant-mail met de persoonlijke nota-link
@@ -7208,9 +7239,9 @@ app.post('/api/lead', async (req, res) => {
       <p>Met vriendelijke groeten,<br>EnergieKompas</p></div>`;
     const kSent = await _brevoMail(mail, 'Uw persoonlijke onderhandelingsnota', kTxt, kHtml);
     // 2) Lead-notificatie naar Fluctus/call-partner
-    const lTxt = `NIEUWE LEAD via EnergieKompas${rec.partner ? ' (' + rec.partner + ')' : ''}\n\nNaam : ${naam || '—'}\nMail : ${mail}\nTel  : ${tel || '—'}\nHerkomst: ${rec.herkomst || 'direct'}\n\nAfname-marge : ${_eurTxt(rec.samenvatting.afname_marge_jaar)}/j  (nu ${Math.round(rec.samenvatting.energiekost_nu_mwh)} → dyn ${Math.round(rec.samenvatting.energiekost_dyn_mwh)} €/MWh)\nInjectie-marge: ${_eurTxt(rec.samenvatting.injectie_marge_jaar)}/j\n\nNota: ${notaUrl}`;
+    const lTxt = `NIEUWE LEAD via EnergieKompas${rec.partner ? ' (' + rec.partner + ')' : ''}\n\nNaam : ${naam || '—'}\nMail : ${mail}\nTel  : ${tel || '—'}\nHerkomst: ${rec.herkomst || 'direct'}\n\nAfname-marge : ${_eurTxt(rec.samenvatting.afname_marge_jaar)}/j  (nu ${Math.round(rec.samenvatting.energiekost_nu_mwh)} → dyn ${Math.round(rec.samenvatting.energiekost_dyn_mwh)} €/MWh)\nInjectie-marge: ${_eurTxt(rec.samenvatting.injectie_marge_jaar)}/j\n\nNota: ${notaUrl}${kaminoProjectId ? ('\n\nStudieklaar Kamino-project: ' + kaminoProjectId + ' (open in Kamino → volledige studie + rapport)') : ''}`;
     await _brevoMail(LEAD_MAIL_TO, `Lead EnergieKompas — ${naam || mail}`, lTxt, null, 'Fluctus EnergieKompas');
-    res.json({ ok: true, token, nota_url: notaUrl, mail_klant: kSent.sent, mail_reden: kSent.sent ? undefined : kSent.reden });
+    res.json({ ok: true, token, nota_url: notaUrl, project_id: kaminoProjectId, mail_klant: kSent.sent, mail_reden: kSent.sent ? undefined : kSent.reden });
   } catch (e) { console.error('[lead]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 app.post('/api/lead-interesse', async (req, res) => {
