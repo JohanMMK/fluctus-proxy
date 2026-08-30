@@ -1,7 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.109.0 (2026-08-28, Fase 4 — COHERENTIE onderhandel): de contract-heatmaps in /api/kamino/onderhandel
+// Versie:        v15.110.0 (2026-08-30, Fase 4 — EnergieKompas LEAD-CAPTURE): nieuwe publieke endpoints /api/lead
+//                (bewaart de onderhandelingsnota-data onder een token, mailt de klant een persoonlijke nota-link via
+//                Brevo + notificeert de lead-mailbox), /api/lead-interesse (verrijkt de lead met de diepte-analyse-
+//                interesses → "WARME LEAD"-mail) en GET /api/lead/:token (nota-pagina haalt D op via ?lead=<token>).
+//                ENV: LEAD_MAIL_TO (default = AUDIT_MAIL_TO), WEB_BASE (default https://fluctus.net). Geen wijziging
+//                aan bestaande endpoints. ── v15.109.0 (2026-08-28, Fase 4 — COHERENTIE onderhandel): de contract-heatmaps in /api/kamino/onderhandel
 //                schalen nu op het GEPROJECTEERDE JAARvolume (geprojecteerd_mwh, fallback volumeMwh×365/dagen) i.p.v.
 //                het factuur-maandvolume — anders stond de afname-heatmap ~12× te laag bij een maandfactuur. Zo geeft
 //                de EnergieKompas-nota, gevoed met de factuur-baseCase, identieke cijfers als Kamino tegel 1.
@@ -1063,7 +1068,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.109.0'; // v15.109.0 (28-08, Fase 4): onderhandel contract-heatmaps schalen op geprojecteerd JAARvolume (niet factuur-maandvolume). Coherentie EnergieKompas ↔ Kamino tegel 1. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.110.0'; // v15.110.0 (30-08, Fase 4): EnergieKompas lead-capture — /api/lead (+ -interesse, GET /:token): bewaart nota-data, mailt klant de nota-link + notificeert lead-mailbox (Brevo). LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7120,6 +7125,102 @@ app.all('/claude-explain-refresh', async (req, res) => {
     console.error('[claude-explain-refresh]', e.message);
     res.status(500).json({ error: e.message });
   }
+});
+
+// ─── v15.110 (Fase 4 — EnergieKompas LEAD-CAPTURE / onderhandelingsnota per mail) ────────────
+// PUBLIEK. De schil bouwt de onderhandelingsnota-data (D) client-side en POST'et ze met de mail +
+// tel van de klant naar /api/lead. Wij (1) bewaren D onder een token → de nota-pagina haalt ze op
+// via /api/lead/:token (?lead=<token>), (2) mailen de klant een persoonlijke link naar zijn nota
+// (Brevo), (3) notificeren de lead-mailbox (Fluctus/call-partner). Zo voelt "waarom mijn mail?"
+// logisch: hij krijgt de nota in zijn mailbox, en een warme lead is bereikbaar. /api/lead-interesse
+// verrijkt dezelfde lead nadien met de diepte-analyse-interesses ("wil u weten hoe?").
+const LEAD_MAIL_TO = process.env.LEAD_MAIL_TO || AUDIT_MAIL_TO;         // Fluctus/call-partner-mailbox
+const WEB_BASE     = (process.env.WEB_BASE || 'https://fluctus.net').replace(/\/+$/, '');
+const _LEADS = new Map();                                              // token → { data, mail, tel, naam, ts, interesses }
+const LEAD_TTL_MS = 1000 * 60 * 60 * 24 * 90;                         // 90 dagen
+const _leadDir = path.join(__dirname, 'data', 'leads');
+function _leadToken() { return (Date.now().toString(36) + Math.random().toString(36).slice(2, 10)).toLowerCase(); }
+function _leadOpslaan(token, rec) {
+  _LEADS.set(token, rec);
+  try { fs.mkdirSync(_leadDir, { recursive: true }); fs.writeFileSync(path.join(_leadDir, token + '.json'), JSON.stringify(rec)); } catch (e) { /* best-effort */ }
+}
+function _leadLezen(token) {
+  if (!/^[a-z0-9]{1,40}$/.test(String(token || ''))) return null;
+  let rec = _LEADS.get(token);
+  if (!rec) { try { rec = JSON.parse(fs.readFileSync(path.join(_leadDir, token + '.json'), 'utf8')); _LEADS.set(token, rec); } catch (e) { rec = null; } }
+  if (rec && (Date.now() - (rec.ts || 0)) > LEAD_TTL_MS) return null;
+  return rec || null;
+}
+function _validMail(m) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(m || '')); }
+async function _brevoMail(to, subject, textContent, htmlContent, senderNaam) {
+  if (!BREVO_API_KEY) return { sent: false, reden: 'BREVO_API_KEY niet gezet' };
+  try {
+    const body = { sender: { name: senderNaam || 'Fluctus EnergieKompas', email: BREVO_SENDER },
+      to: (Array.isArray(to) ? to : [to]).map(e => (typeof e === 'string' ? { email: e } : e)), subject, textContent };
+    if (htmlContent) body.htmlContent = htmlContent;
+    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST', headers: { 'api-key': BREVO_API_KEY, 'Content-Type': 'application/json', 'accept': 'application/json' },
+      body: JSON.stringify(body) });
+    if (!r.ok) { const t = await r.text(); return { sent: false, reden: `Brevo HTTP ${r.status} ${t.slice(0, 160)}` }; }
+    return { sent: true };
+  } catch (e) { return { sent: false, reden: e.message }; }
+}
+function _eurTxt(n) { const v = Math.round(+n || 0); try { return '€ ' + v.toLocaleString('nl-BE'); } catch (e) { return '€ ' + v; } }
+function esc2(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+app.post('/api/lead', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const mail = String(b.mail || '').trim(), tel = String(b.tel || '').trim(), naam = String(b.naam || '').trim().slice(0, 120);
+    if (!_validMail(mail)) return res.status(400).json({ ok: false, error: 'Ongeldig e-mailadres.' });
+    if (!b.data || typeof b.data !== 'object') return res.status(400).json({ ok: false, error: 'Geen nota-data.' });
+    const token = _leadToken();
+    const s = b.samenvatting || {};
+    const rec = { data: b.data, mail, tel, naam, partner: String(b.partner || '').slice(0, 40), herkomst: String(b.herkomst || '').slice(0, 40),
+      samenvatting: { afname_marge_jaar: +s.afname_marge_jaar || 0, injectie_marge_jaar: +s.injectie_marge_jaar || 0,
+        energiekost_nu_mwh: +s.energiekost_nu_mwh || 0, energiekost_dyn_mwh: +s.energiekost_dyn_mwh || 0 },
+      interesses: [], ts: Date.now() };
+    _leadOpslaan(token, rec);
+    const thema = rec.partner ? ('&thema=' + encodeURIComponent(rec.partner)) : '';
+    const notaUrl = `${WEB_BASE}/apps/energiekompas-nota.html?lead=${token}${thema}`;
+    // 1) Klant-mail met de persoonlijke nota-link
+    const kFout = [];
+    if (rec.samenvatting.afname_marge_jaar > 0) kFout.push(`• Onderhandelingsmarge op uw afname: ± ${_eurTxt(rec.samenvatting.afname_marge_jaar)} per jaar`);
+    if (rec.samenvatting.injectie_marge_jaar > 0) kFout.push(`• Meerwaarde op uw injectie: ± ${_eurTxt(rec.samenvatting.injectie_marge_jaar)} per jaar`);
+    const kTxt = `Beste${naam ? ' ' + naam : ''},\n\nDank voor uw aanvraag. Uw persoonlijke onderhandelingsnota staat klaar:\n${notaUrl}\n\n${kFout.join('\n')}${kFout.length ? '\n\n' : ''}Deze nota vergelijkt uw huidige factuur met een dynamisch (spot-gebaseerd) contract — voor uw afname en, indien van toepassing, uw injectie — zonder extra investering.\n\nWilt u weten hoeveel besparing en rendement uw aansluiting nog in petto heeft? Antwoord gerust op deze mail.\n\nMet vriendelijke groeten,\nEnergieKompas`;
+    const kHtml = `<div style="font:15px/1.55 Helvetica,Arial,sans-serif;color:#1F3864;max-width:560px">
+      <p>Beste${naam ? ' ' + esc2(naam) : ''},</p>
+      <p>Dank voor uw aanvraag. Uw persoonlijke <b>onderhandelingsnota</b> staat klaar:</p>
+      <p><a href="${notaUrl}" style="display:inline-block;background:#05B050;color:#fff;text-decoration:none;font-weight:700;padding:11px 18px;border-radius:8px">Bekijk uw onderhandelingsnota →</a></p>
+      ${kFout.length ? ('<ul style="color:#33404f">' + kFout.map(l => '<li>' + esc2(l.replace(/^•\s*/, '')) + '</li>').join('') + '</ul>') : ''}
+      <p style="color:#5A6577;font-size:13px">Deze nota vergelijkt uw huidige factuur met een dynamisch (spot-gebaseerd) contract — voor uw afname en, indien van toepassing, uw injectie — <b>zonder extra investering</b>.</p>
+      <p style="color:#5A6577;font-size:13px">Wilt u weten hoeveel besparing en rendement uw aansluiting nog in petto heeft? Antwoord gerust op deze mail.</p>
+      <p>Met vriendelijke groeten,<br>EnergieKompas</p></div>`;
+    const kSent = await _brevoMail(mail, 'Uw persoonlijke onderhandelingsnota', kTxt, kHtml);
+    // 2) Lead-notificatie naar Fluctus/call-partner
+    const lTxt = `NIEUWE LEAD via EnergieKompas${rec.partner ? ' (' + rec.partner + ')' : ''}\n\nNaam : ${naam || '—'}\nMail : ${mail}\nTel  : ${tel || '—'}\nHerkomst: ${rec.herkomst || 'direct'}\n\nAfname-marge : ${_eurTxt(rec.samenvatting.afname_marge_jaar)}/j  (nu ${Math.round(rec.samenvatting.energiekost_nu_mwh)} → dyn ${Math.round(rec.samenvatting.energiekost_dyn_mwh)} €/MWh)\nInjectie-marge: ${_eurTxt(rec.samenvatting.injectie_marge_jaar)}/j\n\nNota: ${notaUrl}`;
+    await _brevoMail(LEAD_MAIL_TO, `Lead EnergieKompas — ${naam || mail}`, lTxt, null, 'Fluctus EnergieKompas');
+    res.json({ ok: true, token, nota_url: notaUrl, mail_klant: kSent.sent, mail_reden: kSent.sent ? undefined : kSent.reden });
+  } catch (e) { console.error('[lead]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/lead-interesse', async (req, res) => {
+  try {
+    const b = req.body || {};
+    const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    const int = Array.isArray(b.interesses) ? b.interesses.map(x => String(x).slice(0, 60)).slice(0, 10) : [];
+    rec.interesses = int; rec.wil_contact = !!b.wil_contact; rec.ts_interesse = Date.now();
+    _leadOpslaan(b.token, rec);
+    if (b.wil_contact) {
+      const lTxt = `WARME LEAD — wil weten hoe (EnergieKompas${rec.partner ? ' ' + rec.partner : ''})\n\nNaam : ${rec.naam || '—'}\nMail : ${rec.mail}\nTel  : ${rec.tel || '—'}\n\nInteresses:\n${int.map(i => '  • ' + i).join('\n') || '  (geen)'}\n\nAfname-marge ${_eurTxt(rec.samenvatting.afname_marge_jaar)}/j · injectie ${_eurTxt(rec.samenvatting.injectie_marge_jaar)}/j`;
+      await _brevoMail(LEAD_MAIL_TO, `WARME LEAD EnergieKompas — ${rec.naam || rec.mail}`, lTxt, null, 'Fluctus EnergieKompas');
+    }
+    res.json({ ok: true });
+  } catch (e) { console.error('[lead-interesse]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/api/lead/:token', (req, res) => {
+  const rec = _leadLezen(req.params.token);
+  if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+  res.json({ ok: true, nota: rec.data });
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
