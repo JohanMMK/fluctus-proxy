@@ -1,6 +1,16 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.116.0 (2026-08-31, Fase 4 — VOORSCHOTFACTUUR): /api/lead neemt factuur_type
+//                ('voorschot'|'afrekening'); _leadScore dempt de marge-bijdrage bij een voorschot (raming, niet
+//                kunstmatig warm); /api/leads geeft factuur_type mee. Detectie zelf in factuur/extract.js v1.4.7.
+// Versie:        v15.115.0 (2026-08-31, Fase 4 — SELF-SERVICE MANDAAT-INTAKE): POST /api/mandaat/self-identiteit
+//                (lead-token + rol klant/adviseur), self-aanvraag (EAN → losse wachtrij met aanvrager+factuuradres),
+//                self-status, self-bevestig-adres (lead-variant), los-patch (manager: rol/partner corrigeren).
+//                wachtrij/sync dragen aanvrager/rol/partner/factuur_adres/aangevraagd_via/kwartierdata_aanwezig.
+// Versie:        v15.114.0 (2026-08-31, Fase 4 — MANDAAT-PARALLEL + DOWNLOAD-GATING): POST /api/lead-mandaat
+//                (akkoord + back-office-melding + score +20), /api/lead-herbereken (manager-only, sector nu /
+//                echte Fluvius-data later → klant gemaild). GET /api/lead/:token geeft tier/mag_download.
 // Versie:        v15.113.0 (2026-08-30, Fase 4 — SELF-SERVICE na HOE): e-mailverificatie via OTP-code
 //                (/api/lead-verify-send + -check, code per Brevo-mail, 15 min, 6 pogingen) + /api/lead-update
 //                (rapport-tier view|later|direct · laadplein-definitie · engagement-events). GET /api/lead/:token
@@ -7567,7 +7577,7 @@ app.get('/api/leads', async (req, res) => {
 laadMarktdata();  // laad marktdata synchroon bij startup
 
 app.listen(PORT, () => {
-  console.log(`Fluctus proxy v15.15.2 luistert op poort ${PORT}`);
+  console.log(`Fluctus proxy v${SERVER_VERSIE} luistert op poort ${PORT}`);
   console.log(`simulator.py: ${fs.existsSync(path.join(__dirname,'simulator.py')) ? 'aanwezig':'ONTBREEKT'}`);
   console.log(`Markt status: ${MARKT_STATUS}${MARKT ? ' ('+MARKT.n_kwartieren+' kwartieren)' : ''}`);
 });
