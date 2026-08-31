@@ -1,7 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
-// Versie:        v15.112.0 (2026-08-30, Fase 4 — SCHIL-LEAD → KAMINO-PROJECT): /api/lead seedt (service-role, best-
+// Versie:        v15.113.0 (2026-08-30, Fase 4 — SELF-SERVICE na HOE): e-mailverificatie via OTP-code
+//                (/api/lead-verify-send + -check, code per Brevo-mail, 15 min, 6 pogingen) + /api/lead-update
+//                (rapport-tier view|later|direct · laadplein-definitie · engagement-events). GET /api/lead/:token
+//                logt 'nota_opened' (time-to-open). Warmte-score (_leadScore 0–100) + MANAGER-ONLY GET /api/leads
+//                (overzicht + score + time-to-open) voor de supermanager/accountmanager-routing. ── v15.112.0 (2026-08-30, Fase 4 — SCHIL-LEAD → KAMINO-PROJECT): /api/lead seedt (service-role, best-
 //                effort, enkel bij factuur-baseCase) een studieklaar Kamino-project onder kamino/<FLX-id>.json met de
 //                baseCase + profiel + PV + klant + partner + samenvatting (bron:'energiekompas-schil'). Zo wordt elke
 //                warme lead een voorgevuld project waarop de volledige studie (nominatie-sim → laadplein-rapport) kan
@@ -1076,7 +1080,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.112.0'; // v15.112.0 (30-08, Fase 4): schil-lead → studieklaar Kamino-project (_seedKaminoProject: seedt kamino/<FLX-id>.json met baseCase+profiel+pv+klant+partner). /api/lead geeft project_id terug. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.113.0'; // v15.113.0 (30-08, Fase 4): self-service — /api/lead-verify-send + -check (OTP e-mailverificatie), /api/lead-update (tier|laadpleinen|events), engagement-events voor lead-scoring. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7262,7 +7266,100 @@ app.post('/api/lead-interesse', async (req, res) => {
 app.get('/api/lead/:token', (req, res) => {
   const rec = _leadLezen(req.params.token);
   if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+  _leadEvent(rec, 'nota_opened', { once: true }, req.params.token);   // time-to-open = nota_opened − ts (lead-scoring)
   res.json({ ok: true, nota: rec.data });
+});
+
+// ─── v15.113 (Fase 4 — self-service: e-mailverificatie (OTP) + lead-verrijking + engagement) ──────
+// De klant passeert na de 3 vragen een e-mailverificatie (code per mail) → we weten zeker welk adres
+// werkt; daarna kiest hij een rapport-tier en definieert hij zijn laadpleinen. Elke stap logt een event
+// (timestamps) → lead-kwaliteit meten (time-to-open, hoe volledig, welke tier). Geen betaalprovider hier.
+function _leadEvent(rec, ev, opt, token) {
+  if (!rec) return;
+  opt = opt || {};
+  rec.events = Array.isArray(rec.events) ? rec.events : [];
+  if (opt.once && rec.events.some(e => e.ev === ev)) return;           // eenmalig event (bv. eerste nota-open)
+  rec.events.push({ ev: String(ev).slice(0, 40), ts: Date.now(), ...(opt.extra ? { extra: opt.extra } : {}) });
+  if (rec.events.length > 40) rec.events = rec.events.slice(-40);
+  if (token) { try { _leadOpslaan(token, rec); } catch (e) {} }
+}
+app.post('/api/lead-verify-send', async (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    const code = String(Math.floor(100000 + Math.random() * 900000));   // 6 cijfers
+    rec.verify_code = code; rec.verify_exp = Date.now() + 15 * 60 * 1000; rec.verify_tries = 0;
+    _leadOpslaan(b.token, rec);
+    const txt = `Uw verificatiecode voor EnergieKompas is: ${code}\n\nGeef deze code in op de pagina om uw analyse te bekijken. De code is 15 minuten geldig.`;
+    const html = `<div style="font:15px/1.55 Helvetica,Arial,sans-serif;color:#1F3864"><p>Uw verificatiecode voor <b>EnergieKompas</b>:</p><p style="font-size:30px;font-weight:800;letter-spacing:4px;color:#05B050">${code}</p><p style="color:#5A6577;font-size:13px">Geef deze in op de pagina om uw analyse te bekijken. 15 minuten geldig.</p></div>`;
+    const sent = await _brevoMail(rec.mail, 'Uw EnergieKompas-verificatiecode', txt, html);
+    _leadEvent(rec, 'verify_sent', {}, b.token);
+    res.json({ ok: true, sent: sent.sent, reden: sent.sent ? undefined : sent.reden });
+  } catch (e) { console.error('[lead-verify-send]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/lead-verify-check', (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (rec.verified) return res.json({ ok: true, verified: true });
+    if (!rec.verify_code || !rec.verify_exp || Date.now() > rec.verify_exp) return res.status(400).json({ ok: false, error: 'Code verlopen — vraag een nieuwe.' });
+    rec.verify_tries = (rec.verify_tries || 0) + 1;
+    if (rec.verify_tries > 6) { rec.verify_code = null; _leadOpslaan(b.token, rec); return res.status(429).json({ ok: false, error: 'Te veel pogingen — vraag een nieuwe code.' }); }
+    if (String(b.code || '').trim() !== rec.verify_code) { _leadOpslaan(b.token, rec); return res.status(400).json({ ok: false, error: 'Onjuiste code.' }); }
+    rec.verified = true; rec.verified_ts = Date.now(); rec.verify_code = null;
+    _leadEvent(rec, 'verified', {}, b.token);
+    res.json({ ok: true, verified: true });
+  } catch (e) { console.error('[lead-verify-check]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// Verrijk de lead: rapport-tier (view|later|direct), laadplein-definitie, of een engagement-event.
+app.post('/api/lead-update', (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (b.tier && ['view', 'later', 'direct'].includes(b.tier)) { rec.tier = b.tier; _leadEvent(rec, 'tier_' + b.tier); }
+    if (b.laadpleinen && typeof b.laadpleinen === 'object') { rec.laadpleinen = b.laadpleinen; _leadEvent(rec, 'laadpleinen_ingevuld'); }
+    if (b.event) _leadEvent(rec, b.event);
+    if (b.exact_studie && typeof b.exact_studie === 'object') rec.exact_studie = b.exact_studie;   // KPI-snapshot exacte heatmap
+    rec.bijgewerkt = Date.now();
+    rec.score = _leadScore(rec);
+    _leadOpslaan(b.token, rec);
+    res.json({ ok: true, tier: rec.tier || null, verified: !!rec.verified, score: rec.score });
+  } catch (e) { console.error('[lead-update]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// Warmte-score (0–100) uit engagement + tier + intentie + marges. Voedt de accountmanager-routing.
+function _leadScore(rec) {
+  let s = 0; const ev = (rec.events || []).map(e => e.ev);
+  if (rec.verified) s += 25;                                   // e-mail bevestigd = echt
+  s += ({ direct: 30, later: 18, view: 8 })[rec.tier] || 0;   // koopintentie
+  if (ev.includes('laadpleinen_ingevuld')) s += 15;           // zelf ingevuld = warm
+  if (ev.includes('exact_gestart')) s += 12;                  // exacte studie gevraagd
+  if (ev.includes('nota_opened')) s += 6;                     // nota bekeken
+  const marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
+  s += Math.min(14, Math.round(marge / 1000));                // hoge marge = hogere waarde (cap 14)
+  return Math.min(100, s);
+}
+// MANAGER-ONLY: overzicht van de EnergieKompas-leads voor de supermanager/accountmanagers.
+app.get('/api/leads', async (req, res) => {
+  try {
+    if (!(await _isManagerReq(req))) return res.status(401).json({ ok: false, error: 'Manager-login vereist' });
+    let bestanden = [];
+    try { bestanden = fs.readdirSync(_leadDir).filter(f => f.endsWith('.json')); } catch (e) {}
+    const leads = [];
+    for (const f of bestanden) {
+      let r; try { r = JSON.parse(fs.readFileSync(path.join(_leadDir, f), 'utf8')); } catch (e) { continue; }
+      const token = f.replace(/\.json$/, '');
+      const opened = (r.events || []).find(e => e.ev === 'nota_opened');
+      leads.push({ token, naam: r.naam || '', mail: r.mail || '', tel: r.tel || '', partner: r.partner || '',
+        tier: r.tier || null, verified: !!r.verified, score: r.score != null ? r.score : _leadScore(r),
+        afname_marge_jaar: (r.samenvatting && r.samenvatting.afname_marge_jaar) || 0,
+        injectie_marge_jaar: (r.samenvatting && r.samenvatting.injectie_marge_jaar) || 0,
+        kamino_project_id: r.kamino_project_id || null,
+        time_to_open_ms: (opened && r.ts) ? (opened.ts - r.ts) : null,
+        events: (r.events || []).map(e => e.ev), ts: r.ts, bijgewerkt: r.bijgewerkt || r.ts });
+    }
+    leads.sort((a, b) => (b.score - a.score) || (b.ts - a.ts));
+    res.json({ ok: true, aantal: leads.length, leads });
+  } catch (e) { console.error('[leads]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
