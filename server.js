@@ -1080,7 +1080,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.115.0'; // v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.116.0'; // v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7224,7 +7224,9 @@ app.post('/api/lead', async (req, res) => {
     if (!b.data || typeof b.data !== 'object') return res.status(400).json({ ok: false, error: 'Geen nota-data.' });
     const token = _leadToken();
     const s = b.samenvatting || {};
+    const factuurType = (['voorschot', 'afrekening'].indexOf(String(b.factuur_type)) >= 0) ? String(b.factuur_type) : null;
     const rec = { data: b.data, mail, tel, naam, partner: String(b.partner || '').slice(0, 40), herkomst: String(b.herkomst || '').slice(0, 40),
+      factuur_type: factuurType,
       samenvatting: { afname_marge_jaar: +s.afname_marge_jaar || 0, injectie_marge_jaar: +s.injectie_marge_jaar || 0,
         energiekost_nu_mwh: +s.energiekost_nu_mwh || 0, energiekost_dyn_mwh: +s.energiekost_dyn_mwh || 0 },
       interesses: [], ts: Date.now() };
@@ -7529,7 +7531,9 @@ function _leadScore(rec) {
   if (rec.mandaat && rec.mandaat.akkoord) s += 20;            // mandaat-akkoord = zeer warm (echte data volgt)
   if (ev.includes('exact_gestart')) s += 12;                  // exacte studie gevraagd
   if (ev.includes('nota_opened')) s += 6;                     // nota bekeken
-  const marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
+  let marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
+  // Voorschot/raming: de marge is een RAMING, geen factuurbedrag → warmte niet kunstmatig hoog.
+  if (rec.factuur_type === 'voorschot') marge = Math.min(marge * 0.4, 4000);
   s += Math.min(14, Math.round(marge / 1000));                // hoge marge = hogere waarde (cap 14)
   return Math.min(100, s);
 }
@@ -7546,6 +7550,7 @@ app.get('/api/leads', async (req, res) => {
       const opened = (r.events || []).find(e => e.ev === 'nota_opened');
       leads.push({ token, naam: r.naam || '', mail: r.mail || '', tel: r.tel || '', partner: r.partner || '',
         tier: r.tier || null, verified: !!r.verified, score: r.score != null ? r.score : _leadScore(r),
+        factuur_type: r.factuur_type || null,
         mandaat: r.mandaat ? (r.mandaat.status || 'aangevraagd') : null, herberekend: !!r.herberekend,
         afname_marge_jaar: (r.samenvatting && r.samenvatting.afname_marge_jaar) || 0,
         injectie_marge_jaar: (r.samenvatting && r.samenvatting.injectie_marge_jaar) || 0,
