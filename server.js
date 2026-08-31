@@ -1,6 +1,10 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.117.0 (2026-08-31, Fase 5 — LOCATIESCAN): async POST/GET /api/locatiescan die uit het
+//                factuuradres dak/sectorprofiel/laadpotentieel/LS-MS inschat en stap 8 vooringevuld aanlevert.
+//                Pluggable, env/data-gated bronnen (Mapbox · GRB · KBO/NACE · Places · OpenChargeMap · Fluvius-
+//                cabines), niet-blokkerend, graceful degradation. Lead: groeistap_aanvaard +28, scan-events.
 // Versie:        v15.116.0 (2026-08-31, Fase 4 — VOORSCHOTFACTUUR): /api/lead neemt factuur_type
 //                ('voorschot'|'afrekening'); _leadScore dempt de marge-bijdrage bij een voorschot (raming, niet
 //                kunstmatig warm); /api/leads geeft factuur_type mee. Detectie zelf in factuur/extract.js v1.4.7.
@@ -1090,7 +1094,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.116.0'; // v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.117.0'; // v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7538,7 +7542,9 @@ function _leadScore(rec) {
   if (rec.verified) s += 25;                                   // e-mail bevestigd = echt
   s += ({ direct: 30, later: 18, view: 8 })[rec.tier] || 0;   // koopintentie
   if (ev.includes('laadpleinen_ingevuld')) s += 15;           // zelf ingevuld = warm
+  if (ev.includes('groeistap_aanvaard')) s += 28;            // eerste groeistap aanvaard = warmste categorie (§14.6)
   if (rec.mandaat && rec.mandaat.akkoord) s += 20;            // mandaat-akkoord = zeer warm (echte data volgt)
+  if (ev.some(e => e.indexOf('scan_gecorrigeerd') === 0) || ev.includes('scan_bevestigd')) s += 8;  // locatiescan-engagement
   if (ev.includes('exact_gestart')) s += 12;                  // exacte studie gevraagd
   if (ev.includes('nota_opened')) s += 6;                     // nota bekeken
   let marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
@@ -7571,6 +7577,203 @@ app.get('/api/leads', async (req, res) => {
     leads.sort((a, b) => (b.score - a.score) || (b.ts - a.ts));
     res.json({ ok: true, aantal: leads.length, leads });
   } catch (e) { console.error('[leads]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ═══ v15.117 (Fase 5 — LOCATIESCAN) ══════════════════════════════════════════════════════════════
+// Uit het adres op de factuur een luchtfoto-gebaseerde locatiescan die dak, sectorprofiel en
+// laadpotentieel inschat en stap 8 (scherm 7bis) vooringevuld aanlevert i.p.v. leeg. Draait ASYNC
+// en NIET-BLOKKEREND: elke externe bron is een pluggable functie die op een env-key/datafile draait en
+// anders `null` teruggeeft (confidence 'laag'/afwezig). De job voltooit altijd; is de scan niet klaar bij
+// stap 8, valt de UI terug op het lege formulier van vandaag. Geen enkele regressie.
+// Bronnen & vereisten (zie Locatiescan_bouwspec §6.3/§12.6):
+//   - MAPBOX_TOKEN        → geocoding + satellite-tile (luchtfoto)
+//   - GOOGLE_PLACES_KEY   → openingsuren/venster + categorie
+//   - KBO_API of data/kbo → NACE-sector + multi-tenant (ondernemingen op adres)
+//   - OpenChargeMap       → publiek, geen key (laadpunten in de buurt)
+//   - Geopunt GRB (WFS)   → publiek, geen key (dakoppervlak)
+//   - data/cabines.json   → Fluvius-capaciteitskaart (lokaal), LS/MS-advies via Haversine
+const _SCANS = new Map();                              // scan_id → { status, scan, confidence, ts }
+const SCAN_TTL_MS = 1000 * 60 * 60 * 24 * 30;         // 30 dagen
+const _scanDir = path.join(__dirname, 'data', 'scans');
+const SCAN_BRON_TIMEOUT_MS = 90000;                    // per-bron timeout (bouwspec §8)
+function _scanToken() { return 'scan_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+function _scanBewaar(id, rec) {
+  _SCANS.set(id, rec);
+  try { fs.mkdirSync(_scanDir, { recursive: true }); fs.writeFileSync(path.join(_scanDir, id + '.json'), JSON.stringify(rec)); } catch (e) {}
+}
+function _scanLees(id) {
+  if (!/^scan_[a-z0-9]{1,40}$/.test(String(id || ''))) return null;
+  let rec = _SCANS.get(id);
+  if (!rec) { try { rec = JSON.parse(fs.readFileSync(path.join(_scanDir, id + '.json'), 'utf8')); _SCANS.set(id, rec); } catch (e) { rec = null; } }
+  if (rec && (Date.now() - (rec.ts || 0)) > SCAN_TTL_MS) return null;
+  return rec || null;
+}
+// Wikkel een bron in een timeout + try/catch → faalt zacht naar null (nooit blokkerend).
+function _bronZacht(naam, fn) {
+  return Promise.race([
+    Promise.resolve().then(fn).catch(e => { console.warn(`[locatiescan] bron '${naam}' faalde: ${e.message}`); return null; }),
+    new Promise(res => setTimeout(() => res(null), SCAN_BRON_TIMEOUT_MS)),
+  ]);
+}
+// ── Bron-functies (B2) — elk env/data-gated, elk degradeert naar null ────────────────────────────
+async function _scanGeocode(adres) {
+  const tok = process.env.MAPBOX_TOKEN; if (!tok || !adres) return null;
+  const url = `https://api.mapbox.com/geocoding/v5/mapbox.places/${encodeURIComponent(adres)}.json?country=be&limit=1&access_token=${tok}`;
+  const r = await fetch(url); if (!r.ok) return null;
+  const j = await r.json(); const f = j && j.features && j.features[0];
+  if (!f || !Array.isArray(f.center)) return null;
+  return { lat: f.center[1], lon: f.center[0], plaats_naam: f.place_name || null };
+}
+function _scanLuchtfotoUrl(lat, lon) {
+  const tok = process.env.MAPBOX_TOKEN; if (!tok || lat == null || lon == null) return null;
+  // satellite-v9, zoom 18, 640×420 (bouwspec §12.6e). URL bevat de token — enkel server-side samenstellen.
+  return `https://api.mapbox.com/styles/v1/mapbox/satellite-v9/static/${lon},${lat},18,0/640x420@2x?access_token=${tok}`;
+}
+async function _scanGrbDak(lat, lon) {
+  if (lat == null || lon == null) return null;
+  // Geopunt GRB gebouwvlak (publiek WFS). Best-effort; egress-afhankelijk → null bij fout.
+  const url = `https://geo.api.vlaanderen.be/GRB/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=GRB:GBG&outputFormat=application/json&count=1&srsName=EPSG:4326&cql_filter=${encodeURIComponent(`CONTAINS(SHAPE,POINT(${lon} ${lat}))`)}`;
+  const r = await fetch(url); if (!r.ok) return null;
+  const j = await r.json(); const f = j && j.features && j.features[0];
+  if (!f || !f.properties) return null;
+  const opp = +f.properties.OPPERVL || +f.properties.SHAPE_AREA || null;
+  return opp ? { opp_m2: Math.round(opp), bron_opp: 'GRB' } : null;
+}
+async function _scanKbo(btw) {
+  // NACE + multi-tenant. Vereist KBO-databron (open data of API). Zonder → null.
+  if (!btw || (!process.env.KBO_API && !fs.existsSync(path.join(__dirname, 'data', 'kbo')))) return null;
+  try {
+    if (process.env.KBO_API) {
+      const r = await fetch(`${process.env.KBO_API.replace(/\/+$/, '')}/${String(btw).replace(/\D/g, '')}`);
+      if (!r.ok) return null; const j = await r.json();
+      return { nace: j.nace || null, type: null, ondernemingen_op_adres: j.ondernemingen_op_adres || null, bron: 'KBO' };
+    }
+  } catch (e) {}
+  return null;
+}
+async function _scanPlaces(adres, naam) {
+  const key = process.env.GOOGLE_PLACES_KEY; if (!key || (!adres && !naam)) return null;
+  try {
+    const q = encodeURIComponent([naam, adres].filter(Boolean).join(' '));
+    const r = await fetch(`https://maps.googleapis.com/maps/api/place/findplacefromtext/json?input=${q}&inputtype=textquery&fields=opening_hours,types,name&key=${key}`);
+    if (!r.ok) return null; const j = await r.json(); const c = j && j.candidates && j.candidates[0];
+    if (!c) return null;
+    return { categorie: (c.types && c.types[0]) || null, openingsuren: (c.opening_hours && c.opening_hours.weekday_text) || null, bron: 'Places' };
+  } catch (e) { return null; }
+}
+async function _scanOcm(lat, lon) {
+  if (lat == null || lon == null) return null;
+  // OpenChargeMap — publiek, geen key (bouwspec §12.6d). DC = maxPowerKw>=50, niet LevelID.
+  const url = `https://api.openchargemap.io/v3/poi/?latitude=${lat}&longitude=${lon}&distance=5&distanceunit=KM&countrycode=BE&maxresults=50&compact=true`;
+  const r = await fetch(url, { headers: { 'User-Agent': 'FluctusEnergieKompas/1.0' } }); if (!r.ok) return null;
+  const arr = await r.json(); if (!Array.isArray(arr)) return null;
+  let dc = 0, ac = 0, dichtstbij = null;
+  for (const p of arr) {
+    const kw = Math.max(0, ...(((p.Connections || []).map(c => +c.PowerKW || 0))));
+    if (kw >= 50) dc++; else ac++;
+    const d = p.AddressInfo && p.AddressInfo.Distance;
+    if (d != null && (dichtstbij == null || d < dichtstbij)) dichtstbij = d;
+  }
+  return { dc, ac, dichtstbij_m: dichtstbij != null ? Math.round(dichtstbij * 1000) : null };
+}
+function _haversine(aLat, aLon, bLat, bLon) {
+  const R = 6371000, t = Math.PI / 180;
+  const dLa = (bLat - aLat) * t, dLo = (bLon - aLon) * t;
+  const h = Math.sin(dLa / 2) ** 2 + Math.cos(aLat * t) * Math.cos(bLat * t) * Math.sin(dLo / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+let _cabinesCache = null;
+function _scanCabines(lat, lon) {
+  if (lat == null || lon == null) return null;
+  if (_cabinesCache === null) {
+    try { _cabinesCache = JSON.parse(fs.readFileSync(path.join(__dirname, 'data', 'cabines.json'), 'utf8')); }
+    catch (e) { _cabinesCache = false; }   // false = bestand ontbreekt → bron uit
+  }
+  if (!_cabinesCache) return null;
+  const lijst = Array.isArray(_cabinesCache) ? _cabinesCache : (_cabinesCache.cabines || []);
+  let best = null;
+  for (const c of lijst) {
+    const cl = c.lat != null ? c.lat : c.latitude, co = c.lon != null ? c.lon : c.longitude;
+    if (cl == null || co == null) continue;
+    const d = _haversine(lat, lon, cl, co);
+    if (!best || d < best.afstand_m) best = { lat: cl, lon: co, naam: c.naam || c.name || null, afstand_m: Math.round(d), rest_kva_afname: c.rest_kva_afname != null ? c.rest_kva_afname : (c.restcapaciteit_afname_kva || null) };
+  }
+  if (!best) return null;
+  const m = best.afstand_m;
+  const advies = m <= 80 ? 'MS_MOGELIJK' : (m <= 150 ? 'TWIJFEL' : (m <= 500 ? 'LS' : 'LS_ZEKER'));
+  return { ms_cabine_dichtstbij_m: m, ms_cabine_naam: best.naam, restcapaciteit_afname_kva: best.rest_kva_afname, advies, openbare_weg_tussen: null, bron: 'Fluvius capaciteitskaart (lokale cabines.json)' };
+}
+// NACE → sectorprofiel-mapping (bouwspec §4). Pure, geen externe call.
+function _scanSectorprofiel(nace) {
+  if (!nace) return null;
+  const g = String(nace).replace(/\D/g, '').slice(0, 2);
+  const T = { '01': ['agri', 'seizoensgebonden'], '10': ['industrie_continu', '24/7'], '41': ['kmo_productie', '07:00-17:00'], '42': ['kmo_productie', '07:00-17:00'], '43': ['kmo_productie', '07:00-17:00'], '45': ['kmo_productie', '08:00-18:00'], '46': ['retail', 'uit Places'], '47': ['retail', 'uit Places'], '49': ['kmo_productie', '05:00-20:00'], '55': ['horeca', 'uit Places'], '56': ['horeca', 'uit Places'], '62': ['kantoor', '08:00-18:00'], '70': ['kantoor', '08:00-18:00'], '80': ['kantoor', '08:00-18:00'] };
+  const hit = T[g] || (g >= '10' && g <= '33' ? ['industrie_continu', '24/7'] : (g >= '62' && g <= '70' ? ['kantoor', '08:00-18:00'] : null));
+  return hit ? { type: hit[0], venster: hit[1] } : null;
+}
+// ── Orkestrator (B1) ─────────────────────────────────────────────────────────────────────────────
+async function _runLocatiescan(id, inp) {
+  const rec = _scanLees(id); if (!rec) return;
+  try {
+    const geo = await _bronZacht('geocode', () => _scanGeocode(inp.adres));
+    const lat = geo && geo.lat, lon = geo && geo.lon;
+    const [dak, kbo, places, ocm] = await Promise.all([
+      _bronZacht('grb', () => _scanGrbDak(lat, lon)),
+      _bronZacht('kbo', () => _scanKbo(inp.btw)),
+      _bronZacht('places', () => _scanPlaces(inp.adres, inp.bedrijfsnaam)),
+      _bronZacht('ocm', () => _scanOcm(lat, lon)),
+    ]);
+    const cabines = _scanCabines(lat, lon);   // lokaal, synchroon
+    const sector = _scanSectorprofiel(kbo && kbo.nace);
+    const luchtfoto = _scanLuchtfotoUrl(lat, lon);
+    const conf = {};
+    const scan = {
+      versie: 1, adres: inp.adres || null,
+      coord: (lat != null) ? { lat, lon } : null,
+      beeld: luchtfoto ? { bron: 'mapbox-satellite', url: luchtfoto } : null,
+      dak: dak ? { opp_m2: dak.opp_m2, bron_opp: dak.bron_opp, pv_bestaand_kwp: null, pv_vrij_kwp: null, confidence: 'midden' } : null,
+      parking: null,   // fase 2 (vision) — komt leeg, klant vult in
+      profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
+      omgeving: ocm ? { laadpunten_5km: { dc: ocm.dc, ac: ocm.ac, dichtstbij_m: ocm.dichtstbij_m } } : null,
+      netaansluiting: cabines || null,
+      eigendom: (kbo && kbo.ondernemingen_op_adres != null) ? { multi_tenant: kbo.ondernemingen_op_adres > 1, ondernemingen_op_adres: kbo.ondernemingen_op_adres } : null,
+    };
+    // status: 'klaar' als er iets bruikbaars is, anders 'leeg' (UI valt terug op leeg formulier).
+    const iets = !!(scan.beeld || scan.dak || scan.profiel || scan.omgeving || scan.netaansluiting);
+    rec.status = iets ? 'klaar' : 'leeg';
+    rec.scan = scan; rec.confidence = conf; rec.klaar_ts = Date.now();
+    _scanBewaar(id, rec);
+    // Best-effort merge in het projectrecord (bouwspec §6.2), niet-blokkerend.
+    if (inp.projectId && SUPABASE_OK) {
+      try {
+        const veilig = String(inp.projectId).replace(/[^A-Za-z0-9._-]/g, '_').slice(0, 40);
+        let pr = null; try { pr = JSON.parse(await _factuurDownload(`kamino/${veilig}.json`)); } catch (e) {}
+        if (pr) { pr.locatiescan = scan; pr.bijgewerkt = new Date().toISOString();
+          await _factuurUpload(Buffer.from(JSON.stringify(pr), 'utf8').toString('base64'), 'application/json', `kamino/${veilig}.json`); }
+      } catch (e) { /* niet-blokkerend */ }
+    }
+  } catch (e) {
+    console.error('[locatiescan] job faalde:', e.message);
+    rec.status = 'leeg'; rec.fout = e.message; _scanBewaar(id, rec);
+  }
+}
+app.post('/api/locatiescan', (req, res) => {
+  try {
+    const b = req.body || {};
+    const adres = String(b.adres || '').trim().slice(0, 300);
+    if (!adres) return res.status(400).json({ ok: false, error: 'adres verplicht' });
+    const id = _scanToken();
+    const rec = { status: 'bezig', scan: null, confidence: {}, ts: Date.now(),
+      input: { adres, btw: String(b.btw || '').replace(/[^0-9A-Za-z.]/g, '').slice(0, 20) || null, bedrijfsnaam: String(b.bedrijfsnaam || '').slice(0, 160) || null, ean: String(b.ean || '').replace(/\D/g, '').slice(0, 18) || null, projectId: String(b.projectId || '').slice(0, 40) || null } };
+    _scanBewaar(id, rec);
+    setTimeout(() => { _runLocatiescan(id, rec.input); }, 0);   // async, niet-blokkerend
+    res.json({ ok: true, scan_id: id, status: 'bezig' });
+  } catch (e) { console.error('[locatiescan POST]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/api/locatiescan/:scan_id', (req, res) => {
+  const rec = _scanLees(req.params.scan_id);
+  if (!rec) return res.status(404).json({ ok: false, error: 'Scan niet gevonden of verlopen.' });
+  res.json({ ok: true, status: rec.status, scan: rec.scan || null, confidence: rec.confidence || {} });
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
