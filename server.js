@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.118.0 (2026-08-31, Fase 5b — HARDWARE-BRUG + DESTINATION + VISION): /api/hardware-voorstel
+//                (KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist "welke PV/batterij/palen" + payback);
+//                /api/destination-raming (spoor 2: capture/dwell §12.3, drempel = functie van de kostprijs §13.1,
+//                sessieraming 0/50/100/150%); vision-pass in de locatiescan (Claude-vision op de Mapbox-tile →
+//                panelen/parkeervakken, gated op keys, kruiscontrole tegen de factuur).
 // Versie:        v15.117.0 (2026-08-31, Fase 5 — LOCATIESCAN): async POST/GET /api/locatiescan die uit het
 //                factuuradres dak/sectorprofiel/laadpotentieel/LS-MS inschat en stap 8 vooringevuld aanlevert.
 //                Pluggable, env/data-gated bronnen (Mapbox · GRB · KBO/NACE · Places · OpenChargeMap · Fluvius-
@@ -1094,7 +1099,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.117.0'; // v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.118.0'; // v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7703,6 +7708,34 @@ function _scanCabines(lat, lon) {
   const advies = m <= 80 ? 'MS_MOGELIJK' : (m <= 150 ? 'TWIJFEL' : (m <= 500 ? 'LS' : 'LS_ZEKER'));
   return { ms_cabine_dichtstbij_m: m, ms_cabine_naam: best.naam, restcapaciteit_afname_kva: best.rest_kva_afname, advies, openbare_weg_tussen: null, bron: 'Fluvius capaciteitskaart (lokale cabines.json)' };
 }
+// Vision-pass (fase 2, bouwspec §7): tel panelen + parkeervakken op de luchtfoto met Claude-vision.
+// Vereist MAPBOX_TOKEN (tile) + ANTHROPIC_API_KEY. Zonder → null (fase 1 blijft: vragen aan de klant).
+// KRUISCONTROLE: wijkt het paneelvlak >35% af van de factuur-injectie → factuur wint, confidence 'laag' (§3.1/§8).
+async function _scanVision(luchtfotoUrl, injectieMwh) {
+  const key = process.env.ANTHROPIC_API_KEY; if (!key || !luchtfotoUrl) return null;
+  try {
+    const img = await fetch(luchtfotoUrl); if (!img.ok) return null;
+    const buf = Buffer.from(await img.arrayBuffer());
+    const media = (img.headers.get('content-type') || 'image/png').split(';')[0];
+    const prompt = 'Dit is een luchtfoto (satelliet) van een bedrijfslocatie in Vlaanderen. Antwoord ENKEL met JSON, geen tekst eromheen: {"zonnepanelen_geteld": <geheel getal of null>, "paneelvlak_m2": <getal of null>, "parkeerplaatsen_geschat": <geheel getal of null>, "zekerheid": "hoog"|"midden"|"laag"}. Tel enkel wat je duidelijk ziet; bij twijfel null.';
+    const r = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: process.env.FACTUUR_MODEL || 'claude-sonnet-4-5', max_tokens: 400,
+        messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: media, data: buf.toString('base64') } }, { type: 'text', text: prompt }] }] }) });
+    if (!r.ok) return null;
+    const j = await r.json(); const t = (j.content && j.content[0] && j.content[0].text) || '';
+    const m = t.match(/\{[\s\S]*\}/); if (!m) return null;
+    const v = JSON.parse(m[0]);
+    // kWp uit paneelaantal (± 400 Wp/paneel) of paneelvlak (÷1,95 m²/paneel × 0,55 O-W × 0,4 kWp)
+    let kwp = null;
+    if (v.zonnepanelen_geteld > 0) kwp = Math.round(v.zonnepanelen_geteld * 0.4 * 10) / 10;
+    else if (v.paneelvlak_m2 > 0) kwp = Math.round(v.paneelvlak_m2 / 1.95 * 0.55 * 0.4 * 10) / 10;
+    let confidence = v.zekerheid || 'laag';
+    // kruiscontrole tegen de factuur-injectie (kWp ≈ injectie_kWh / 950)
+    if (kwp != null && injectieMwh > 0) { const kwpFactuur = injectieMwh * 1000 / 950; if (kwpFactuur > 0 && Math.abs(kwp - kwpFactuur) / kwpFactuur > 0.35) { kwp = Math.round(kwpFactuur * 10) / 10; confidence = 'laag'; } }
+    return { pv_bestaand_kwp: kwp, pv_panelen_geteld: v.zonnepanelen_geteld || null, parkeerplaatsen: v.parkeerplaatsen_geschat || null, confidence };
+  } catch (e) { console.warn('[locatiescan] vision faalde:', e.message); return null; }
+}
 // NACE → sectorprofiel-mapping (bouwspec §4). Pure, geen externe call.
 function _scanSectorprofiel(nace) {
   if (!nace) return null;
@@ -7726,13 +7759,14 @@ async function _runLocatiescan(id, inp) {
     const cabines = _scanCabines(lat, lon);   // lokaal, synchroon
     const sector = _scanSectorprofiel(kbo && kbo.nace);
     const luchtfoto = _scanLuchtfotoUrl(lat, lon);
+    const vision = luchtfoto ? await _bronZacht('vision', () => _scanVision(luchtfoto, +inp.injectie_mwh || 0)) : null;   // fase 2
     const conf = {};
     const scan = {
       versie: 1, adres: inp.adres || null,
       coord: (lat != null) ? { lat, lon } : null,
       beeld: luchtfoto ? { bron: 'mapbox-satellite', url: luchtfoto } : null,
-      dak: dak ? { opp_m2: dak.opp_m2, bron_opp: dak.bron_opp, pv_bestaand_kwp: null, pv_vrij_kwp: null, confidence: 'midden' } : null,
-      parking: null,   // fase 2 (vision) — komt leeg, klant vult in
+      dak: (dak || vision) ? { opp_m2: dak && dak.opp_m2 || null, bron_opp: dak && dak.bron_opp || null, pv_bestaand_kwp: vision && vision.pv_bestaand_kwp != null ? vision.pv_bestaand_kwp : null, pv_panelen_geteld: vision && vision.pv_panelen_geteld || null, pv_vrij_kwp: null, confidence: vision && vision.confidence || (dak ? 'midden' : 'laag') } : null,
+      parking: (vision && vision.parkeerplaatsen != null) ? { plaatsen_totaal: vision.parkeerplaatsen, belijning: null, methode: 'vision', confidence: vision.confidence || 'laag' } : null,   // fase 2 (vision); anders leeg → klant vult in
       profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
       omgeving: ocm ? { laadpunten_5km: { dc: ocm.dc, ac: ocm.ac, dichtstbij_m: ocm.dichtstbij_m } } : null,
       netaansluiting: cabines || null,
@@ -7764,7 +7798,7 @@ app.post('/api/locatiescan', (req, res) => {
     if (!adres) return res.status(400).json({ ok: false, error: 'adres verplicht' });
     const id = _scanToken();
     const rec = { status: 'bezig', scan: null, confidence: {}, ts: Date.now(),
-      input: { adres, btw: String(b.btw || '').replace(/[^0-9A-Za-z.]/g, '').slice(0, 20) || null, bedrijfsnaam: String(b.bedrijfsnaam || '').slice(0, 160) || null, ean: String(b.ean || '').replace(/\D/g, '').slice(0, 18) || null, projectId: String(b.projectId || '').slice(0, 40) || null } };
+      input: { adres, btw: String(b.btw || '').replace(/[^0-9A-Za-z.]/g, '').slice(0, 20) || null, bedrijfsnaam: String(b.bedrijfsnaam || '').slice(0, 160) || null, ean: String(b.ean || '').replace(/\D/g, '').slice(0, 18) || null, injectie_mwh: +b.injectie_mwh || 0, projectId: String(b.projectId || '').slice(0, 40) || null } };
     _scanBewaar(id, rec);
     setTimeout(() => { _runLocatiescan(id, rec.input); }, 0);   // async, niet-blokkerend
     res.json({ ok: true, scan_id: id, status: 'bezig' });
@@ -7774,6 +7808,139 @@ app.get('/api/locatiescan/:scan_id', (req, res) => {
   const rec = _scanLees(req.params.scan_id);
   if (!rec) return res.status(404).json({ ok: false, error: 'Scan niet gevonden of verlopen.' });
   res.json({ ok: true, status: rec.status, scan: rec.scan || null, confidence: rec.confidence || {} });
+});
+
+// ═══ v15.118 (Fase 5 — HARDWARE-BRUG) ════════════════════════════════════════════════════════════
+// Vertaalt een gekozen combo (PV + batterij + laadpalen) naar een CONCRETE shoppinglist met prijs en
+// terugverdientijd — "welke PV, welke batterij, welke palen" = de stap het dichtst bij een bestelling.
+// Prijzen: Jacops-lijst als default (Locatiescan_bouwspec §13.1/§13.8) + degressieve KMO-batterij- en
+// PV-staffel (§14.8; exponent 0,187, batterij-anker €212,21/kWh @261kWh). Verkoop AC €0,35/DC €0,55,
+// afschrijving 8 j. LET OP: de kostprijs/kWh komt ALTIJD uit de sim (§12.5) — nooit een forfait hier.
+// Deze getallen horen op termijn uit jacops_prijstabel.json te komen; nu als geijkte constanten.
+const HW = {
+  PRIJS_AC_KWH: 0.35, PRIJS_DC_KWH: 0.55, AFSCHRIJF_JAAR: 8,
+  // AC dubbel 22 kW — Jacops (§13.1): PLUON004+JAC012+JAC014+JAC117+JAC124
+  AC_DUBBEL_CAPEX: 4203, AC_DUBBEL_RECURRING_J: 540,      // Eplus005 2×€22,50/m
+  // DC 2×80 kW (160 kVA) — Jacops ondergrens (§13.1): PLUON055+JAC013+JAC118+JAC124
+  DC_2X80_CAPEX: 46463, DC_2X80_RECURRING_J: 2400,        // Eplus006 2×€100/m
+  LB_CAPEX: 2500, LB_RECURRING_J: 480,                    // Eplus016 + Eplus017
+  BETAALTERMINAL: 1925,                                   // PLUON072 (enkel betalend plein)
+  BAT_ANKER_KWH: 261, BAT_ANKER_EUR_KWH: 212.21, BAT_EXP: 0.187,
+  BAT_418_EUR_KWH: 209.43, BAT_RECURRING_KWH_J: 6.23,     // SV-02000 3,23 + ond-bat 3,00
+  PV_5_EUR_KWP: 1227, PV_EXP: 0.187,                      // degressief, gelijk aan de batterij-staffel
+};
+function _hwBatterij(kwh) {
+  kwh = +kwh || 0; if (kwh <= 0) return null;
+  let capex, eurKwh, bron = 'jacops-degressief';
+  if (kwh <= HW.BAT_ANKER_KWH) { eurKwh = HW.BAT_ANKER_EUR_KWH * Math.pow(HW.BAT_ANKER_KWH / kwh, HW.BAT_EXP); capex = eurKwh * kwh; }
+  else if (kwh <= 418) { const c261 = 55386, c418 = 87542; capex = c261 + (c418 - c261) * (kwh - 261) / (418 - 261); eurKwh = capex / kwh; bron = 'jacops-anker'; }
+  else { eurKwh = HW.BAT_418_EUR_KWH; capex = eurKwh * kwh; bron = 'jacops-418-geschat'; }
+  return { kwh: Math.round(kwh), eur_per_kwh: Math.round(eurKwh * 100) / 100, capex: Math.round(capex), recurring_j: Math.round(kwh * HW.BAT_RECURRING_KWH_J), bron };
+}
+function _hwPv(kwp) {
+  kwp = +kwp || 0; if (kwp <= 0) return null;
+  let eurKwp = HW.PV_5_EUR_KWP * Math.pow(5 / kwp, HW.PV_EXP);
+  eurKwp = Math.max(455, Math.min(1227, eurKwp));
+  return { kwp: Math.round(kwp * 10) / 10, eur_per_kwp: Math.round(eurKwp), capex: Math.round(eurKwp * kwp), bron: 'epc-template-degressief' };
+}
+// cfg: { pv_kwp?, batt_kwh?, ac_dubbel?, dc_2x80?, load_balancer?, betalend?, besparing_j?, kostprijs_kwh? }
+function _hwVoorstel(cfg) {
+  cfg = cfg || {}; const items = []; let capex = 0, recurring = 0;
+  const pv = _hwPv(cfg.pv_kwp); if (pv) { items.push({ sleutel: 'pv', naam: `Zonnepanelen ${pv.kwp} kWp`, detail: `± € ${pv.eur_per_kwp}/kWp (degressief)`, capex: pv.capex, recurring_j: 0 }); capex += pv.capex; }
+  const bat = _hwBatterij(cfg.batt_kwh); if (bat) { items.push({ sleutel: 'batterij', naam: `Batterij ${bat.kwh} kWh`, detail: `± € ${bat.eur_per_kwh}/kWh · onderhoud/sturing € ${bat.recurring_j}/j`, capex: bat.capex, recurring_j: bat.recurring_j, geschat: bat.bron !== 'jacops-anker' }); capex += bat.capex; recurring += bat.recurring_j; }
+  const nAc = Math.max(0, Math.round(+cfg.ac_dubbel || 0));
+  if (nAc > 0) { items.push({ sleutel: 'ac', naam: `${nAc}× dubbele AC-laadpaal (22 kW)`, detail: `E+Drive-abonnement inbegrepen`, capex: nAc * HW.AC_DUBBEL_CAPEX, recurring_j: nAc * HW.AC_DUBBEL_RECURRING_J }); capex += nAc * HW.AC_DUBBEL_CAPEX; recurring += nAc * HW.AC_DUBBEL_RECURRING_J; }
+  const nDc = Math.max(0, Math.round(+cfg.dc_2x80 || 0));
+  if (nDc > 0) { items.push({ sleutel: 'dc', naam: `${nDc}× DC-snellader (2×80 kW)`, detail: `plaatsing via regie — capex is ondergrens`, capex: nDc * HW.DC_2X80_CAPEX, recurring_j: nDc * HW.DC_2X80_RECURRING_J, geschat: true }); capex += nDc * HW.DC_2X80_CAPEX; recurring += nDc * HW.DC_2X80_RECURRING_J; }
+  if (cfg.load_balancer || nAc + nDc >= 2) { items.push({ sleutel: 'lb', naam: 'Dynamische load balancing', detail: 'houdt de palen binnen uw aansluiting', capex: HW.LB_CAPEX, recurring_j: HW.LB_RECURRING_J }); capex += HW.LB_CAPEX; recurring += HW.LB_RECURRING_J; }
+  if (cfg.betalend && (nAc + nDc) > 0) { items.push({ sleutel: 'terminal', naam: 'Betaalterminal', detail: 'enkel voor een betalend plein', capex: HW.BETAALTERMINAL, recurring_j: 0 }); capex += HW.BETAALTERMINAL; }
+  const jaarlast = Math.round(capex / HW.AFSCHRIJF_JAAR + recurring);
+  const besparing = +cfg.besparing_j || 0;
+  const netto = besparing > 0 ? Math.round(besparing - recurring) : null;
+  const payback = (besparing - recurring) > 0 ? Math.round(capex / (besparing - recurring) * 10) / 10 : null;
+  return { items, capex_totaal: Math.round(capex), recurring_totaal_j: Math.round(recurring), jaarlast_j: jaarlast, netto_j: netto, payback_j: payback, afschrijf_jaar: HW.AFSCHRIJF_JAAR, kostprijs_kwh: (cfg.kostprijs_kwh != null ? +cfg.kostprijs_kwh : null) };
+}
+app.post('/api/hardware-voorstel', (req, res) => {
+  try { const v = _hwVoorstel(req.body || {}); res.json({ ok: true, voorstel: v, _meta: { server_version: SERVER_VERSIE } }); }
+  catch (e) { console.error('[hardware-voorstel]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ═══ v15.118 (Fase 5 — DESTINATION-LUIK SPOOR 2) ═════════════════════════════════════════════════
+// Parametriseert een BETALEND laadplein — ENKEL na de klant-keuze (Ontwerp deelbeslissing 5; §13.0).
+// Capture rate/dwell per sub-segment (§12.3), volumeformule → sessies/dag met sensitiviteit 0/50/100/150%,
+// drempel = FUNCTIE van de kostprijs uit de sim (§13.1, geen constante), AC/DC-mix uit de verblijfsduur.
+// Onder de AC-drempel: GEEN opbrengstcijfer, wel de reden (§13.3 waarborg 1).
+const DEST = {
+  UNIQUE_FACTOR: 0.375, AVG_SESSIE_KWH: 30, SESSIE_KWH_AC: 18, SESSIE_KWH_DC: 28,
+  // sub-segment → { capture:[lo,hi], dwell_min:[lo,hi] } (§12.3)
+  SUB: {
+    horeca_lunch: { capture: [0.15, 0.25], dwell: [60, 75] }, horeca_diner_mid: { capture: [0.25, 0.35], dwell: [100, 120] },
+    horeca_diner_premium: { capture: [0.35, 0.45], dwell: [150, 180] }, horeca_hotel: { capture: [0.35, 0.50], dwell: [300, 600] },
+    sport_padel: { capture: [0.25, 0.40], dwell: [75, 90] }, sport_tennis: { capture: [0.30, 0.45], dwell: [120, 150] },
+    sport_voetbal: { capture: [0.20, 0.50], dwell: [120, 180] }, sport_hockey_golf: { capture: [0.40, 0.55], dwell: [180, 240] },
+    bedrijf_kantoor: { capture: [0.70, 0.85], dwell: [420, 540] }, bedrijf_garage: { capture: [0.60, 0.75], dwell: [240, 540] },
+    bedrijf_logistiek: { capture: [0.75, 0.90], dwell: [600, 720] }, bedrijf_industrieel: { capture: [0.50, 0.70], dwell: [480, 720] },
+    retail: { capture: [0.10, 0.25], dwell: [30, 60] },
+  },
+  // inverse benchmark-drempel voor de VOLLEDIGE hub (§12.3), enkel als kruiscontrole
+  HUB: { restaurant: { eenheid: 'zitplaatsen', per: 90, drempel: 330 }, sportclub: { eenheid: 'leden', per: 38, drempel: 800 }, bedrijfsparking: { eenheid: 'BEV-wagens', per: 2000, drempel: 15 } },
+};
+function _destVerblijfsTechniek(dwellMin) {
+  if (dwellMin >= 180) return { techniek: 'AC 11 kW', dc: false };
+  if (dwellMin >= 60) return { techniek: 'AC 22 kW', dc: false };
+  if (dwellMin >= 20) return { techniek: 'DC 60-80 kW', dc: true };
+  return { techniek: 'geen destination charging', dc: false };
+}
+// cfg: { verticaal, sub_segment, bezoekers_per_dag, ev_aandeel?, open_dagen?, kostprijs_kwh, concurrentie_500m? }
+function _destinationRaming(cfg) {
+  cfg = cfg || {};
+  const sub = DEST.SUB[cfg.sub_segment] || DEST.SUB.retail;
+  const capLo = sub.capture[0], capHi = sub.capture[1];
+  const dwell = (sub.dwell[0] + sub.dwell[1]) / 2;
+  const evA = (cfg.ev_aandeel != null ? +cfg.ev_aandeel : (String(cfg.verticaal).indexOf('bedrijf') === 0 ? 0.30 : 0.10));
+  const openF = (cfg.open_dagen != null ? +cfg.open_dagen : 300) / 365;
+  const bezoekers = +cfg.bezoekers_per_dag || 0;
+  // concurrentie <500 m drukt de capture rate ~20% relatief per punt (§5.2)
+  const conc = Math.max(0, +cfg.concurrentie_500m || 0);
+  const concFactor = Math.pow(0.8, conc);
+  function volume(captureFrac) {
+    return Math.round(bezoekers * 365 * openF * DEST.UNIQUE_FACTOR * evA * captureFrac * concFactor * DEST.AVG_SESSIE_KWH);
+  }
+  const midCap = (capLo + capHi) / 2;
+  const jaar100 = volume(midCap);
+  const sens = { 0: 0, 50: Math.round(jaar100 * 0.5), 100: jaar100, 150: Math.round(jaar100 * 1.5) };
+  // drempel = functie van de kostprijs uit de sim (§13.1)
+  const kost = (cfg.kostprijs_kwh != null ? +cfg.kostprijs_kwh : null);
+  let drempels = null, boven_ac = null;
+  if (kost != null) {
+    const margeAc = HW.PRIJS_AC_KWH - kost, margeDc = HW.PRIJS_DC_KWH - kost;
+    const beAc = margeAc > 0 ? Math.round(HW.AC_DUBBEL_RECURRING_J + HW.AC_DUBBEL_CAPEX / HW.AFSCHRIJF_JAAR) / margeAc : null;
+    const beDc = margeDc > 0 ? Math.round(HW.DC_2X80_RECURRING_J + HW.DC_2X80_CAPEX / HW.AFSCHRIJF_JAAR) / margeDc : null;
+    drempels = { ac_kwh: beAc ? Math.round(beAc) : null, dc_kwh: beDc ? Math.round(beDc) : null };
+    boven_ac = (beAc != null) ? (jaar100 >= beAc) : null;
+  }
+  const tech = _destVerblijfsTechniek(dwell);
+  // opbrengst enkel tonen als boven de AC-drempel (§13.3 waarborg 1)
+  let opbrengst = null;
+  if (boven_ac && kost != null) {
+    const prijs = tech.dc ? HW.PRIJS_DC_KWH : HW.PRIJS_AC_KWH;
+    opbrengst = { eur_jaar_100: Math.round(jaar100 * (prijs - kost)), prijs_eur_kwh: prijs };
+  }
+  const config = { ac_dubbel: tech.dc ? 0 : 1, dc_2x80: tech.dc ? 1 : 0, techniek: tech.techniek };
+  const reden = tech.techniek === 'geen destination charging'
+    ? 'te korte verblijfsduur — geen destination charging'
+    : (boven_ac === false ? 'onder de rendabele drempel bij uw huidige kostprijs — slimmere sturing verlaagt die drempel' : null);
+  return {
+    spoor: 2, heuristieken_gedraaid: true, verticaal: cfg.verticaal || null, sub_segment: cfg.sub_segment || null,
+    capture_rate: [capLo, capHi], dwell_min: sub.dwell, jaarvolume_kwh_raming: jaar100,
+    sessies_per_dag: Math.round(jaar100 / 365 / (tech.dc ? DEST.SESSIE_KWH_DC : DEST.SESSIE_KWH_AC) * 10) / 10,
+    sensitiviteit_kwh: sens, drempels, boven_drempel: boven_ac, config_advies: config, opbrengst, reden,
+    prijsbasis: { ac_eur_kwh: HW.PRIJS_AC_KWH, dc_eur_kwh: HW.PRIJS_DC_KWH, kost_eur_kwh: kost }, exploitatie_route: 'eplusdrive',
+  };
+}
+app.post('/api/destination-raming', (req, res) => {
+  try { res.json({ ok: true, destination: _destinationRaming(req.body || {}), _meta: { server_version: SERVER_VERSIE } }); }
+  catch (e) { console.error('[destination-raming]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── START ────────────────────────────────────────────────────────────────────
