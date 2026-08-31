@@ -7696,17 +7696,19 @@ function _scanCabines(lat, lon) {
   }
   if (!_cabinesCache) return null;
   const lijst = Array.isArray(_cabinesCache) ? _cabinesCache : (_cabinesCache.cabines || []);
-  let best = null;
+  const nabij = [];
   for (const c of lijst) {
     const cl = c.lat != null ? c.lat : c.latitude, co = c.lon != null ? c.lon : c.longitude;
     if (cl == null || co == null) continue;
-    const d = _haversine(lat, lon, cl, co);
-    if (!best || d < best.afstand_m) best = { lat: cl, lon: co, naam: c.naam || c.name || null, afstand_m: Math.round(d), rest_kva_afname: c.rest_kva_afname != null ? c.rest_kva_afname : (c.restcapaciteit_afname_kva || null) };
+    const d = Math.round(_haversine(lat, lon, cl, co));
+    if (d <= 500) nabij.push({ lat: cl, lon: co, naam: c.naam || c.name || null, afstand_m: d, rest_kva_afname: c.rest_kva_afname != null ? c.rest_kva_afname : (c.restcapaciteit_afname_kva != null ? c.restcapaciteit_afname_kva : null) });
   }
-  if (!best) return null;
+  nabij.sort((a, b) => a.afstand_m - b.afstand_m);
+  const best = nabij[0]; if (!best) return null;
   const m = best.afstand_m;
-  const advies = m <= 80 ? 'MS_MOGELIJK' : (m <= 150 ? 'TWIJFEL' : (m <= 500 ? 'LS' : 'LS_ZEKER'));
-  return { ms_cabine_dichtstbij_m: m, ms_cabine_naam: best.naam, restcapaciteit_afname_kva: best.rest_kva_afname, advies, openbare_weg_tussen: null, bron: 'Fluvius capaciteitskaart (lokale cabines.json)' };
+  const advies = m <= 80 ? 'MS_MOGELIJK' : (m <= 150 ? 'TWIJFEL' : 'LS');
+  // `cabines` (≤500 m, gesorteerd) = door te geven in de kabelplanner-seed (§12.6a); `ms_*` = het klant-verborgen advies.
+  return { ms_cabine_dichtstbij_m: m, ms_cabine_naam: best.naam, restcapaciteit_afname_kva: best.rest_kva_afname, advies, openbare_weg_tussen: null, cabines: nabij.slice(0, 8), bron: 'Fluvius capaciteitskaart (lokale cabines.json)' };
 }
 // Vision-pass (fase 2, bouwspec §7): tel panelen + parkeervakken op de luchtfoto met Claude-vision.
 // Vereist MAPBOX_TOKEN (tile) + ANTHROPIC_API_KEY. Zonder → null (fase 1 blijft: vragen aan de klant).
