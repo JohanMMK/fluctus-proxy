@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.119.0 (2026-08-31, Fase 5c — LEADS DUURZAAM): leads persisteren nu ook naar de Supabase-
+//                bucket (leads/<token>.json, fire-and-forget in _leadOpslaan) en worden bij opstart in het
+//                geheugen gehydrateerd (_leadsHydrate, gepagineerd, gated op SUPABASE_OK). /api/leads leest uit
+//                dat gehydrateerde geheugen samengevoegd met de lokale cache → warme leads en gemailde nota-links
+//                overleven een Railway-redeploy. Scans blijven kortlevend (bewust niet duurzaam gemaakt).
 // Versie:        v15.118.0 (2026-08-31, Fase 5b — HARDWARE-BRUG + DESTINATION + VISION): /api/hardware-voorstel
 //                (KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist "welke PV/batterij/palen" + payback);
 //                /api/destination-raming (spoor 2: capture/dwell §12.3, drempel = functie van de kostprijs §13.1,
@@ -1099,7 +1104,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.118.0'; // v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.119.0'; // v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7187,6 +7192,16 @@ function _leadToken() { return (Date.now().toString(36) + Math.random().toString
 function _leadOpslaan(token, rec) {
   _LEADS.set(token, rec);
   try { fs.mkdirSync(_leadDir, { recursive: true }); fs.writeFileSync(path.join(_leadDir, token + '.json'), JSON.stringify(rec)); } catch (e) { /* best-effort */ }
+  // v15.119: leads persisteren ook naar Supabase-bucket (zelfde bucket als Kamino), zodat ze
+  // Railway-deploys overleven. Fire-and-forget: het lokale bestand + geheugen blijven de snelle
+  // paden; de bucket is de duurzame kopie waaruit we bij opstart hydrateren (_leadsHydrate).
+  if (SUPABASE_OK && /^[a-z0-9]{1,40}$/.test(String(token || ''))) {
+    try {
+      const b64 = Buffer.from(JSON.stringify(rec), 'utf8').toString('base64');
+      _factuurUpload(b64, 'application/json', `leads/${token}.json`)
+        .catch(e => console.warn(`[lead] bucket-upload ${token} faalde (niet blokkerend): ${e.message}`));
+    } catch (e) { /* best-effort */ }
+  }
 }
 function _leadLezen(token) {
   if (!/^[a-z0-9]{1,40}$/.test(String(token || ''))) return null;
@@ -7194,6 +7209,50 @@ function _leadLezen(token) {
   if (!rec) { try { rec = JSON.parse(fs.readFileSync(path.join(_leadDir, token + '.json'), 'utf8')); _LEADS.set(token, rec); } catch (e) { rec = null; } }
   if (rec && (Date.now() - (rec.ts || 0)) > LEAD_TTL_MS) return null;
   return rec || null;
+}
+// v15.119: bij opstart het geheugen (+ lokale cache) hydrateren uit de Supabase-bucket, zodat een
+// Railway-redeploy geen warme leads verliest en gemailde nota-links (die via _leadLezen op het
+// geheugen landen) blijven werken. Niet-blokkerend en volledig gated op SUPABASE_OK; gepagineerd
+// zodat >100 leads ook meekomen. Nooit een verse in-memory record overschrijven met een oudere
+// bucket-kopie (bijgewerkt/ts-vergelijking).
+async function _leadsHydrate() {
+  if (!SUPABASE_OK) return { ok: false, reden: 'geen supabase' };
+  let geladen = 0, offset = 0; const PAGINA = 100;
+  try {
+    for (;;) {
+      const url = `${SUPABASE_URL}/storage/v1/object/list/${FACTUREN_BUCKET}`;
+      const r = await fetch(url, { method: 'POST',
+        headers: { 'Authorization': `Bearer ${SUPABASE_SERVICE_KEY}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prefix: 'leads/', limit: PAGINA, offset, sortBy: { column: 'name', order: 'asc' } }) });
+      if (!r.ok) throw new Error(`list HTTP ${r.status}`);
+      const rij = await r.json();
+      if (!Array.isArray(rij) || rij.length === 0) break;
+      for (const o of rij) {
+        const naam = (o && o.name) || '';
+        const m = naam.match(/^([a-z0-9]{1,40})\.json$/);
+        if (!m) continue;
+        const token = m[1];
+        try {
+          const txt = await _factuurDownload(`leads/${token}.json`);
+          const rec = JSON.parse(txt);
+          const bestaand = _LEADS.get(token);
+          const nieuwerTs = (rec.bijgewerkt || rec.ts || 0);
+          const oudTs = bestaand ? (bestaand.bijgewerkt || bestaand.ts || 0) : -1;
+          if (!bestaand || nieuwerTs >= oudTs) {
+            if ((Date.now() - (rec.ts || 0)) <= LEAD_TTL_MS) {
+              _LEADS.set(token, rec);
+              try { fs.mkdirSync(_leadDir, { recursive: true }); fs.writeFileSync(path.join(_leadDir, token + '.json'), JSON.stringify(rec)); } catch (e) {}
+              geladen++;
+            }
+          }
+        } catch (e) { console.warn(`[lead-hydrate] ${token} faalde: ${e.message}`); }
+      }
+      if (rij.length < PAGINA) break;
+      offset += PAGINA;
+    }
+    console.log(`[lead-hydrate] ${geladen} lead(s) uit bucket in geheugen geladen`);
+    return { ok: true, geladen };
+  } catch (e) { console.warn(`[lead-hydrate] mislukt (niet blokkerend): ${e.message}`); return { ok: false, reden: e.message }; }
 }
 function _validMail(m) { return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(m || '')); }
 async function _brevoMail(to, subject, textContent, htmlContent, senderNaam) {
@@ -7562,12 +7621,20 @@ function _leadScore(rec) {
 app.get('/api/leads', async (req, res) => {
   try {
     if (!(await _isManagerReq(req))) return res.status(401).json({ ok: false, error: 'Manager-login vereist' });
+    // v15.119: bron = het gehydrateerde geheugen (_LEADS, gevuld uit de bucket bij opstart) samengevoegd
+    // met de lokale cache. Zo overleven leads een Railway-redeploy. Geheugen wint bij dubbele token.
+    const recs = new Map();
     let bestanden = [];
     try { bestanden = fs.readdirSync(_leadDir).filter(f => f.endsWith('.json')); } catch (e) {}
-    const leads = [];
     for (const f of bestanden) {
-      let r; try { r = JSON.parse(fs.readFileSync(path.join(_leadDir, f), 'utf8')); } catch (e) { continue; }
       const token = f.replace(/\.json$/, '');
+      try { recs.set(token, JSON.parse(fs.readFileSync(path.join(_leadDir, f), 'utf8'))); } catch (e) {}
+    }
+    for (const [token, r] of _LEADS) { recs.set(token, r); }
+    const leads = [];
+    for (const [token, r] of recs) {
+      if (!r) continue;
+      if ((Date.now() - (r.ts || 0)) > LEAD_TTL_MS) continue;
       const opened = (r.events || []).find(e => e.ev === 'nota_opened');
       leads.push({ token, naam: r.naam || '', mail: r.mail || '', tel: r.tel || '', partner: r.partner || '',
         tier: r.tier || null, verified: !!r.verified, score: r.score != null ? r.score : _leadScore(r),
@@ -7947,6 +8014,7 @@ app.post('/api/destination-raming', (req, res) => {
 
 // ─── START ────────────────────────────────────────────────────────────────────
 laadMarktdata();  // laad marktdata synchroon bij startup
+_leadsHydrate();  // v15.119: leads uit de Supabase-bucket in het geheugen laden (niet-blokkerend)
 
 app.listen(PORT, () => {
   console.log(`Fluctus proxy v${SERVER_VERSIE} luistert op poort ${PORT}`);
