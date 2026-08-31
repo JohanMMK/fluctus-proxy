@@ -4,7 +4,17 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4.6 (juli 2026)
+ * Versie: 1.4.7 (augustus 2026)
+ *
+ * Wijziging v1.4.6 → v1.4.7 (VOORSCHOTFACTUUR-GATE):
+ *   Nieuwe velden is_voorschot (+ voorschot_reden) op de baseCase. Een voorschot-/
+ *   tussentijdse factuur parst wél EAN/adres/DNB/leverancier maar géén verbruik/
+ *   netkosten/maandpiek; zonder gate annualiseert de schil het voorschotbedrag stil fout.
+ *   Detectie op twee niveaus: (a) prompt/schema-vlag door het model, (b) DETERMINISTISCHE
+ *   na-check op de gestructureerde output (geen verbruiksregels; periode ≤ 35 d zonder
+ *   netkosten-detail; geen maandpiek). ANTI-REGRESSIE: verbruik ÉN netkosten aanwezig →
+ *   is_voorschot geforceerd op false (echte afrekening = ongewijzigd pad). De bestaande
+ *   v1.3 voorschot-reconciliatie op AFREKENINGEN (bruto-totaal) blijft onaangeroerd.
  *
  * Wijziging v1.4.5 → v1.4.6 (PER-DAG-VERMOGEN — YUSO/Luminus-presentatiestijl):
  *   Sommige leveranciers presenteren de kW-posten (toegangsvermogen / maandpiek /
@@ -279,6 +289,23 @@ daarna reeds gefactureerde VOORSCHOTTEN af. Wat overblijft is een klein bedrag
   - Gewone maandfactuur zonder voorschotten: voorschottenInclBtw = 0 en
     totaalTeBetalenInclBtw = totaalInclBtw.
 
+VOORSCHOTFACTUUR — DETECTIE (v1.4.7, ZEER BELANGRIJK — verwar NIET met een afrekening):
+Een VOORSCHOTFACTUUR (ook: "tussentijdse factuur", "acompte", "voorschot") is GEEN
+afrekening: ze bevat GEEN gemeten verbruik en GEEN afgerekende netkosten. Ze vraagt
+enkel een geraamd voorschotbedrag voor een korte periode (vaak één maand). Kenmerken:
+  - "Voorschot", "Voorschotfactuur", "Tussentijdse factuur" of "Acompte" in de kop of
+    als omschrijving van de enige/grootste regel.
+  - GEEN verbruiksregels (geen kWh/MWh-hoeveelheden), GEEN meterstanden.
+  - GEEN gedetailleerde netkosten (distributie/capaciteit/heffingen) — hooguit één
+    globaal voorschotbedrag.
+  - Korte periode (± een maand) en geen maandpiek/toegangsvermogen afgerekend.
+Zet dan "is_voorschot": true en beschrijf kort in "voorschot_reden" waarom (bv.
+"kop vermeldt Voorschotfactuur; geen verbruiksregels; periode 1 maand").
+CRUCIAAL ONDERSCHEID: een AFREKENING/SLOTFACTUUR/REGULARISATIE die reeds betaalde
+VOORSCHOTTEN AFTREKT is GEEN voorschotfactuur → "is_voorschot": false. Die heeft wél
+gemeten verbruik én netkosten; het woord "voorschot" staat er enkel in de aftrek-
+regels. Twijfel je, en zijn er verbruiksregels én netkosten? → is_voorschot = false.
+
 KLANTIDENTITEIT (v1.4 — voor CRM):
 - klantnummerLeverancier: het klant-/contractnummer dat de LEVERANCIER aan de
   klant toekent (staat vaak bovenaan bij de klantgegevens). NIET het EAN, NIET
@@ -332,6 +359,8 @@ JSON SCHEMA (output):
   "totaalInclBtw": number,
   "totaalTeBetalenInclBtw": number of null,
   "voorschottenInclBtw": number of null,
+  "is_voorschot": boolean,
+  "voorschot_reden": string of null,
   "_factuurRegels": [
     {
       "omschrijving": string,
@@ -901,6 +930,45 @@ function regelsCheck(parsed) {
 }
 
 // ─── Hoofdfunctie ────────────────────────────────────────────────────────────
+// ─── v1.4.7: VOORSCHOTFACTUUR-DETECTIE ───────────────────────────────────────
+// Een voorschotfactuur parst wél EAN/adres/DNB/leverancier, maar géén verbruik,
+// géén netkosten-detail en géén maandpiek. Zonder gate bouwt de schil daar tóch een
+// baseCase mee en annualiseert het voorschotbedrag ×365/dagen → stil verkeerde marge/
+// heatmap (dezelfde klasse als de dubbele-annualisatie-regressie van 03-08).
+// Deze check is DETERMINISTISCH (op de gestructureerde output), naast de LLM-vlag.
+// ANTI-REGRESSIE: een echte (jaar)afrekening heeft verbruik ÉN netkosten → is_voorschot
+// wordt geforceerd op false, ongeacht de LLM-vlag → exact het bestaande pad.
+function _voorschotPeriodeDagen(van, tot) {
+  if (!van || !tot) return null;
+  var a = new Date(van), b = new Date(tot);
+  if (isNaN(a) || isNaN(b)) return null;
+  var d = Math.round((b - a) / 86400000);
+  return (d >= 0 && d < 3660) ? d : null;
+}
+function detecteerVoorschot(parsed) {
+  var lc = function (s) { return String(s == null ? '' : s).toLowerCase(); };
+  var regels = Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [];
+  var energieRegels = regels.filter(function (r) { return r && r.groep === 'energie' && (+r.aantal > 0) && /wh/i.test(lc(r.eenheid)); });
+  var heeftVerbruik = (+parsed.afnameKwh > 0) || (+parsed.injectieKwh > 0) || energieRegels.length > 0;
+  var netRegels = regels.filter(function (r) { return r && (r.groep === 'distributie' || r.groep === 'heffing') && (+r.bedrag_excl) !== 0; });
+  var heeftNetkosten = (+parsed.totaalDistributieExclBtw > 0) || (+parsed.totaalHeffingenExclBtw > 0) || netRegels.length > 0;
+  // Afrekening-veiligheid: verbruik + netkosten aanwezig → nooit een voorschotfactuur.
+  if (heeftVerbruik && heeftNetkosten) return { is_voorschot: false, voorschot_reden: null };
+  var redenen = [];
+  var llm = (parsed.is_voorschot === true);
+  if (llm) redenen.push('als voorschot-/tussentijdse factuur herkend');
+  if (!heeftVerbruik) redenen.push('geen verbruiks-/meterstandregels');
+  var dagen = _voorschotPeriodeDagen(parsed.periodeVan, parsed.periodeTot);
+  var kortGeenNet = (dagen != null && dagen <= 35 && !heeftNetkosten);
+  if (kortGeenNet) redenen.push('periode ≤ 35 dagen zonder netkosten-detail');
+  var bron = parsed._aansluitvermogenBron || {};
+  var geenPiek = !(bron && bron.maandpiekKw != null);
+  if (geenPiek && !heeftNetkosten) redenen.push('geen maandpiek');
+  // Beslissing: de LLM-vlag, óf het structurele patroon (geen verbruik + korte periode zonder netkosten).
+  var structureel = (!heeftVerbruik) && kortGeenNet;
+  var isV = llm || structureel;
+  return { is_voorschot: !!isV, voorschot_reden: isV ? redenen.join('; ') : null };
+}
 async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY niet beschikbaar');
   if (!Array.isArray(files) || files.length === 0) throw new Error('Geen bestanden meegegeven');
@@ -1166,9 +1234,15 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
     x_contactpersoon:          parsed.contactpersoon || null,
   };
 
+  // v1.4.7: voorschotfactuur-gate (deterministisch + LLM-vlag). Zie detecteerVoorschot.
+  const _voorschot = detecteerVoorschot(parsed);
+  if (_voorschot.is_voorschot && !_provider_flags.includes('voorschotfactuur')) _provider_flags.push('voorschotfactuur');
+
   // Stap 3: response payload
   const baseCase = {
     ...parsed,
+    is_voorschot: _voorschot.is_voorschot,
+    voorschot_reden: _voorschot.voorschot_reden,
     factuurType,
     aansluitVermogenKva,
     totaalExclBtw: totaalExclBtwFinal,
@@ -1212,9 +1286,9 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.4'
+      version: '1.4.7'
     }
   };
 }
 
-module.exports = { run, DNB_TO_TARIEF_KEY };
+module.exports = { run, DNB_TO_TARIEF_KEY, detecteerVoorschot };
