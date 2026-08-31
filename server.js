@@ -1080,7 +1080,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.113.0'; // v15.113.0 (30-08, Fase 4): self-service — /api/lead-verify-send + -check (OTP e-mailverificatie), /api/lead-update (tier|laadpleinen|events), engagement-events voor lead-scoring. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.114.0'; // v15.114.0 (31-08, Fase 4): mandaat-parallel (/api/lead-mandaat — akkoord + back-office-melding + score +20) & herbereken-mail (/api/lead-herbereken, manager-only — sector nu / echte Fluvius-data later → klant krijgt studie gemaild). GET /api/lead/:token geeft nu tier/mag_download voor download-gating. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7267,7 +7267,56 @@ app.get('/api/lead/:token', (req, res) => {
   const rec = _leadLezen(req.params.token);
   if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
   _leadEvent(rec, 'nota_opened', { once: true }, req.params.token);   // time-to-open = nota_opened − ts (lead-scoring)
-  res.json({ ok: true, nota: rec.data });
+  // tier gate: 'view' (nooit betalen) = enkel bekijken, geen download; later/direct/geen tier = download toegestaan.
+  const mag_download = rec.tier ? rec.tier !== 'view' : true;
+  res.json({ ok: true, nota: rec.data, tier: rec.tier || null, verified: !!rec.verified,
+    mag_download, mandaat: rec.mandaat ? { status: rec.mandaat.status || 'aangevraagd', ts: rec.mandaat.ts } : null,
+    herberekend: !!rec.herberekend });
+});
+// v15.114 (Fase 4 — MANDAAT-PARALLEL): de klant geeft, na "HOE" en zijn tier-keuze, akkoord om het Fluvius-
+// mandaat (IMBY / read-mandaat op zijn meetgegevens) te laten organiseren. Wij loggen het akkoord, verwittigen
+// de back-office (accountmanager start de effectieve mandaatprocedure via itsme) en bumpen de warmte-score.
+// De effectieve mandaataanvraag zelf gebeurt buiten deze schil (fluvius-mandaat-flow); dit is de intentie-hook.
+app.post('/api/lead-mandaat', async (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (!rec.verified) return res.status(403).json({ ok: false, error: 'E-mail eerst bevestigen.' });
+    rec.mandaat = { akkoord: true, status: 'aangevraagd', ts: Date.now(),
+      ean: String(b.ean || '').replace(/[^0-9]/g, '').slice(0, 18) || null };
+    _leadEvent(rec, 'mandaat_akkoord', {}, b.token);
+    rec.score = _leadScore(rec); _leadOpslaan(b.token, rec);
+    // Back-office: accountmanager start de effectieve Fluvius-mandaatprocedure (itsme) op dit EAN.
+    const lTxt = `MANDAAT-AKKOORD — klant vraagt de exacte studie op echte meetgegevens (EnergieKompas${rec.partner ? ' ' + rec.partner : ''})\n\nNaam : ${rec.naam || '—'}\nMail : ${rec.mail}\nTel  : ${rec.tel || '—'}\nEAN  : ${rec.mandaat.ean || '(nog niet opgegeven)'}\nTier : ${rec.tier || '—'}\nScore: ${rec.score}\n\n→ Start de Fluvius-mandaatprocedure (IMBY/itsme). Zodra de kwartierdata binnen is: /api/lead-herbereken draaien → klant krijgt automatisch zijn exacte studie gemaild.\n\nNota: ${WEB_BASE}/apps/energiekompas-nota.html?lead=${b.token}`;
+    await _brevoMail(LEAD_MAIL_TO, `MANDAAT-AKKOORD EnergieKompas — ${rec.naam || rec.mail}`, lTxt, null, 'Fluctus EnergieKompas');
+    // Klant: bevestiging dat het mandaat wordt georganiseerd (parallel), hij hoeft niets af te wachten.
+    const kTxt = `Beste${rec.naam ? ' ' + rec.naam : ''},\n\nDank — wij organiseren nu het mandaat op uw meetgegevens (via Fluvius). Zodra uw echte kwartierdata binnen is, herberekenen wij uw studie op úw profiel en mailen wij u het exacte resultaat.\n\nU hoeft niets af te wachten: uw indicatieve analyse blijft intussen beschikbaar.\n\nMet vriendelijke groeten,\nEnergieKompas`;
+    await _brevoMail(rec.mail, 'Wij organiseren uw mandaat — exacte studie volgt', kTxt, null);
+    res.json({ ok: true, status: rec.mandaat.status, score: rec.score });
+  } catch (e) { console.error('[lead-mandaat]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// v15.114 — HERBEREKEN + MAIL. Wordt (optie A) nu al gedraaid op het sector-profiel, en later opnieuw
+// zodra de echte Fluvius-kwartierdata binnen is. Neemt een KPI-snapshot (exact_studie) over, markeert de
+// lead als herberekend en mailt de klant dat zijn (exacte) studie klaarstaat. Manager-only (back-office /
+// mandaat-flow triggert dit); niet publiek, zodat een klant zichzelf geen mail kan sturen.
+app.post('/api/lead-herbereken', async (req, res) => {
+  try {
+    if (!(await _isManagerReq(req))) return res.status(401).json({ ok: false, error: 'Manager-login vereist' });
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (b.exact_studie && typeof b.exact_studie === 'object') rec.exact_studie = b.exact_studie;   // KPI-snapshot
+    if (b.data && typeof b.data === 'object') rec.data = b.data;                                   // verse nota-data
+    const echt = !!b.echte_data;                                                                   // true = op Fluvius-kwartierdata
+    rec.herberekend = true; rec.herberekend_ts = Date.now(); rec.herberekend_echt = echt;
+    if (rec.mandaat && echt) rec.mandaat.status = 'data_binnen';
+    _leadEvent(rec, echt ? 'herberekend_echt' : 'herberekend_sector', {}, b.token);
+    rec.score = _leadScore(rec); _leadOpslaan(b.token, rec);
+    const notaUrl = `${WEB_BASE}/apps/energiekompas-nota.html?lead=${b.token}${rec.partner ? ('&thema=' + encodeURIComponent(rec.partner)) : ''}`;
+    const kop = echt ? 'Uw exacte studie op uw echte meetgegevens staat klaar' : 'Uw studie op uw profiel staat klaar';
+    const kTxt = `Beste${rec.naam ? ' ' + rec.naam : ''},\n\n${echt ? 'Uw Fluvius-kwartierdata is verwerkt. ' : ''}Uw ${echt ? 'exacte ' : ''}studie staat klaar:\n${notaUrl}\n\nMet vriendelijke groeten,\nEnergieKompas`;
+    const kSent = await _brevoMail(rec.mail, kop, kTxt, null);
+    res.json({ ok: true, herberekend: true, echt, mail_klant: kSent.sent, score: rec.score });
+  } catch (e) { console.error('[lead-herbereken]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── v15.113 (Fase 4 — self-service: e-mailverificatie (OTP) + lead-verrijking + engagement) ──────
@@ -7332,6 +7381,7 @@ function _leadScore(rec) {
   if (rec.verified) s += 25;                                   // e-mail bevestigd = echt
   s += ({ direct: 30, later: 18, view: 8 })[rec.tier] || 0;   // koopintentie
   if (ev.includes('laadpleinen_ingevuld')) s += 15;           // zelf ingevuld = warm
+  if (rec.mandaat && rec.mandaat.akkoord) s += 20;            // mandaat-akkoord = zeer warm (echte data volgt)
   if (ev.includes('exact_gestart')) s += 12;                  // exacte studie gevraagd
   if (ev.includes('nota_opened')) s += 6;                     // nota bekeken
   const marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
@@ -7351,6 +7401,7 @@ app.get('/api/leads', async (req, res) => {
       const opened = (r.events || []).find(e => e.ev === 'nota_opened');
       leads.push({ token, naam: r.naam || '', mail: r.mail || '', tel: r.tel || '', partner: r.partner || '',
         tier: r.tier || null, verified: !!r.verified, score: r.score != null ? r.score : _leadScore(r),
+        mandaat: r.mandaat ? (r.mandaat.status || 'aangevraagd') : null, herberekend: !!r.herberekend,
         afname_marge_jaar: (r.samenvatting && r.samenvatting.afname_marge_jaar) || 0,
         injectie_marge_jaar: (r.samenvatting && r.samenvatting.injectie_marge_jaar) || 0,
         kamino_project_id: r.kamino_project_id || null,
