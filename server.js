@@ -1080,7 +1080,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.114.0'; // v15.114.0 (31-08, Fase 4): mandaat-parallel (/api/lead-mandaat — akkoord + back-office-melding + score +20) & herbereken-mail (/api/lead-herbereken, manager-only — sector nu / echte Fluvius-data later → klant krijgt studie gemaild). GET /api/lead/:token geeft nu tier/mag_download voor download-gating. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.115.0'; // v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -4037,9 +4037,13 @@ app.get('/api/mandaat/wachtrij', async (req, res) => {
       const los = JSON.parse(await _factuurDownload('mandaat_los/los.json'));
       for (const en of (los && los.eans) || []) {
         if (gevraagd.indexOf(en.status) < 0) continue;
-        out.push({ project_id: 'LOS', project_naam: 'Fluvius — los (geen project)', los: true, klant: null,
-          factuuradres: null, meter_type: en.meter_type || null,
+        out.push({ project_id: 'LOS', project_naam: 'Fluvius — los (geen project)', los: true,
+          klant: (en.aanvrager && en.aanvrager.naam) || null,
+          factuuradres: en.factuur_adres || null, meter_type: en.meter_type || null,
           ean: en.ean, richting: en.richting || null, status: en.status,
+          aanvrager: en.aanvrager || null, rol: (en.aanvrager && en.aanvrager.rol) || null,
+          partner: en.partner || null, aangevraagd_via: en.aangevraagd_via || null, lead_token: en.lead_token || null,
+          kwartierdata_aanwezig: !!en.kwartierdata_aanwezig,
           referentienummer: en.referentienummer || null, fluvius_adres: en.fluvius_adres || null,
           adres_match: en.adres_match, adres_bevestigd: !!en.adres_bevestigd,
           bevestigd_door: en.bevestigd_door || null, bevestigd_op: en.bevestigd_op || null,
@@ -4145,6 +4149,7 @@ app.post('/api/mandaat/sync', async (req, res) => {
       fluvius_adres: (x && x.fluvius_adres != null) ? String(x.fluvius_adres).slice(0, 300) : null,
       adres_match: (x && x.adres_match != null) ? !!x.adres_match : null,
       richting: (x && x.richting) || null, meter_type: (x && x.meter_type) || null,
+      kwartierdata_aanwezig: (x && x.kwartierdata_aanwezig != null) ? !!x.kwartierdata_aanwezig : null,
     })).filter(x => /^\d{18}$/.test(x.ean));
     if (!genorm.length) return res.status(400).json({ error: 'geen geldige items (elk met een 18-cijferig EAN)' });
     // Alle projecten laden + EAN-index (ean → projectrecord + entry)
@@ -4163,6 +4168,7 @@ app.post('/api/mandaat/sync', async (req, res) => {
       if (it.titularis_mail_masked != null) en.titularis_mail_masked = it.titularis_mail_masked;
       if (it.fluvius_adres != null) en.fluvius_adres = it.fluvius_adres;
       if (it.adres_match != null) en.adres_match = it.adres_match;
+      if (it.kwartierdata_aanwezig != null) en.kwartierdata_aanwezig = it.kwartierdata_aanwezig;
       if (it.richting && !en.richting) en.richting = it.richting;
       en.status = it.status;
       if (it.status === 'aangevraagd' && !en.aangevraagd_op) en.aangevraagd_op = nu;
@@ -7317,6 +7323,145 @@ app.post('/api/lead-herbereken', async (req, res) => {
     const kSent = await _brevoMail(rec.mail, kop, kTxt, null);
     res.json({ ok: true, herberekend: true, echt, mail_klant: kSent.sent, score: rec.score });
   } catch (e) { console.error('[lead-herbereken]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+
+// ─── v15.115 (Fase 4 — SELF-SERVICE MANDAAT-INTAKE) ───────────────────────────────────────────────
+// De klant zet, na factuur-upload en een BEVESTIGDE identiteit (magic-link/OTP), zelf een mandaat op:
+// hij geeft de EAN + wij kennen zijn factuuradres. Wij kunnen Fluvius niet live bevragen vanuit de schil,
+// dus zetten we de intentie in de LOSSE wachtrij (mandaat_los/los.json, status 'wachtrij') met de AANVRAGER
+// (naam/mail/tel uit de geverifieerde lead) + factuuradres. De bestaande back-office-flow (fluvius-mandaat)
+// doet de adres-crosscheck + kwartierdata-check + aanvraag, en schrijft titularis-mail/status terug (sync).
+// De klant volgt zijn status via /api/mandaat/self-status en bevestigt een adres-mismatch via self-bevestig-adres.
+async function _losLaden() {
+  try { const j = JSON.parse(await _factuurDownload('mandaat_los/los.json')); j.eans = j.eans || []; return j; }
+  catch (e) { return { eans: [] }; }
+}
+async function _losBewaren(los) {
+  los.bijgewerkt = new Date().toISOString();
+  await _factuurUpload(Buffer.from(JSON.stringify(los), 'utf8').toString('base64'), 'application/json', 'mandaat_los/los.json');
+  try { _kaminoLijstCache.ts = 0; } catch (e) {}
+}
+app.post('/api/mandaat/self-aanvraag', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ ok: false, error: 'Opslag niet geconfigureerd' });
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (!rec.verified) return res.status(403).json({ ok: false, error: 'Bevestig eerst uw e-mail (magic link).' });
+    const ean = String(b.ean || '').replace(/\D/g, '');
+    if (!/^\d{18}$/.test(ean)) return res.status(400).json({ ok: false, error: 'Geef een geldig EAN (18 cijfers).' });
+    const factuurAdres = b.factuur_adres != null ? String(b.factuur_adres).slice(0, 300) : (rec.data && rec.data.leveringsadres) || null;
+    const los = await _losLaden();
+    let en = los.eans.find(x => x.ean === ean);
+    const bezig = ['actief', 'aangevraagd', 'geleverd'];
+    if (en && bezig.indexOf(en.status) >= 0) {
+      return res.json({ ok: true, already: true, status: en.status, titularis_mail_masked: en.titularis_mail_masked || null,
+        fluvius_adres: en.fluvius_adres || null, kwartierdata_aanwezig: !!en.kwartierdata_aanwezig });
+    }
+    const nu = new Date().toISOString();
+    if (!en) { en = { ean, in_wachtrij_sinds: nu, adres_bevestigd: false, bevestigd_door: null, bevestigd_op: null, opmerking: null, aangevraagd_op: null, actief_op: null, geleverd_op: null }; los.eans.push(en); }
+    en.status = 'wachtrij';
+    const rol = (['klant', 'adviseur'].indexOf(String(b.rol || rec.rol)) >= 0) ? String(b.rol || rec.rol) : 'klant';
+    en.aanvrager = { naam: rec.naam || '', mail: rec.mail, tel: rec.tel || '', rol };
+    if (b.partner || rec.partner) en.partner = String(b.partner || rec.partner).slice(0, 40);
+    en.factuur_adres = factuurAdres;
+    en.aangevraagd_via = 'self-service';
+    en.lead_token = b.token;
+    await _losBewaren(los);
+    // Stempel op de lead zodat de schil de status kan tonen.
+    rec.mandaat_self = { ean, status: 'wachtrij', factuur_adres: factuurAdres, ts: Date.now() };
+    _leadEvent(rec, 'mandaat_self_aangevraagd', {}, b.token);
+    rec.score = _leadScore(rec); _leadOpslaan(b.token, rec);
+    // Back-office verwittigen (verwerkt de wachtrij via de fluvius-mandaat-flow).
+    const lTxt = `SELF-SERVICE MANDAAT-AANVRAAG (EnergieKompas)\n\nAanvrager (geverifieerd — ${rol.toUpperCase()}):\n  Naam : ${rec.naam || '—'}\n  Mail : ${rec.mail}\n  Tel  : ${rec.tel || '—'}${en.partner ? ('\n  Partner: ' + en.partner) : ''}\n\nEAN  : ${ean}\nFactuuradres: ${factuurAdres || '—'}\n\n→ Staat in de wachtrij (losse lijst). Verwerk via de fluvius-mandaat-flow: adres-crosscheck (factuur ↔ Fluvius) + kwartierdata-check, dan aanvraag; schrijf titularis-mail/status terug via /api/mandaat/sync. Bij mismatch: klant bevestigt via self-bevestig-adres.${rol === 'adviseur' ? '\n\nLET OP: aanvrager is ADVISEUR — supermanager kan partner/rol nog corrigeren in de Mandaten-app.' : ''}`;
+    await _brevoMail(LEAD_MAIL_TO, `Self-service mandaat — ${rec.naam || rec.mail} (EAN ${ean})`, lTxt, null, 'Fluctus EnergieKompas');
+    res.json({ ok: true, already: false, status: 'wachtrij', ean });
+  } catch (e) { console.error('[mandaat/self-aanvraag]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.get('/api/mandaat/self-status', async (req, res) => {
+  try {
+    const rec = _leadLezen(req.query.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    const ean = String(req.query.ean || (rec.mandaat_self && rec.mandaat_self.ean) || '').replace(/\D/g, '');
+    if (!/^\d{18}$/.test(ean)) return res.status(400).json({ ok: false, error: 'Geen EAN.' });
+    const los = await _losLaden();
+    const en = los.eans.find(x => x.ean === ean);
+    if (!en) return res.json({ ok: true, gevonden: false, status: null });
+    // Enkel voor de eigen aanvrager (lead-token match) zichtbaar.
+    if (en.lead_token && en.lead_token !== req.query.token) return res.status(403).json({ ok: false, error: 'Geen toegang tot dit mandaat.' });
+    res.json({ ok: true, gevonden: true, ean, status: en.status,
+      titularis_mail_masked: en.titularis_mail_masked || null, fluvius_adres: en.fluvius_adres || null,
+      adres_match: (en.adres_match == null ? null : !!en.adres_match), adres_bevestigd: !!en.adres_bevestigd,
+      kwartierdata_aanwezig: !!en.kwartierdata_aanwezig, factuur_adres: en.factuur_adres || null });
+  } catch (e) { console.error('[mandaat/self-status]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+app.post('/api/mandaat/self-bevestig-adres', async (req, res) => {
+  try {
+    if (!SUPABASE_OK) return res.status(503).json({ ok: false, error: 'Opslag niet geconfigureerd' });
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (!rec.verified) return res.status(403).json({ ok: false, error: 'Bevestig eerst uw e-mail.' });
+    if (typeof b.akkoord !== 'boolean') return res.status(400).json({ ok: false, error: 'akkoord (true/false) verplicht.' });
+    const ean = String(b.ean || (rec.mandaat_self && rec.mandaat_self.ean) || '').replace(/\D/g, '');
+    if (!/^\d{18}$/.test(ean)) return res.status(400).json({ ok: false, error: 'Geen EAN.' });
+    const los = await _losLaden();
+    const en = los.eans.find(x => x.ean === ean);
+    if (!en) return res.status(404).json({ ok: false, error: 'EAN niet in de wachtrij.' });
+    if (en.lead_token && en.lead_token !== b.token) return res.status(403).json({ ok: false, error: 'Geen toegang tot dit mandaat.' });
+    if (en.status !== 'adres_mismatch') return res.status(409).json({ ok: false, error: "Dit mandaat staat niet op 'adres_mismatch'." });
+    const nu = new Date().toISOString();
+    en.bevestigd_door = { naam: rec.naam || '', mail: rec.mail, via: 'self-service' };
+    en.bevestigd_op = nu;
+    if (b.opmerking) en.opmerking = String(b.opmerking).slice(0, 300);
+    if (b.akkoord) { en.adres_bevestigd = true; en.status = 'wachtrij'; } else { en.adres_bevestigd = false; en.status = 'geannuleerd'; }
+    await _losBewaren(los);
+    if (rec.mandaat_self && rec.mandaat_self.ean === ean) { rec.mandaat_self.status = en.status; _leadOpslaan(b.token, rec); }
+    res.json({ ok: true, ean, akkoord: !!b.akkoord, status: en.status });
+  } catch (e) { console.error('[mandaat/self-bevestig-adres]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// MANAGER-ONLY: supermanager corrigeert een losse-lijst-entry (bv. adviseur op de juiste partner zetten, rol
+// aanpassen, een opmerking of status). Zo blijft de attributie kloppen voor commissie/routing.
+app.post('/api/mandaat/los-patch', async (req, res) => {
+  const u = await _managerGuard(req, res); if (!u) return;
+  try {
+    const b = req.body || {};
+    const ean = String(b.ean || '').replace(/\D/g, '');
+    if (!/^\d{18}$/.test(ean)) return res.status(400).json({ ok: false, error: 'geldig EAN verplicht' });
+    const patch = b.patch || {};
+    const los = await _losLaden();
+    const en = los.eans.find(x => x.ean === ean);
+    if (!en) return res.status(404).json({ ok: false, error: 'EAN niet in de losse lijst.' });
+    if (patch.partner !== undefined) en.partner = (patch.partner === null || patch.partner === '') ? null : String(patch.partner).slice(0, 40);
+    if (patch.opmerking !== undefined) en.opmerking = (patch.opmerking == null) ? null : String(patch.opmerking).slice(0, 300);
+    if (patch.rol !== undefined && ['klant', 'adviseur'].indexOf(String(patch.rol)) >= 0) {
+      en.aanvrager = en.aanvrager || {}; en.aanvrager.rol = String(patch.rol);
+    }
+    if (patch.status !== undefined) {
+      if (_MANDAAT_STATUSSEN.indexOf(String(patch.status)) < 0) return res.status(400).json({ ok: false, error: 'ongeldige status' });
+      en.status = String(patch.status);
+    }
+    en.gecorrigeerd_door = { naam: u.naam || u.email || u.id, ts: new Date().toISOString() };
+    await _losBewaren(los);
+    console.log(`[mandaat/los-patch] ${ean} bijgewerkt door ${u.naam || u.id}`);
+    res.json({ ok: true, ean, entry: en });
+  } catch (e) { console.error('[mandaat/los-patch]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// Lichtgewicht identiteit voor de self-service mandaat-intake: mint een lead-token (naam/mail/tel), ZONDER
+// nota-mail of Kamino-seed. De klant bevestigt vervolgens via de bestaande OTP (/api/lead-verify-send + -check),
+// zodat we zeker weten wie het mandaat aanvraagt (early registrar).
+app.post('/api/mandaat/self-identiteit', (req, res) => {
+  try {
+    const b = req.body || {};
+    const mail = String(b.mail || '').trim(), tel = String(b.tel || '').trim(), naam = String(b.naam || '').trim().slice(0, 120);
+    if (!_validMail(mail)) return res.status(400).json({ ok: false, error: 'Ongeldig e-mailadres.' });
+    const rol = (['klant', 'adviseur'].indexOf(String(b.rol)) >= 0) ? String(b.rol) : 'klant';
+    const token = _leadToken();
+    const rec = { mail, tel, naam, bron: 'mandaat-intake', rol, partner: String(b.partner || '').slice(0, 40),
+      data: { leveringsadres: b.leveringsadres != null ? String(b.leveringsadres).slice(0, 300) : null },
+      samenvatting: { afname_marge_jaar: 0, injectie_marge_jaar: 0, energiekost_nu_mwh: 0, energiekost_dyn_mwh: 0 },
+      interesses: [], ts: Date.now() };
+    _leadOpslaan(token, rec);
+    res.json({ ok: true, token });
+  } catch (e) { console.error('[mandaat/self-identiteit]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ─── v15.113 (Fase 4 — self-service: e-mailverificatie (OTP) + lead-verrijking + engagement) ──────
