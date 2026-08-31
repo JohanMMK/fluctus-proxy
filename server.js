@@ -1,6 +1,16 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.121.0 (2026-08-31, Fase 5c — NBB-WINST): winstcijfers uit de neergelegde jaarrekening via de
+//                GRATIS NBB-Balanscentrale-webservice "Authentic Data Query" (_bedrijfsWinst — 2 calls: references
+//                + accountingData, headers NBB-CBSO-Subscription-Key/X-Request-Id, codes 9904/9903/9900/70).
+//                Env NBB_CBSO_KEY. Toegevoegd aan de locatiescan (scan.financieel) + los testbaar via
+//                GET /api/bedrijfswinst?btw=. Voedt de nota-noemer "besparing = X% van uw winst". Zonder key → null.
+// Versie:        v15.120.0 (2026-08-31, Fase 5c — KBO-ADAPTER): _scanKbo is nu een provider-tolerante CBE/KBO-
+//                REST-adapter (KBO_API = basis-URL, KBO_API_KEY = bearer-token) die werkt met cbeapi.be én de
+//                Crossroads/kbodata.app-API. Leest NACE + ondernemingen-op-adres + (indien de provider ze levert)
+//                de bestuurders, tolerant over veldvormen. cbeapi.be geeft GEEN bestuurders; kbodata.app wel
+//                (EnterpriseRoles, groter plan). Zonder key/bron → null, scan valt terug op heuristiek. Geen regressie.
 // Versie:        v15.119.0 (2026-08-31, Fase 5c — LEADS DUURZAAM): leads persisteren nu ook naar de Supabase-
 //                bucket (leads/<token>.json, fire-and-forget in _leadOpslaan) en worden bij opstart in het
 //                geheugen gehydrateerd (_leadsHydrate, gepagineerd, gated op SUPABASE_OK). /api/leads leest uit
@@ -1104,7 +1114,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.119.0'; // v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.121.0'; // v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7711,17 +7721,120 @@ async function _scanGrbDak(lat, lon) {
   const opp = +f.properties.OPPERVL || +f.properties.SHAPE_AREA || null;
   return opp ? { opp_m2: Math.round(opp), bron_opp: 'GRB' } : null;
 }
+// v15.120: provider-tolerante CBE/KBO-REST-adapter. Werkt zowel met cbeapi.be als met de
+// Crossroads/kbodata.app-API (en elke soortgelijke): je zet KBO_API = de basis-URL tot vlak vóór
+// het ondernemingsnummer, en KBO_API_KEY = de bearer-token. De parser leest NACE, ondernemingen-op-
+// adres en (indien de provider ze levert) de bestuurders uit meerdere mogelijke veldvormen. Zonder
+// bron of key → null; de scan valt netjes terug op de sector-heuristiek. Geen regressie.
+//   cbeapi.be           → KBO_API=https://cbeapi.be/api/v1/enterprise   (NACE/adres, GEEN bestuurders)
+//   crossroadsbankent.  → KBO_API=https://api.kbodata.app/v2/enterprise (NACE/adres + bestuurders*)
+//   (*bestuurders: EnterpriseRoles, doorgaans op een groter plan)
+function _kboTekst(v) { // multilingual {nl,fr,en} of string → string
+  if (!v) return null;
+  if (typeof v === 'string') return v;
+  return v.nl || v.NL || v.nederlands || v.fr || v.en || v.value || null;
+}
 async function _scanKbo(btw) {
-  // NACE + multi-tenant. Vereist KBO-databron (open data of API). Zonder → null.
+  // NACE + multi-tenant (+ bestuurders indien beschikbaar). Vereist KBO-databron (API of open data). Zonder → null.
   if (!btw || (!process.env.KBO_API && !fs.existsSync(path.join(__dirname, 'data', 'kbo')))) return null;
   try {
     if (process.env.KBO_API) {
-      const r = await fetch(`${process.env.KBO_API.replace(/\/+$/, '')}/${String(btw).replace(/\D/g, '')}`);
-      if (!r.ok) return null; const j = await r.json();
-      return { nace: j.nace || null, type: null, ondernemingen_op_adres: j.ondernemingen_op_adres || null, bron: 'KBO' };
+      const nr = String(btw).replace(/\D/g, '');
+      if (!nr) return null;
+      const headers = { 'accept': 'application/json' };
+      const key = process.env.KBO_API_KEY || process.env.CBEAPI_KEY;
+      if (key) headers['Authorization'] = /\s/.test(key) ? key : `Bearer ${key}`;  // 'Bearer xxx' of kale token
+      const r = await fetch(`${process.env.KBO_API.replace(/\/+$/, '')}/${nr}`, { headers });
+      if (!r.ok) return null;
+      const j = await r.json();
+      const ent = j.enterprise || j.data || j;   // sommige providers wikkelen in {enterprise:...}
+      // NACE — top-level of uit een activiteitenlijst
+      const acts = ent.Activities || ent.activities || ent.nace_activities || [];
+      let nace = ent.nace || ent.naceCode || null;
+      if (!nace && Array.isArray(acts) && acts.length) {
+        const a = acts[0];
+        nace = (a.Nace && (a.Nace.naceCode || a.Nace.code)) || a.nace || a.naceCode || a.code || null;
+      }
+      // Ondernemingen op adres (multi-tenant) — meerdere mogelijke veldnamen
+      const opAdres = ent.ondernemingen_op_adres != null ? ent.ondernemingen_op_adres
+                    : (ent.enterprises_at_address != null ? ent.enterprises_at_address
+                    : (ent.establishments_count != null ? ent.establishments_count : null));
+      // Bestuurders — EnterpriseRoles / roles / mandataries / directors, tolerant gemapt
+      const rollen = ent.EnterpriseRoles || ent.enterpriseRoles || ent.roles || ent.mandataries || ent.directors || null;
+      let bestuurders = null;
+      if (Array.isArray(rollen) && rollen.length) {
+        bestuurders = rollen.map(x => {
+          const voor = x.nameFirst || x.firstName || x.voornaam || '';
+          const achter = x.nameLast || x.lastName || x.naam || x.name || '';
+          const naam = (`${voor} ${achter}`).trim() || _kboTekst(x.denomination) || null;
+          const functie = _kboTekst(x.Role && (x.Role.title || x.Role.name)) || _kboTekst(x.role) || _kboTekst(x.function) || _kboTekst(x.title) || null;
+          return { naam, functie, sinds: x.dateInOffice || x.since || x.sinds || null };
+        }).filter(b => b.naam);
+        if (!bestuurders.length) bestuurders = null;
+      }
+      const naam = _kboTekst(ent.denomination) || _kboTekst(ent.name) || ent.enterpriseName || null;
+      return { nace: nace || null, type: null, ondernemingen_op_adres: opAdres, bestuurders, naam, bron: 'KBO' };
     }
   } catch (e) {}
   return null;
+}
+// v15.121: WINSTCIJFERS uit de neergelegde jaarrekening via de GRATIS NBB-Balanscentrale-webservice
+// "Authentic Data Query" (developer.cbso.nbb.be → gratis registratie → 'Authentic Data Query'
+// abonneren → primary key). Env NBB_CBSO_KEY (verplicht), NBB_CBSO_BASE (default prod). Twee calls:
+//   1) GET {base}/authentic/legalEntity/{ondernemingsnr}/references   → lijst neerleggingen
+//   2) GET {base}/authentic/deposit/{referentie}/accountingData        → rubrieken (code→waarde)
+// Headers: NBB-CBSO-Subscription-Key, X-Request-Id, Accept: application/json.
+// Winst-codes: 9904 = winst/verlies boekjaar (netto), 9903/9901 = winst vóór belasting,
+// 9900 = brutomarge (verkort/micro), 70 = omzet (volledig schema). Enkel vennootschappen die
+// neerleggen; eenmanszaken → null. Zonder key → null (nota valt terug op sector/geen winst-noemer).
+function _reqId() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0; return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16); }); }
+async function _nbbHaal(url) {
+  const key = process.env.NBB_CBSO_KEY; if (!key) return null;
+  const r = await fetch(url, { headers: { 'NBB-CBSO-Subscription-Key': key, 'X-Request-Id': _reqId(), 'Accept': 'application/json' } });
+  if (!r.ok) return null;
+  return r.json();
+}
+async function _bedrijfsWinst(btw) {
+  const key = process.env.NBB_CBSO_KEY;
+  if (!btw || !key) return null;
+  const nr = String(btw).replace(/\D/g, '');
+  if (nr.length < 9) return null;
+  const base = (process.env.NBB_CBSO_BASE || 'https://ws.cbso.nbb.be').replace(/\/+$/, '');
+  try {
+    const refs = await _nbbHaal(`${base}/authentic/legalEntity/${nr}/references`);
+    const lijst = Array.isArray(refs) ? refs : ((refs && (refs.references || refs.Data || refs.data)) || []);
+    if (!Array.isArray(lijst) || !lijst.length) return null;
+    // Kies de meest recente neerlegging (op einddatum boekjaar, anders neerleggingsdatum).
+    const gekozen = lijst.map(x => ({
+      ref: x.ReferenceNumber || x.referenceNumber || x.reference || x.Reference || null,
+      eind: (x.ExerciseDates && (x.ExerciseDates.endDate || x.ExerciseDates.EndDate)) || x.exerciseEndDate || x.EndDate || x.DepositDate || x.depositDate || null,
+    })).filter(x => x.ref).sort((a, b) => String(b.eind || '').localeCompare(String(a.eind || '')))[0];
+    if (!gekozen) return null;
+    const acc = await _nbbHaal(`${base}/authentic/deposit/${encodeURIComponent(gekozen.ref)}/accountingData`);
+    if (!acc) return null;
+    // Recursief alle {code, waarde} verzamelen voor de HUIDIGE periode (N, niet N-1).
+    const rub = {};
+    (function walk(o) {
+      if (!o || typeof o !== 'object') return;
+      if (Array.isArray(o)) { o.forEach(walk); return; }
+      const code = o.Code != null ? o.Code : (o.code != null ? o.code : (o.rubricCode != null ? o.rubricCode : o.RubricCode));
+      const per = String(o.Period || o.period || o.PeriodType || 'N').toUpperCase();
+      let val = o.Value != null ? o.Value : (o.value != null ? o.value : (o.amount != null ? o.amount : o.Amount));
+      if (code != null && val != null && per.charAt(0) === 'N' && !per.includes('1')) {
+        const c = String(code).trim();
+        const n = Number(val);
+        if (rub[c] === undefined && !isNaN(n)) rub[c] = n;
+      }
+      for (const k in o) walk(o[k]);
+    })(acc);
+    const g = c => (rub[c] != null && !isNaN(rub[c])) ? rub[c] : null;
+    const nettowinst = g('9904');
+    const winstVoorBelasting = g('9903') != null ? g('9903') : g('9901');
+    const brutomarge = g('9900');
+    const omzet = g('70');
+    if (nettowinst == null && winstVoorBelasting == null && brutomarge == null && omzet == null) return null;
+    return { boekjaar_einde: gekozen.eind || null, nettowinst, winst_voor_belasting: winstVoorBelasting, brutomarge, omzet, bron: 'NBB', bron_ref: gekozen.ref };
+  } catch (e) { return null; }
 }
 async function _scanPlaces(adres, naam) {
   const key = process.env.GOOGLE_PLACES_KEY; if (!key || (!adres && !naam)) return null;
@@ -7819,11 +7932,12 @@ async function _runLocatiescan(id, inp) {
   try {
     const geo = await _bronZacht('geocode', () => _scanGeocode(inp.adres));
     const lat = geo && geo.lat, lon = geo && geo.lon;
-    const [dak, kbo, places, ocm] = await Promise.all([
+    const [dak, kbo, places, ocm, winst] = await Promise.all([
       _bronZacht('grb', () => _scanGrbDak(lat, lon)),
       _bronZacht('kbo', () => _scanKbo(inp.btw)),
       _bronZacht('places', () => _scanPlaces(inp.adres, inp.bedrijfsnaam)),
       _bronZacht('ocm', () => _scanOcm(lat, lon)),
+      _bronZacht('nbb-winst', () => _bedrijfsWinst(inp.btw)),
     ]);
     const cabines = _scanCabines(lat, lon);   // lokaal, synchroon
     const sector = _scanSectorprofiel(kbo && kbo.nace);
@@ -7836,10 +7950,11 @@ async function _runLocatiescan(id, inp) {
       beeld: luchtfoto ? { bron: 'mapbox-satellite', url: luchtfoto } : null,
       dak: (dak || vision) ? { opp_m2: dak && dak.opp_m2 || null, bron_opp: dak && dak.bron_opp || null, pv_bestaand_kwp: vision && vision.pv_bestaand_kwp != null ? vision.pv_bestaand_kwp : null, pv_panelen_geteld: vision && vision.pv_panelen_geteld || null, pv_vrij_kwp: null, confidence: vision && vision.confidence || (dak ? 'midden' : 'laag') } : null,
       parking: (vision && vision.parkeerplaatsen != null) ? { plaatsen_totaal: vision.parkeerplaatsen, belijning: null, methode: 'vision', confidence: vision.confidence || 'laag' } : null,   // fase 2 (vision); anders leeg → klant vult in
-      profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
+      profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), onderneming: kbo && kbo.naam || null, bestuurders: kbo && kbo.bestuurders || null, bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
       omgeving: ocm ? { laadpunten_5km: { dc: ocm.dc, ac: ocm.ac, dichtstbij_m: ocm.dichtstbij_m } } : null,
       netaansluiting: cabines || null,
       eigendom: (kbo && kbo.ondernemingen_op_adres != null) ? { multi_tenant: kbo.ondernemingen_op_adres > 1, ondernemingen_op_adres: kbo.ondernemingen_op_adres } : null,
+      financieel: winst ? { boekjaar_einde: winst.boekjaar_einde, nettowinst: winst.nettowinst, winst_voor_belasting: winst.winst_voor_belasting, brutomarge: winst.brutomarge, omzet: winst.omzet, bron: 'NBB-jaarrekening', confidence: 'hoog' } : null,   // v15.121 — winst-noemer voor "besparing = X% van uw winst"
     };
     // status: 'klaar' als er iets bruikbaars is, anders 'leeg' (UI valt terug op leeg formulier).
     const iets = !!(scan.beeld || scan.dak || scan.profiel || scan.omgeving || scan.netaansluiting);
@@ -7877,6 +7992,19 @@ app.get('/api/locatiescan/:scan_id', (req, res) => {
   const rec = _scanLees(req.params.scan_id);
   if (!rec) return res.status(404).json({ ok: false, error: 'Scan niet gevonden of verlopen.' });
   res.json({ ok: true, status: rec.status, scan: rec.scan || null, confidence: rec.confidence || {} });
+});
+// v15.121: winst-koppeling los testbaar — GET /api/bedrijfswinst?btw=0757494180 → NBB-jaarrekeningcijfers.
+// Zo kan de NBB-link (key + endpoints) geverifieerd worden zonder een volledige scan. Winst is publieke
+// data; geen login vereist. Zonder NBB_CBSO_KEY → 503 met duidelijke reden.
+app.get('/api/bedrijfswinst', async (req, res) => {
+  try {
+    if (!process.env.NBB_CBSO_KEY) return res.status(503).json({ ok: false, error: 'NBB_CBSO_KEY niet gezet — zet de sleutel van developer.cbso.nbb.be (Authentic Data Query).' });
+    const btw = String(req.query.btw || '').replace(/\D/g, '');
+    if (btw.length < 9) return res.status(400).json({ ok: false, error: 'Geef een geldig ondernemingsnummer via ?btw=' });
+    const w = await _bedrijfsWinst(btw);
+    if (!w) return res.json({ ok: true, gevonden: false, reden: 'Geen neergelegde jaarrekening gevonden (of eenmanszaak).', btw });
+    res.json({ ok: true, gevonden: true, btw, winst: w, _meta: { server_version: SERVER_VERSIE } });
+  } catch (e) { console.error('[bedrijfswinst]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ═══ v15.118 (Fase 5 — HARDWARE-BRUG) ════════════════════════════════════════════════════════════
