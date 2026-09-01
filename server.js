@@ -1,6 +1,16 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.124.0 (2026-08-31, Fase 5c — KBO testendpoint): GET /api/kbo?btw= om de cbeapi/kbodata-link
+//                los te verifiëren (NACE + naam + adres + bestuurders), symmetrisch met /api/bedrijfswinst.
+// Versie:        v15.123.0 (2026-08-31, Fase 5c — KBO adres): _scanKbo geeft nu ook het maatschappelijke-zetel-adres
+//                mee (tolerant over cbeapi address{} en kbodata Address{}), naast NACE/naam/bestuurders. Zo levert
+//                één KBO-call NACE + naam + adres + bestuurders (bestuurders enkel via kbodata.app). scan.profiel
+//                draagt maatschappelijke_zetel.
+// Versie:        v15.122.0 (2026-08-31, Fase 5c — KBO cbeapi bevestigd): _scanKbo geverifieerd tegen cbeapi.be
+//                (KBO_API=https://cbeapi.be/api/v1/company, Bearer-auth, respons {data:{...}}, NACE in
+//                nace_activities[].code). NACE-keuze kiest nu de hoofdactiviteit (classification 'main') + nieuwste
+//                nace_version i.p.v. de eerste rij. cbeapi levert geen bestuurders/tenant-telling (blijven null).
 // Versie:        v15.121.0 (2026-08-31, Fase 5c — NBB-WINST): winstcijfers uit de neergelegde jaarrekening via de
 //                GRATIS NBB-Balanscentrale-webservice "Authentic Data Query" (_bedrijfsWinst — 2 calls: references
 //                + accountingData, headers NBB-CBSO-Subscription-Key/X-Request-Id, codes 9904/9903/9900/70).
@@ -1114,7 +1124,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.121.0'; // v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.124.0'; // v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7748,11 +7758,18 @@ async function _scanKbo(btw) {
       if (!r.ok) return null;
       const j = await r.json();
       const ent = j.enterprise || j.data || j;   // sommige providers wikkelen in {enterprise:...}
-      // NACE — top-level of uit een activiteitenlijst
+      // NACE — top-level of uit een activiteitenlijst. Voorkeur: classificatie 'main'/'hoofd',
+      // daarna de nieuwste nace_version (cbeapi geeft bv. zowel 2008 als 2025, main + secondary).
       const acts = ent.Activities || ent.activities || ent.nace_activities || [];
       let nace = ent.nace || ent.naceCode || null;
       if (!nace && Array.isArray(acts) && acts.length) {
-        const a = acts[0];
+        const gesorteerd = acts.slice().sort((x, y) => {
+          const mx = /main|hoofd/i.test(String(x.classification || x.Classification || '')) ? 0 : 1;
+          const my = /main|hoofd/i.test(String(y.classification || y.Classification || '')) ? 0 : 1;
+          if (mx !== my) return mx - my;
+          return String(y.nace_version || y.naceVersion || '').localeCompare(String(x.nace_version || x.naceVersion || ''));
+        });
+        const a = gesorteerd[0];
         nace = (a.Nace && (a.Nace.naceCode || a.Nace.code)) || a.nace || a.naceCode || a.code || null;
       }
       // Ondernemingen op adres (multi-tenant) — meerdere mogelijke veldnamen
@@ -7773,7 +7790,19 @@ async function _scanKbo(btw) {
         if (!bestuurders.length) bestuurders = null;
       }
       const naam = _kboTekst(ent.denomination) || _kboTekst(ent.name) || ent.enterpriseName || null;
-      return { nace: nace || null, type: null, ondernemingen_op_adres: opAdres, bestuurders, naam, bron: 'KBO' };
+      // Maatschappelijke zetel / adres — tolerant over cbeapi (address{}) en kbodata (Address{}) veldvormen.
+      const adr = ent.address || ent.Address || null;
+      let adres = null;
+      if (adr && typeof adr === 'object') {
+        adres = _kboTekst(adr.full_address) || _kboTekst(adr.fullAddress) || ([
+          _kboTekst(adr.street) || _kboTekst(adr.streetName),
+          adr.street_number || adr.number || adr.houseNumber || adr.house_number,
+          (adr.box ? ('bus ' + adr.box) : ''),
+          adr.post_code || adr.postCode || adr.zipcode || adr.zipCode,
+          _kboTekst(adr.city) || _kboTekst(adr.municipality),
+        ].filter(Boolean).join(' ').trim() || null);
+      } else if (typeof adr === 'string') { adres = adr; }
+      return { nace: nace || null, type: null, ondernemingen_op_adres: opAdres, bestuurders, naam, adres, bron: 'KBO' };
     }
   } catch (e) {}
   return null;
@@ -7950,7 +7979,7 @@ async function _runLocatiescan(id, inp) {
       beeld: luchtfoto ? { bron: 'mapbox-satellite', url: luchtfoto } : null,
       dak: (dak || vision) ? { opp_m2: dak && dak.opp_m2 || null, bron_opp: dak && dak.bron_opp || null, pv_bestaand_kwp: vision && vision.pv_bestaand_kwp != null ? vision.pv_bestaand_kwp : null, pv_panelen_geteld: vision && vision.pv_panelen_geteld || null, pv_vrij_kwp: null, confidence: vision && vision.confidence || (dak ? 'midden' : 'laag') } : null,
       parking: (vision && vision.parkeerplaatsen != null) ? { plaatsen_totaal: vision.parkeerplaatsen, belijning: null, methode: 'vision', confidence: vision.confidence || 'laag' } : null,   // fase 2 (vision); anders leeg → klant vult in
-      profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), onderneming: kbo && kbo.naam || null, bestuurders: kbo && kbo.bestuurders || null, bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
+      profiel: (sector || kbo) ? { nace: kbo && kbo.nace || null, type: sector && sector.type || null, venster: (places && places.openingsuren) ? 'uit Places' : (sector && sector.venster || null), onderneming: kbo && kbo.naam || null, maatschappelijke_zetel: kbo && kbo.adres || null, bestuurders: kbo && kbo.bestuurders || null, bron: kbo ? 'KBO' + (places ? '+Places' : '') : 'heuristiek', confidence: kbo ? 'hoog' : 'laag' } : null,
       omgeving: ocm ? { laadpunten_5km: { dc: ocm.dc, ac: ocm.ac, dichtstbij_m: ocm.dichtstbij_m } } : null,
       netaansluiting: cabines || null,
       eigendom: (kbo && kbo.ondernemingen_op_adres != null) ? { multi_tenant: kbo.ondernemingen_op_adres > 1, ondernemingen_op_adres: kbo.ondernemingen_op_adres } : null,
@@ -8005,6 +8034,19 @@ app.get('/api/bedrijfswinst', async (req, res) => {
     if (!w) return res.json({ ok: true, gevonden: false, reden: 'Geen neergelegde jaarrekening gevonden (of eenmanszaak).', btw });
     res.json({ ok: true, gevonden: true, btw, winst: w, _meta: { server_version: SERVER_VERSIE } });
   } catch (e) { console.error('[bedrijfswinst]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// v15.124: KBO-koppeling los testbaar — GET /api/kbo?btw=0757494180 → NACE + naam + adres + bestuurders.
+// Zo kan de cbeapi.be- of kbodata.app-link geverifieerd worden zonder een volledige scan. Publieke data;
+// geen login. Zonder KBO_API → 503 met duidelijke reden.
+app.get('/api/kbo', async (req, res) => {
+  try {
+    if (!process.env.KBO_API) return res.status(503).json({ ok: false, error: 'KBO_API niet gezet — zet KBO_API (+ KBO_API_KEY) van cbeapi.be of kbodata.app.' });
+    const btw = String(req.query.btw || '').replace(/\D/g, '');
+    if (btw.length < 9) return res.status(400).json({ ok: false, error: 'Geef een geldig ondernemingsnummer via ?btw=' });
+    const k = await _scanKbo(btw);
+    if (!k) return res.json({ ok: true, gevonden: false, reden: 'Geen KBO-data gevonden of provider gaf niets terug.', btw });
+    res.json({ ok: true, gevonden: true, btw, kbo: { nace: k.nace, naam: k.naam, adres: k.adres, ondernemingen_op_adres: k.ondernemingen_op_adres, bestuurders: k.bestuurders }, _meta: { server_version: SERVER_VERSIE } });
+  } catch (e) { console.error('[kbo]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 
 // ═══ v15.118 (Fase 5 — HARDWARE-BRUG) ════════════════════════════════════════════════════════════
