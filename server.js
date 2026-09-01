@@ -1,6 +1,11 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.127.0 (2026-08-31, Fase 5c — KBO includes): kbodata vereist include-params om Activities/
+//                Address/Denominations/EnterpriseRoles mee te geven (plan-gated: NACE/adres/naam = Medium,
+//                bestuurders = Large). _kboUrl voegt ze toe op een kbodata-host (KBO_INCLUDE env, default zonder
+//                EnterpriseRoles). Naam nu ook uit Denominations-array, adres tolerant voor [Address]. cbeapi
+//                ongewijzigd (alles inline). Debug-endpoint stuurt dezelfde includes mee.
 // Versie:        v15.126.0 (2026-08-31, Fase 5c — KBO kbodata-wrapper): _scanKbo herkent nu ook de kbodata-vorm
 //                {Enterprise:{...}} (hoofdletter). Debug-venster verruimd naar 6000 tekens om de volledige
 //                kbodata-respons te kunnen mappen (naam/adres/NACE/bestuurders).
@@ -1130,7 +1135,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.126.0'; // v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.127.0'; // v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7750,6 +7755,34 @@ function _kboTekst(v) { // multilingual {nl,fr,en} of string → string
   if (typeof v === 'string') return v;
   return v.nl || v.NL || v.nederlands || v.fr || v.en || v.value || null;
 }
+// Naam tolerant uit: direct veld, of een Denominations/names-array (voorkeur maatschappelijke benaming).
+function _kboNaam(ent) {
+  const direct = _kboTekst(ent.denomination) || _kboTekst(ent.name) || ent.enterpriseName;
+  if (direct) return direct;
+  const arr = ent.Denominations || ent.denominations || ent.names || ent.Names;
+  if (Array.isArray(arr) && arr.length) {
+    const sorted = arr.slice().sort((a, b) => {
+      const ta = /001|social|maatsch/i.test(String(a.typeOfDenomination || a.type || a.typeCode || '')) ? 0 : 1;
+      const tb = /001|social|maatsch/i.test(String(b.typeOfDenomination || b.type || b.typeCode || '')) ? 0 : 1;
+      return ta - tb;
+    });
+    for (const d of sorted) {
+      const s = (typeof d === 'string') ? d : (_kboTekst(d.denomination) || _kboTekst(d.value) || _kboTekst(d.name));
+      if (s) return s;
+    }
+  }
+  return null;
+}
+// kbodata vereist include-params (plan-gated) om Activities/Address/Denominations/EnterpriseRoles mee te geven;
+// elk include telt als één extra request. Default zonder EnterpriseRoles (dat vergt het Large-plan) — zet
+// KBO_INCLUDE om dit te sturen (bv. "Activities,Denominations,Address,EnterpriseRoles" op een Large-plan).
+// cbeapi geeft alles inline en heeft dit niet nodig → enkel toepassen op een kbodata-host.
+function _kboUrl(base, nr) {
+  if (!/kbodata/i.test(base)) return `${base}/${nr}`;
+  const inc = (process.env.KBO_INCLUDE || 'Activities,Denominations,Address').split(',').map(s => s.trim()).filter(Boolean);
+  const qs = ['lang=nl', ...inc.map(i => `include=${encodeURIComponent(i)}`)].join('&');
+  return `${base}/${nr}?${qs}`;
+}
 async function _scanKbo(btw) {
   // NACE + multi-tenant (+ bestuurders indien beschikbaar). Vereist KBO-databron (API of open data). Zonder → null.
   if (!btw || (!process.env.KBO_API && !fs.existsSync(path.join(__dirname, 'data', 'kbo')))) return null;
@@ -7760,7 +7793,7 @@ async function _scanKbo(btw) {
       const headers = { 'accept': 'application/json' };
       const key = process.env.KBO_API_KEY || process.env.CBEAPI_KEY;
       if (key) headers['Authorization'] = /\s/.test(key) ? key : `Bearer ${key}`;  // 'Bearer xxx' of kale token
-      const r = await fetch(`${process.env.KBO_API.replace(/\/+$/, '')}/${nr}`, { headers });
+      const r = await fetch(_kboUrl(process.env.KBO_API.replace(/\/+$/, ''), nr), { headers });
       if (!r.ok) return null;
       const j = await r.json();
       const ent = j.Enterprise || j.enterprise || j.data || j;   // kbodata wikkelt in {Enterprise:...}, cbeapi in {data:...}
@@ -7795,9 +7828,10 @@ async function _scanKbo(btw) {
         }).filter(b => b.naam);
         if (!bestuurders.length) bestuurders = null;
       }
-      const naam = _kboTekst(ent.denomination) || _kboTekst(ent.name) || ent.enterpriseName || null;
-      // Maatschappelijke zetel / adres — tolerant over cbeapi (address{}) en kbodata (Address{}) veldvormen.
-      const adr = ent.address || ent.Address || null;
+      const naam = _kboNaam(ent);
+      // Maatschappelijke zetel / adres — tolerant over cbeapi (address{}) en kbodata (Address{} of [Address]).
+      let adr = ent.address || ent.Address || null;
+      if (Array.isArray(adr)) adr = adr[0] || null;
       let adres = null;
       if (adr && typeof adr === 'object') {
         adres = _kboTekst(adr.full_address) || _kboTekst(adr.fullAddress) || ([
@@ -8053,7 +8087,7 @@ app.get('/api/kbo', async (req, res) => {
     // worden (401=verkeerde key, 404=ander pad/nr, 200 met andere vorm=parser). Key wordt NOOIT teruggegeven.
     if (String(req.query.debug || '') === '1') {
       const base = process.env.KBO_API.replace(/\/+$/, '');
-      const url = `${base}/${btw}`;
+      const url = _kboUrl(base, btw);
       const headers = { 'accept': 'application/json' };
       const key = process.env.KBO_API_KEY || process.env.CBEAPI_KEY;
       if (key) headers['Authorization'] = /\s/.test(key) ? key : `Bearer ${key}`;
