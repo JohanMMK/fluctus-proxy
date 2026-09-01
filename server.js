@@ -1,6 +1,12 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.130.0 (2026-09-01, Fase 6 — OFFERTE-HERANALYSE): POST /api/offerte-heranalyse leest een geüploade
+//                offerte (eigen of concurrent) via Claude-vision (module factuur/offerte.js) en geeft er een eerlijke
+//                second opinion op tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen,
+//                terugverdientijd berekend op óns jaarvoordeel, Fluctus-meerwaarde (spot-arbitrage + passieve onbalans-
+//                respons — geen netbalanceringsdiensten) en aandachtspunten. Geen financieel advies (feiten + vergelijking).
+//                Bewaart rec.offerte + event offerte_geupload (+15 lead-score). UI: energiekompas.html v0.24.0.
 // Versie:        v15.129.0 (2026-09-01, Fase 6 — FOLLOW-UP-MAIL): warme-maar-stille leads (nota gekregen, daarna niets)
 //                krijgen na 3 en 10 dagen één herinnering met de nota-link + de volgende hefboom (_followupSweep, elke
 //                6u via _startFollowupScheduler). Leads in de sales-funnel (wil_contact/groeistap_aanvaard/mandaat) worden
@@ -791,6 +797,7 @@ const path        = require('path');
 const fs          = require('fs');
 const os          = require('os');
 const factuurExtract = require('./factuur/extract');
+const offerteAnalyse = require('./factuur/offerte');   // v15.130: offerte-upload → heranalyse tegen de studie
 const { projectJaarverbruik } = require('./project_jaarverbruik.js');
 
 // ─── v15.59.0 — OPTIONELE PARALLELLE DISPATCH-RUNS (flag-gated, default = oud gedrag) ─────────
@@ -1145,7 +1152,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.129.0'; // v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.130.0'; // v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7651,6 +7658,7 @@ function _leadScore(rec) {
   if (rec.mandaat && rec.mandaat.akkoord) s += 20;            // mandaat-akkoord = zeer warm (echte data volgt)
   if (ev.some(e => e.indexOf('scan_gecorrigeerd') === 0) || ev.includes('scan_bevestigd')) s += 8;  // locatiescan-engagement
   if (ev.includes('exact_gestart')) s += 12;                  // exacte studie gevraagd
+  if (ev.includes('offerte_geupload')) s += 15;               // offerte opgeladen voor second opinion = zeer warm
   if (ev.includes('nota_opened')) s += 6;                     // nota bekeken
   let marge = (rec.samenvatting && (+rec.samenvatting.afname_marge_jaar || 0) + (+rec.samenvatting.injectie_marge_jaar || 0)) || 0;
   // Voorschot/raming: de marge is een RAMING, geen factuurbedrag → warmte niet kunstmatig hoog.
@@ -7774,6 +7782,54 @@ app.post('/api/lead-followup/run', async (req, res) => {
     const r = await _followupSweep(dry);
     res.json({ ok: true, ...r });
   } catch (e) { console.error('[lead-followup]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// ─── v15.130.0 — OFFERTE-UPLOAD & HERANALYSE ─────────────────────────────────────────────────────
+// De klant laadt een offerte (eigen of concurrent) op → we lezen ze (Claude-vision) en zetten de
+// kerncijfers af tegen de EnergieKompas-studie van deze lead (second opinion). Geen financieel advies:
+// enkel feiten + vergelijking. De heranalyse-logica zit in factuur/offerte.js (puur, getest).
+function _studieUitLead(rec) {
+  if (!rec) return {};
+  const s = rec.samenvatting || {};
+  let jaarvoordeel = (+s.afname_marge_jaar || 0) + (+s.injectie_marge_jaar || 0);
+  // Exacte studie (indien gedraaid) kan een hoger/scherper jaarvoordeel dragen — neem het maximum.
+  const ex = rec.exact_studie || {};
+  const exBesp = +ex.besparing_jaar || +ex.jaarvoordeel_eur || 0;
+  if (exBesp > jaarvoordeel) jaarvoordeel = exBesp;
+  return { jaarvoordeel_eur: jaarvoordeel, energiekost_nu_mwh: +s.energiekost_nu_mwh || 0, energiekost_dyn_mwh: +s.energiekost_dyn_mwh || 0, bron: exBesp > 0 ? 'exacte studie' : 'onderhandelingsmarge' };
+}
+app.post('/api/offerte-heranalyse', async (req, res) => {
+  const t0 = Date.now();
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) return res.status(503).json({ ok: false, error: 'ANTHROPIC_API_KEY niet geconfigureerd' });
+    const b = req.body || {};
+    const files = b.files;
+    if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ ok: false, error: 'files[] is verplicht' });
+    if (files.length > 6) return res.status(400).json({ ok: false, error: 'Max 6 bestanden per offerte' });
+    const allowed = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+    let bytes = 0;
+    for (const f of files) {
+      if (!f || typeof f !== 'object' || typeof f.base64 !== 'string') return res.status(400).json({ ok: false, error: 'elk bestand heeft base64 nodig' });
+      if (!allowed.has(f.mediaType)) return res.status(415).json({ ok: false, error: `mediaType '${f.mediaType}' niet ondersteund` });
+      bytes += Math.floor(f.base64.length * 0.75);
+    }
+    if (bytes > 12 * 1024 * 1024) return res.status(413).json({ ok: false, error: 'Upload > 12 MB — verklein de bestanden' });
+
+    const rec = b.token ? _leadLezen(b.token) : null;   // lead is optioneel (ook zonder lead bruikbaar)
+    const studie = _studieUitLead(rec);
+    const ex = await offerteAnalyse.extractOfferte({ files, apiKey, model: b.model });
+    const heranalyse = offerteAnalyse.bouwHeranalyse(ex.offerte, studie);
+
+    if (rec && b.token) {   // op de lead bewaren + als warm engagement-event loggen
+      rec.offerte = { offerte: ex.offerte, heranalyse, ts: Date.now() };
+      rec.bijgewerkt = Date.now();
+      _leadEvent(rec, 'offerte_geupload', { extra: { concurrent: !!ex.offerte.is_concurrent } }, b.token);
+      try { rec.score = _leadScore(rec); } catch (e) {}
+      _leadOpslaan(b.token, rec);
+    }
+    console.log(`[offerte] OK in ${Date.now() - t0}ms — concurrent=${ex.offerte.is_concurrent}, capex=${ex.offerte.investering_excl_btw}`);
+    res.json({ ok: true, offerte: ex.offerte, heranalyse, studie_bron: studie.bron, _meta: ex._meta });
+  } catch (e) { console.error('[offerte]', e.message); res.status(500).json({ ok: false, error: e.message }); }
 });
 // MANAGER-ONLY: overzicht van de EnergieKompas-leads voor de supermanager/accountmanagers.
 app.get('/api/leads', async (req, res) => {
