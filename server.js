@@ -1,6 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.131.0 (2026-09-02 13:36, ENTSO-E ZACHTE FOUT): /entsoe-dayahead geeft bij een onbereikbare
+//                ENTSO-E Transparency Platform (onderhoud/503/502/504/429/timeout) niet langer HTTP 500, maar
+//                HTTP 200 + {data:[], source_unavailable:true, reason:'entsoe_maintenance'|'entsoe_unavailable'|
+//                'entsoe_timeout'|'entsoe_unreachable', detail, partial}. Per segment max 2 pogingen bij zo'n
+//                zachte fout (i.p.v. 3 met backoff) en een harde time-out van 20s per call. Harde fouten
+//                (401/403 token, parse) blijven HTTP 500. Client toont dan 'laatst bekende data' i.p.v. een
+//                rode 500 in de console. UI: energiemarkt.html v1.1.0.
 // Versie:        v15.130.0 (2026-09-01, Fase 6 — OFFERTE-HERANALYSE): POST /api/offerte-heranalyse leest een geüploade
 //                offerte (eigen of concurrent) via Claude-vision (module factuur/offerte.js) en geeft er een eerlijke
 //                second opinion op tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen,
@@ -1152,7 +1159,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.130.0'; // v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.131.0'; // v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -6963,9 +6970,33 @@ app.get('/elia-data', async (req, res) => {
 });
 
 
+// ── ENTSO-E: zachte vs. harde fout ──────────────────────────────────────────
+// Zacht = de bron is er even niet (onderhoud, 502/503/504, rate limit, time-out,
+// DNS/netwerk). Daar heeft de client niets aan een HTTP 500: die toont dan beter
+// de laatst bekende data met een nette melding. Hard = configuratie/parse-fout
+// (401/403 token, kapotte XML) — die MOET zichtbaar blijven als HTTP 500.
+const ENTSOE_TIMEOUT_MS = 20000;
+function _entsoeZachteFout(e) {
+  const st = e && e.httpStatus;
+  if (st === 429 || st === 502 || st === 503 || st === 504) {
+    const body = String((e && e.bodySnip) || '');
+    const onderhoud = /maintenance|temporarily unavailable|transparency platform/i.test(body);
+    return { reden: onderhoud ? 'entsoe_maintenance' : 'entsoe_unavailable', detail: `HTTP ${st}` };
+  }
+  if (e && (e.name === 'AbortError' || e.name === 'TimeoutError')) {
+    return { reden: 'entsoe_timeout', detail: `time-out na ${ENTSOE_TIMEOUT_MS} ms` };
+  }
+  const m = String((e && e.message) || '');
+  if (/fetch failed|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|network/i.test(m)) {
+    return { reden: 'entsoe_unreachable', detail: m.slice(0, 120) };
+  }
+  return null;
+}
+
 // ── GET /entsoe-dayahead?from=YYYY-MM-DD&to=YYYY-MM-DD ───────────────────────
 // Haalt ENTSO-E BELPEX day-ahead spotprijzen op (uurlijks)
 // Splitst in segmenten van 30 dagen om timeout te vermijden
+// Bij een onbereikbare bron: HTTP 200 + source_unavailable (zie _entsoeZachteFout)
 app.get('/entsoe-dayahead', async (req, res) => {
   const { from, to } = req.query;
   if (!from || !to) return res.status(400).json({ error: 'from en to verplicht' });
@@ -7000,28 +7031,49 @@ app.get('/entsoe-dayahead', async (req, res) => {
     // ENTSO-E A44 voor BE→BE geeft 1 prijs per uur/kwartier
     // Meerdere TimeSeries zijn verschillende periodes in hetzelfde XML-document
     const byTime = new Map();
+    const onbeschikbaar = [];   // segmenten waarvoor ENTSO-E er even niet was
 
     for (const seg of segments) {
       const periodStart = seg.from.replace(/-/g,'') + '0000';
       const periodEnd   = seg.to.replace(/-/g,'')   + '2300';
       const url = `https://web-api.tp.entsoe.eu/api?securityToken=${process.env.ENTSOE_TOKEN||''}&documentType=A44&in_Domain=10YBE----------2&out_Domain=10YBE----------2&periodStart=${periodStart}&periodEnd=${periodEnd}`;
 
-      // Haal XML op met retry
+      // Haal XML op met retry (+ harde time-out per poging)
       let xml = null;
+      let zacht = null;   // gevuld zodra de bron zelf onbereikbaar is
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const r = await fetch(url);
+          const ac  = new AbortController();
+          const tmr = setTimeout(() => ac.abort(), ENTSOE_TIMEOUT_MS);
+          let r;
+          try { r = await fetch(url, { signal: ac.signal }); }
+          finally { clearTimeout(tmr); }
           if (!r.ok) {
             const errBody = await r.text();
-            throw new Error(`HTTP ${r.status}: ${errBody.slice(0,200)}`);
+            const err = new Error(`HTTP ${r.status}: ${errBody.slice(0,200)}`);
+            err.httpStatus = r.status;
+            err.bodySnip   = errBody.slice(0,400);
+            throw err;
           }
           xml = await r.text();
           break;
         } catch (e) {
+          const z = _entsoeZachteFout(e);
           console.warn(`[entsoe] segment ${seg.from}→${seg.to} poging ${attempt}/3: ${e.message}`);
+          if (z) {
+            // Bron ligt plat: 3x hameren met backoff heeft geen zin. Eén herkansing.
+            if (attempt >= 2) { zacht = z; break; }
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            continue;
+          }
           if (attempt === 3) throw new Error(`Segment ${seg.from}→${seg.to} gefaald na 3 pogingen: ${e.message}`);
           await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
         }
+      }
+      if (zacht) {
+        console.warn(`[entsoe] segment ${seg.from}→${seg.to} overgeslagen — ${zacht.reden} (${zacht.detail})`);
+        onbeschikbaar.push({ from: seg.from, to: seg.to, reden: zacht.reden, detail: zacht.detail });
+        continue;
       }
       if (xml) {
 
@@ -7052,8 +7104,18 @@ app.get('/entsoe-dayahead', async (req, res) => {
       .map(([t, v]) => ({ t, v: Math.round(v * 100) / 100 }))
       .sort((a, b) => a.t - b.t);
 
-    console.log(`[entsoe] totaal ${points.length} punten`);
-    res.json({ spot: points, data: points });
+    console.log(`[entsoe] totaal ${points.length} punten` + (onbeschikbaar.length ? ` (${onbeschikbaar.length}/${segments.length} segment(en) onbeschikbaar)` : ''));
+
+    const antwoord = { spot: points, data: points };
+    if (onbeschikbaar.length) {
+      // 200 i.p.v. 500: de client toont de laatst bekende data met een nette melding.
+      antwoord.source_unavailable = true;
+      antwoord.reason  = onbeschikbaar[0].reden;
+      antwoord.detail  = `ENTSO-E niet bereikbaar voor ${onbeschikbaar.length}/${segments.length} segment(en) — ${onbeschikbaar[0].detail}`;
+      antwoord.partial = points.length > 0;
+      antwoord.segments_unavailable = onbeschikbaar;
+    }
+    res.json(antwoord);
 
   } catch (e) {
     console.error('[entsoe]', e.message);
