@@ -1159,7 +1159,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.131.0'; // v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.132.0'; // v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING — POST /api/lead-boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-ontvangen stopt ze; een sweep (_factuurReminderSweep, elke 6u via _startFactuurReminderScheduler) stuurt tot 3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) een herinnering zolang de factuur uitblijft. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS. ── v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -7835,6 +7835,117 @@ function _startFollowupScheduler() {
   if (_fuTimer.unref) _fuTimer.unref();
   console.log(`[followup] scheduler actief — elke ${IVAL_MS / 3600000} u, sturen=${LEAD_FOLLOWUP_ENABLE ? 'AAN' : 'UIT (dry, zet LEAD_FOLLOWUP_ENABLE=1)'}`);
 }
+// ── SLICE B — boekhouding-mail + 3× herinnering (strakke flow) ─────────────────────────────────
+// De klant krijgt een rapport-mail met een @boekhouding-blok + factuur-uploadlink; forwardt ze naar
+// zijn boekhouding. Blijft de factuur uit, dan stuurt een sweep (net als _followupSweep) tot 3× een
+// herinnering. VEILIG default: stuurt enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry.
+const LEAD_FACTUUR_REMINDER_ENABLE = /^(1|true|ja|on)$/i.test(process.env.LEAD_FACTUUR_REMINDER_ENABLE || '');
+const _FACT_STAPPEN = [
+  { key: 'fr1', na_dagen: (+process.env.LEAD_FACTUUR_REMINDER_DAG1 || 7) },
+  { key: 'fr2', na_dagen: (+process.env.LEAD_FACTUUR_REMINDER_DAG2 || 14) },
+  { key: 'fr3', na_dagen: (+process.env.LEAD_FACTUUR_REMINDER_DAG3 || 21) },
+];
+function _factuurUploadUrl(token, rec) {
+  const thema = (rec && rec.partner) ? ('&thema=' + encodeURIComponent(rec.partner)) : '';
+  return `${WEB_BASE}/apps/energiekompas.html?lead=${token}&factuur=1${thema}`;
+}
+// Is de factuur (of gemeten data) intussen binnen? Dan stopt de reminder-cyclus.
+function _factuurOntvangen(rec) {
+  if (rec.factuur_flow && rec.factuur_flow.factuur_ontvangen) return true;
+  if (rec.factuur_type) return true;                                   // lead kwam mét een factuur
+  if (rec.herberekend || rec.mandaat) return true;                     // echte studie/mandaat loopt al
+  const ev = (rec.events || []).map(e => e.ev);
+  return ev.indexOf('factuur_upload') >= 0 || ev.indexOf('factuur_ontvangen') >= 0;
+}
+function _boekhoudingInhoud(token, rec, st, nr) {
+  const url = _factuurUploadUrl(token, rec), naam = rec.naam || '', isRem = !!st;
+  const subject = isRem ? `Herinnering ${nr}/3 — uw elektriciteitsfactuur ontbreekt nog`
+                        : 'Uw rapport op uw echte cijfers — vraag uw boekhouding de factuur op te laden';
+  const kop = isRem ? 'We hebben uw elektriciteitsfactuur nog niet ontvangen, dus uw rapport staat voorlopig op standaardgegevens.'
+                    : 'Wilt u uw rapport op uw werkelijke verbruik? Daarvoor hebben we uw recentste elektriciteitsfactuur (afname + injectie) nodig.';
+  const fwd = `— — — (door te sturen naar uw boekhouding) — — —\nBeste collega,\nKan u onze recentste elektriciteitsfactuur (afname + injectie) opladen via deze link?\n${url}\nDit neemt één minuut. Alvast bedankt.\n— — —`;
+  const txt = `Beste${naam ? ' ' + naam : ''},\n\n${kop}\nHet makkelijkst: stuur deze e-mail door naar uw boekhouding — zij laden de factuur in één klik op.\n\n${fwd}\n\nMet vriendelijke groeten,\nEnergieKompas`;
+  const html = `<div style="font:15px/1.55 Helvetica,Arial,sans-serif;color:#1F3864;max-width:560px">
+    <p>Beste${naam ? ' ' + esc2(naam) : ''},</p>
+    <p>${esc2(kop)} Het makkelijkst: <b>stuur deze e-mail door naar uw boekhouding</b> — zij laden de factuur in één klik op.</p>
+    <div style="border:1px dashed #A9CDB4;background:#EAF3EC;border-radius:8px;padding:12px 14px;margin:10px 0">
+      <p style="margin:0 0 8px;color:#5A6577;font-size:12.5px">— door te sturen naar uw boekhouding —</p>
+      <p style="margin:0 0 6px">Beste collega, kan u onze recentste elektriciteitsfactuur (afname + injectie) opladen via deze knop?</p>
+      <p style="margin:6px 0"><a href="${url}" style="display:inline-block;background:#05B050;color:#fff;text-decoration:none;font-weight:700;padding:10px 16px;border-radius:8px">Factuur opladen →</a></p>
+    </div>
+    <p>Met vriendelijke groeten,<br>EnergieKompas</p></div>`;
+  return { subject, txt, html };
+}
+async function _factuurReminderSweep(dry) {
+  const nu = Date.now(), echt = !dry && LEAD_FACTUUR_REMINDER_ENABLE;
+  const uit = { dry: !echt, enable: LEAD_FACTUUR_REMINDER_ENABLE, onderzocht: 0, due: 0, verstuurd: 0, items: [] };
+  for (const [token, rec] of _LEADS) {
+    if (!rec || (nu - (rec.ts || 0)) > LEAD_TTL_MS) continue;
+    const ff = rec.factuur_flow;
+    if (!ff || !ff.boekhouding_mail_verstuurd) continue;                // enkel wie de boekhouding-mail kreeg
+    if (_factuurOntvangen(rec)) continue;                               // factuur binnen → stop
+    if (!_validMail(rec.mail) || _leadInFunnel(rec)) continue;          // in sales-funnel → mens volgt op
+    uit.onderzocht++;
+    const gedaan = (ff.reminders || []).length;
+    if (gedaan >= _FACT_STAPPEN.length) continue;                       // al 3× herinnerd
+    const st = _FACT_STAPPEN[gedaan], sinds = nu - (ff.boekhouding_mail_verstuurd || rec.ts || 0);
+    if (sinds < st.na_dagen * DAG_MS) continue;                         // nog niet due
+    uit.due++;
+    const item = { token, mail: rec.mail, stap: st.key, dag: Math.round(sinds / DAG_MS) };
+    if (!echt) { uit.items.push(item); continue; }                     // dry: enkel rapporteren
+    try {
+      const inh = _boekhoudingInhoud(token, rec, st, gedaan + 1);
+      const sent = await _brevoMail(rec.mail, inh.subject, inh.txt, inh.html);
+      if (sent.sent) {
+        ff.reminders = Array.isArray(ff.reminders) ? ff.reminders : [];
+        ff.reminders.push({ key: st.key, ts: nu }); rec.bijgewerkt = nu;
+        _leadEvent(rec, 'factuur_reminder_' + st.key, {}, token);       // logt + slaat op
+        uit.verstuurd++; item.verstuurd = true;
+      } else item.fout = sent.reden;
+    } catch (e) { item.fout = e.message; }
+    uit.items.push(item);
+  }
+  return uit;
+}
+let _frTimer = null;
+function _startFactuurReminderScheduler() {
+  if (_frTimer) return;
+  const IVAL_MS = Math.max(1, (+process.env.LEAD_FACTUUR_REMINDER_INTERVAL_UUR || 6)) * 60 * 60 * 1000;
+  _frTimer = setInterval(() => {
+    _factuurReminderSweep(false)
+      .then(r => { if (r.verstuurd) console.log(`[factuur-reminder] ${r.verstuurd} herinnering(en) verstuurd (${r.due} due)`); })
+      .catch(e => console.warn('[factuur-reminder] sweep faalde (niet blokkerend):', e.message));
+  }, IVAL_MS);
+  if (_frTimer.unref) _frTimer.unref();
+  console.log(`[factuur-reminder] scheduler actief — elke ${IVAL_MS / 3600000} u, sturen=${LEAD_FACTUUR_REMINDER_ENABLE ? 'AAN' : 'UIT (dry, zet LEAD_FACTUUR_REMINDER_ENABLE=1)'}`);
+}
+// POST /api/lead-boekhouding {token} — stuurt de klant de boekhouding-forward-mail + start de reminder-cyclus.
+app.post('/api/lead-boekhouding', async (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    if (!_validMail(rec.mail)) return res.status(400).json({ ok: false, error: 'Geen geldig e-mailadres op de lead.' });
+    rec.factuur_flow = rec.factuur_flow || {};
+    rec.factuur_flow.boekhouding_mail_verstuurd = Date.now();
+    rec.factuur_flow.reminders = rec.factuur_flow.reminders || [];
+    if (typeof rec.factuur_flow.factuur_ontvangen !== 'boolean') rec.factuur_flow.factuur_ontvangen = false;
+    const inh = _boekhoudingInhoud(b.token, rec, null, 0);
+    const sent = await _brevoMail(rec.mail, inh.subject, inh.txt, inh.html);
+    _leadEvent(rec, 'boekhouding_mail', {}, b.token);                   // logt + slaat op
+    res.json({ ok: true, mail_klant: sent.sent, mail_reden: sent.sent ? undefined : sent.reden });
+  } catch (e) { console.error('[lead-boekhouding]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// POST /api/lead-factuur-ontvangen {token} — de client meldt dat de factuur is opgeladen → reminders stoppen.
+app.post('/api/lead-factuur-ontvangen', (req, res) => {
+  try {
+    const b = req.body || {}; const rec = _leadLezen(b.token);
+    if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
+    rec.factuur_flow = rec.factuur_flow || {};
+    rec.factuur_flow.factuur_ontvangen = true; rec.factuur_flow.factuur_ontvangen_op = Date.now();
+    _leadEvent(rec, 'factuur_ontvangen', {}, b.token);                  // logt + slaat op
+    res.json({ ok: true });
+  } catch (e) { console.error('[lead-factuur-ontvangen]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
 // MANAGER-ONLY: de follow-up-sweep handmatig draaien of inspecteren. ?send=1 stuurt echt (enkel als
 // LEAD_FOLLOWUP_ENABLE aan staat); zonder send=1 is het altijd een dry-run (toont wie een mail zou krijgen).
 app.post('/api/lead-followup/run', async (req, res) => {
@@ -8492,7 +8603,7 @@ app.post('/api/destination-raming', (req, res) => {
 
 // ─── START ────────────────────────────────────────────────────────────────────
 laadMarktdata();  // laad marktdata synchroon bij startup
-_leadsHydrate().then(() => { try { _startFollowupScheduler(); } catch (e) { console.warn('[followup] start faalde:', e.message); } });  // v15.129: leads hydrateren, dan de follow-up-scheduler starten (draait dry tot LEAD_FOLLOWUP_ENABLE=1)
+_leadsHydrate().then(() => { try { _startFollowupScheduler(); } catch (e) { console.warn('[followup] start faalde:', e.message); } try { _startFactuurReminderScheduler(); } catch (e) { console.warn('[factuur-reminder] start faalde:', e.message); } });  // v15.129: leads hydrateren, dan de follow-up-scheduler starten (draait dry tot LEAD_FOLLOWUP_ENABLE=1) · v15.132 (Slice B): + factuur-reminder-scheduler (dry tot LEAD_FACTUUR_REMINDER_ENABLE=1)
 
 app.listen(PORT, () => {
   console.log(`Fluctus proxy v${SERVER_VERSIE} luistert op poort ${PORT}`);
