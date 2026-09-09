@@ -1,4 +1,5 @@
-FROM node:22-bullseye
+# node:22-bookworm — Debian 12 (bullseye is EOL: apt-get faalt op verlopen Release-files). 2026-09-09.
+FROM node:22-bookworm
 
 # Install Python 3 + pip via apt
 RUN apt-get update && \
@@ -13,7 +14,7 @@ RUN npm install --omit=dev
 
 # Install Python deps (cache layer)
 COPY requirements.txt ./
-RUN python3 -m pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
 
 # Copy rest of app (server.js, simulator.py, data/)
 COPY . .
