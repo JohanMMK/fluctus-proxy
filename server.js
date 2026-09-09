@@ -1,6 +1,13 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING. POST /api/lead-
+//                boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink
+//                (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-
+//                ontvangen stopt ze; _factuurReminderSweep (elke 6u via _startFactuurReminderScheduler) stuurt tot
+//                3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) zolang de factuur uitblijft en de lead niet in
+//                de sales-funnel zit. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY),
+//                anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS.
 // Versie:        v15.131.0 (2026-09-02 13:36, ENTSO-E ZACHTE FOUT): /entsoe-dayahead geeft bij een onbereikbare
 //                ENTSO-E Transparency Platform (onderhoud/503/502/504/429/timeout) niet langer HTTP 500, maar
 //                HTTP 200 + {data:[], source_unavailable:true, reason:'entsoe_maintenance'|'entsoe_unavailable'|
