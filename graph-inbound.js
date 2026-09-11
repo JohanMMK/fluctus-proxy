@@ -68,8 +68,10 @@ async function fetchUnread() {
 // PDF-bijlagen van één mail als [{ base64, mediaType, fileName }].
 async function getPdfAttachments(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
-  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,contentBytes,size`);
-  if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status);
+  // GEEN $select: contentBytes bestaat niet op het polymorfe base-type 'attachment' → $select met contentBytes gaf HTTP 400.
+  // Zonder $select geeft Graph de volledige bijlage terug, inclusief contentBytes voor fileAttachments. (v15.142.3)
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments`);
+  if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
   return (j.value || [])
     .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes)
