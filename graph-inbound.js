@@ -79,10 +79,30 @@ async function getPdfAttachments(msgId) {
     .map(a => ({ base64: a.contentBytes, mediaType: 'application/pdf', fileName: a.name || 'factuur.pdf' }));
 }
 
+// v15.142.4: recente mails MET bijlage, ONAFHANKELIJK van gelezen/ongelezen (robuuste intake met durabel watermerk
+// in server.js). GEEN $filter/$orderby → vermijdt de Graph "InefficientFilter"-valkuil volledig: we halen de 50
+// nieuwste berichten op (Graph geeft ze standaard op receivedDateTime aflopend), filteren hasAttachments client-side
+// en sorteren oudste-eerst. Het datum-venster + de verwerkt-lijst worden server-side toegepast.
+async function fetchRecent() {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const q = `/users/${mb}/messages?$select=id,subject,from,receivedDateTime,hasAttachments&$top=50`;
+  const r = await _g(q);
+  if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return (j.value || [])
+    .filter(m => m.hasAttachments)
+    .map(m => ({
+      id: m.id, subject: m.subject || '',
+      from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
+      ontvangen: m.receivedDateTime || '',
+    }))
+    .sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));
+}
+
 async function markRead(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}`, { method: 'PATCH', body: JSON.stringify({ isRead: true }) });
   return r.ok;
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, getPdfAttachments, markRead };
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead };
