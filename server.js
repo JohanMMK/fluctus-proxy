@@ -1,6 +1,16 @@
 'use strict';
 // ============================================================================
 // FLUCTUS PROXY SERVER
+// Versie:        v15.139.0 (2026-09-11, factuurmail-abonnement Slice 1): Microsoft Graph inbound-intake (graph-inbound.js,
+//                guarded op GRAPH_TENANT_ID/CLIENT_ID/CLIENT_SECRET/MAILBOX). _graphInboundSweep leest ongelezen mails met
+//                PDF-bijlage uit de M365-mailbox → factuurExtract.run → EAN → _leadVanEan (koppelt aan bestaande lead) →
+//                back-office-notificatie (_brevoMail) + markeer gelezen. Endpoint POST /api/graph/inbound-run (manager) +
+//                scheduler (GRAPH_POLL_MIN, default 5). Inert zonder ENV. Slice 2 = studie herrekenen + rapport + 13-mnd-venster.
+// Versie:        v15.138.0 (2026-09-11, offerte-scenario-simulatie): POST /api/offerte-simulatie — simuleert een
+//                offerte-scenario ZOALS GEPRESENTEERD (PV-kWp, batterij kW/kWh + RTE/DoD/cycli via CUSTOM, laadpalen)
+//                in 3 lagen (base-arbitrage / onbalans-windfall / betalend laden) door _ekBedrijfCtx + _draaiSim3
+//                (_simuleer_enkel) te hergebruiken. offerte/offerte.js v1.1.0 leest nu ook batterij_rte_pct/dod_pct/cycli.
+//                Additief; energie-arbitrage (spot) + passieve onbalans only. Vereist live sim + marktdata.
 // Versie:        v15.137.0 (2026-09-11, vervolg 1/2): (Punt 1) 5DE ANALYSE — _bouwVijfdeAnalyse stelt de 5de analyse
 //                samen uit de geüploade winnende offerte (rec.offerte.heranalyse) + KU Leuven bij partner; gebruikt in
 //                /api/lead-afsluiten (partner-branch) + los op te halen via GET /api/lead-vijfde-analyse?token=.
@@ -833,6 +843,7 @@ const fs          = require('fs');
 const os          = require('os');
 const factuurExtract = require('./factuur/extract');
 const offerteAnalyse = require('./factuur/offerte');   // v15.130: offerte-upload → heranalyse tegen de studie
+const graphInbound   = require('./graph-inbound');     // v15.139: factuurmail-abonnement — Graph inbound (guarded)
 const { projectJaarverbruik } = require('./project_jaarverbruik.js');
 
 // ─── v15.59.0 — OPTIONELE PARALLELLE DISPATCH-RUNS (flag-gated, default = oud gedrag) ─────────
@@ -1187,7 +1198,7 @@ function _gauss(rng){ let u=0,v=0; while(u===0)u=rng(); while(v===0)v=rng(); ret
 // Identiek gestructureerde output uit ELKE sim-engine (batterij-BSP, opstelling, injectie), zodat we
 // straks via de webhook per simulatie een paar (eigen output, imby output) kunnen loggen en de vrije
 // parameters systematisch ijken. Puur ADDITIEF: raakt geen bestaande velden of de LP aan.
-const SERVER_VERSIE = '15.137.0'; // v15.137.0 (2026-09-11, vervolg 1/2): 5DE ANALYSE (_bouwVijfdeAnalyse uit rec.offerte.heranalyse + KUL bij partner; GET /api/lead-vijfde-analyse) + BETALEND-LAADPLEIN SIZING op eenheden (personeel/clubleden/stoelen → bezoekers_per_dag, _DEST_EENHEID_BEZOEK, response.sizing_basis). Additief. // v15.136.0 (2026-07-16, flow-review vervolg): AFSLUITEN HERZIEN (CMT49) — /api/lead-afsluiten volgt het offerte-model (partner→5de analyse incl. KUL rec.vijfde_analyse; geen partner→verificatie zonder KUL rec.offerte_verificatie; voorschot/handtekening vervalt); EMS-doorgifte Voltmaster additief+geguard (env VOLTMASTER_ORDER_TO, anders back-office-fallback). A2.4: GET /api/profiel-suggestie?activiteit= (token-overlap tegen PROFIELEN_LIJST). NBB geguard achter NBB_CBSO_KEY. // v15.135.0 (2026-09-09, Slice I): AFSLUITEN — POST /api/lead-afsluiten: kickback-trigger op aanvaarde partnerofferte + betaald voorschot (rec.kickback status voorschot_bevestigd) + back-office-notificatie om te factureren + KU Leuven-verificatie te starten; EMS-order Voltmasters (rec.ems_order, marge €2000 + €6/kVA/j, 6/12m). Geen echte facturatie. Hergebruikt _brevoMail/_leadEvent. // v15.134.0 (2026-09-09, Slice G): ANONIEME OFFERTE-BEVRAGING — POST /api/lead-bevraging logt de aanvraag + notificeert de back-office om het geanonimiseerde mini-bestek aan partners voor te leggen (KU Leuven-verificatie op de partnerofferte). Hergebruikt _brevoMail/_leadEvent. // v15.133.0 (2026-09-09, Slice D): APPARAAT-ID-BINDING — /api/lead slaat device_id op (rec.device_ids); /api/lead-verify-check bindt het anonieme apparaat-id bij OTP-bevestiging aan de lead. Additief. // v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING — POST /api/lead-boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-ontvangen stopt ze; een sweep (_factuurReminderSweep, elke 6u via _startFactuurReminderScheduler) stuurt tot 3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) een herinnering zolang de factuur uitblijft. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS. ── v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). // v15.134.0 (2026-09-09, Slice G): ANONIEME OFFERTE-BEVRAGING — POST /api/lead-bevraging logt de aanvraag + notificeert de back-office om het geanonimiseerde mini-bestek aan partners voor te leggen (KU Leuven-verificatie op de partnerofferte). Hergebruikt _brevoMail/_leadEvent. // v15.133.0 (2026-09-09, Slice D): APPARAAT-ID-BINDING — /api/lead slaat device_id op (rec.device_ids); /api/lead-verify-check bindt het anonieme apparaat-id bij OTP-bevestiging aan de lead. Additief. // v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING — POST /api/lead-boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-ontvangen stopt ze; een sweep (_factuurReminderSweep, elke 6u via _startFactuurReminderScheduler) stuurt tot 3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) een herinnering zolang de factuur uitblijft. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS. ── v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
+const SERVER_VERSIE = '15.140.0'; // v15.140.0 (2026-09-11): + Graph-intake FAAL-ALERT (_graphAuthAlert): bij een mislukte login/ophaal (verlopen geheim, weg consent, foute ENV) mailt de app de back-office (throttled 1/6u). // v15.139.0 (2026-09-11): FACTUURMAIL-ABONNEMENT Slice 1 — Graph inbound-intake (graph-inbound.js, guarded op GRAPH_*): _graphInboundSweep leest mailbox → extract → EAN → _leadVanEan → back-office-notify; POST /api/graph/inbound-run + scheduler GRAPH_POLL_MIN. Inert zonder ENV. // v15.138.0 (2026-09-11): OFFERTE-SCENARIO-SIMULATIE — POST /api/offerte-simulatie (offerte-hardware incl. RTE/DoD/cycli → 3 lagen base-arbitrage/onbalans-windfall/betalend laden via _ekBedrijfCtx+_draaiSim3 _simuleer_enkel); offerte.js v1.1.0 extractie batterij_rte/dod/cycli. Additief. // v15.137.0 (2026-09-11, vervolg 1/2): 5DE ANALYSE (_bouwVijfdeAnalyse uit rec.offerte.heranalyse + KUL bij partner; GET /api/lead-vijfde-analyse) + BETALEND-LAADPLEIN SIZING op eenheden (personeel/clubleden/stoelen → bezoekers_per_dag, _DEST_EENHEID_BEZOEK, response.sizing_basis). Additief. // v15.136.0 (2026-07-16, flow-review vervolg): AFSLUITEN HERZIEN (CMT49) — /api/lead-afsluiten volgt het offerte-model (partner→5de analyse incl. KUL rec.vijfde_analyse; geen partner→verificatie zonder KUL rec.offerte_verificatie; voorschot/handtekening vervalt); EMS-doorgifte Voltmaster additief+geguard (env VOLTMASTER_ORDER_TO, anders back-office-fallback). A2.4: GET /api/profiel-suggestie?activiteit= (token-overlap tegen PROFIELEN_LIJST). NBB geguard achter NBB_CBSO_KEY. // v15.135.0 (2026-09-09, Slice I): AFSLUITEN — POST /api/lead-afsluiten: kickback-trigger op aanvaarde partnerofferte + betaald voorschot (rec.kickback status voorschot_bevestigd) + back-office-notificatie om te factureren + KU Leuven-verificatie te starten; EMS-order Voltmasters (rec.ems_order, marge €2000 + €6/kVA/j, 6/12m). Geen echte facturatie. Hergebruikt _brevoMail/_leadEvent. // v15.134.0 (2026-09-09, Slice G): ANONIEME OFFERTE-BEVRAGING — POST /api/lead-bevraging logt de aanvraag + notificeert de back-office om het geanonimiseerde mini-bestek aan partners voor te leggen (KU Leuven-verificatie op de partnerofferte). Hergebruikt _brevoMail/_leadEvent. // v15.133.0 (2026-09-09, Slice D): APPARAAT-ID-BINDING — /api/lead slaat device_id op (rec.device_ids); /api/lead-verify-check bindt het anonieme apparaat-id bij OTP-bevestiging aan de lead. Additief. // v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING — POST /api/lead-boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-ontvangen stopt ze; een sweep (_factuurReminderSweep, elke 6u via _startFactuurReminderScheduler) stuurt tot 3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) een herinnering zolang de factuur uitblijft. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS. ── v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). // v15.134.0 (2026-09-09, Slice G): ANONIEME OFFERTE-BEVRAGING — POST /api/lead-bevraging logt de aanvraag + notificeert de back-office om het geanonimiseerde mini-bestek aan partners voor te leggen (KU Leuven-verificatie op de partnerofferte). Hergebruikt _brevoMail/_leadEvent. // v15.133.0 (2026-09-09, Slice D): APPARAAT-ID-BINDING — /api/lead slaat device_id op (rec.device_ids); /api/lead-verify-check bindt het anonieme apparaat-id bij OTP-bevestiging aan de lead. Additief. // v15.132.0 (2026-09-09, Slice B — strakke flow): BOEKHOUDING-MAIL + 3× HERINNERING — POST /api/lead-boekhouding stuurt de klant een rapport-mail met @boekhouding-forward-blok + factuur-uploadlink (?lead=<token>&factuur=1) en start de reminder-cyclus (rec.factuur_flow); POST /api/lead-factuur-ontvangen stopt ze; een sweep (_factuurReminderSweep, elke 6u via _startFactuurReminderScheduler) stuurt tot 3× (dag 7/14/21, env LEAD_FACTUUR_REMINDER_DAG1..3) een herinnering zolang de factuur uitblijft. VEILIG default: enkel bij LEAD_FACTUUR_REMINDER_ENABLE=1 (+BREVO_API_KEY), anders dry. Hergebruikt _brevoMail/_leadEvent/_leadInFunnel/_LEADS. ── v15.131.0 (02-09): ENTSO-E ZACHTE FOUT — /entsoe-dayahead antwoordt bij onbereikbare ENTSO-E (onderhoud/503/502/504/429/timeout) met HTTP 200 + source_unavailable/reason/detail/partial i.p.v. HTTP 500; max 2 pogingen bij zachte fout + 20s time-out per call; harde fouten (401/403/parse) blijven 500. ── v15.130.0 (01-09, Fase 6): OFFERTE-HERANALYSE — POST /api/offerte-heranalyse leest een geüploade offerte (eigen of concurrent) via Claude-vision (factuur/offerte.js) en zet ze af tegen de EnergieKompas-studie van de lead: investering/jaarkost/PV/batterij/laadpalen + terugverdientijd op ons jaarvoordeel + Fluctus-meerwaarde (spot-arbitrage + passieve onbalans, geen netbalanceringsdiensten) + aandachtspunten, geen financieel advies. Bewaart rec.offerte + event offerte_geupload (+15 lead-score). ── v15.129.0 (01-09, Fase 6): FOLLOW-UP-MAIL — een periodieke sweep (_followupSweep, elke 6u via _startFollowupScheduler) stuurt warme-maar-stille leads na 3 en 10 dagen één herinnering met de nota-link + volgende hefboom; leads in de sales-funnel (wil_contact/groeistap/mandaat) worden overgeslagen, max 2 stappen, TTL 90 d. VEILIG default: stuurt enkel bij LEAD_FOLLOWUP_ENABLE=1 (+BREVO_API_KEY), anders dry-run. Manager-endpoint POST /api/lead-followup/run (?send=1 = echt). rec.followups[] + event followup_fuN. ── v15.128.0 (01-09, Fase 5c): NBB uitgebreid — _bedrijfsWinst haalt nu ook balanstotaal (20/58), eigen vermogen (10/15)→solvabiliteit, FTE (9087) naast winst/brutomarge/omzet; scan.financieel draagt ze mee voor het factuur-paneel + EKI (energiekost/jaar ÷ winst vóór belasting). ── v15.127.0 (31-08, Fase 5c): KBO includes — kbodata vereist include-params (plan-gated: NACE/adres/naam=Medium, bestuurders=Large); _kboUrl voegt ze toe op kbodata-host (KBO_INCLUDE env, default zonder EnterpriseRoles); naam ook uit Denominations-array, adres tolerant voor [Address]; cbeapi ongewijzigd. ── v15.126.0 (31-08, Fase 5c): KBO kbodata-wrapper — _scanKbo herkent {Enterprise:{...}} (hoofdletter); debug-venster 6000 tekens om de volledige kbodata-respons te mappen. ── v15.125.0 (31-08, Fase 5c): KBO debug — GET /api/kbo?btw=&debug=1 toont de rauwe provider-call (URL/status/body/key_aanwezig) om 'gevonden:false' te diagnosticeren; key nooit teruggegeven. ── v15.124.0 (31-08, Fase 5c): KBO testendpoint — GET /api/kbo?btw= verifieert de cbeapi/kbodata-link (NACE+naam+adres+bestuurders) los, symmetrisch met /api/bedrijfswinst. ── v15.123.0 (31-08, Fase 5c): KBO adres — _scanKbo geeft ook het maatschappelijke-zetel-adres mee (tolerant over cbeapi/kbodata), zodat één KBO-call NACE+naam+adres+bestuurders levert (bestuurders enkel via kbodata.app); scan.profiel draagt maatschappelijke_zetel. ── v15.122.0 (31-08, Fase 5c): KBO cbeapi bevestigd — _scanKbo geverifieerd tegen cbeapi.be (KBO_API=https://cbeapi.be/api/v1/company, Bearer, respons {data:{...}}, NACE in nace_activities[].code); NACE-keuze pakt hoofdactiviteit (main) + nieuwste versie. ── v15.121.0 (31-08, Fase 5c): NBB-WINST — _bedrijfsWinst haalt de winst uit de neergelegde jaarrekening via de gratis NBB Authentic Data Query (references + accountingData, codes 9904/9903/9900/70, env NBB_CBSO_KEY); in de locatiescan (scan.financieel) + los testbaar via GET /api/bedrijfswinst?btw=. ── v15.120.0 (31-08, Fase 5c): KBO-ADAPTER — _scanKbo is nu een provider-tolerante CBE/KBO-REST-adapter (KBO_API=basis-URL + KBO_API_KEY=bearer), werkt met cbeapi.be én kbodata.app; leest NACE + ondernemingen-op-adres + bestuurders (indien geleverd), tolerant over veldvormen; zonder key/bron → null (heuristiek). ── v15.119.0 (31-08, Fase 5c): LEADS DUURZAAM — _leadOpslaan spiegelt naar Supabase-bucket (leads/<token>.json, fire-and-forget), _leadsHydrate laadt ze bij opstart gepagineerd in het geheugen (gated op SUPABASE_OK), /api/leads leest uit geheugen+lokale cache → warme leads en gemailde nota-links overleven een Railway-redeploy. Scans blijven bewust kortlevend. ── v15.118.0 (31-08, Fase 5b): HARDWARE-BRUG (/api/hardware-voorstel — KMO-batterijstaffel §14.8 + Jacops-palen/PV → shoppinglist + payback), DESTINATION-LUIK spoor 2 (/api/destination-raming — capture/dwell §12.3, drempel=functie kostprijs §13.1, sessieraming), VISION-PASS fase 2 (locatiescan: Claude-vision op de Mapbox-tile → panelen/parkeervakken, gated + kruiscontrole factuur). ── v15.117.0 (31-08, Fase 5): LOCATIESCAN — async POST/GET /api/locatiescan (pluggable bronnen: Mapbox-luchtfoto/geocode, GRB-dak, KBO/NACE, Places, OpenChargeMap, Fluvius-cabines LS/MS), niet-blokkerend + graceful degradation. Lead-scoring: groeistap_aanvaard +28 (§14.6), scan-engagement +8. ── v15.116.0 (31-08, Fase 4): VOORSCHOTFACTUUR — /api/lead neemt factuur_type ('voorschot'|'afrekening'), lead-scoring dempt de marge-bijdrage bij voorschot (raming, niet kunstmatig warm), /api/leads geeft factuur_type mee. Detectie zelf zit in factuur/extract.js v1.4.7 (is_voorschot). ── v15.115.0 (31-08, Fase 4): SELF-SERVICE MANDAAT-INTAKE — POST /api/mandaat/self-aanvraag (geverifieerde lead → EAN in losse wachtrij met aanvrager+factuuradres), GET /api/mandaat/self-status, POST /api/mandaat/self-bevestig-adres (lead-variant adres-mismatch). wachtrij/sync dragen nu aanvrager/factuur_adres/aangevraagd_via/kwartierdata_aanwezig. LET OP: gelijk houden aan de Versie-header.
 function _bouwIjk(engine, soort, input, parameters, niveaus){
   // soort: 'kost' (lager = beter, batterij/opstelling) of 'opbrengst' (hoger = beter, injectie).
   const n = niveaus || {};
@@ -8168,6 +8179,166 @@ app.get('/api/lead-vijfde-analyse', (req, res) => {
     res.json({ ok: true, vijfde_analyse: va });
   } catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
+// ─── OFFERTE-SIMULATIE (Johan, 11-09) ────────────────────────────────────────────────────────────
+// Elke (winnende) offerte kan ANDERE hardware bevatten dan het bestek: andere PV-kWp, andere batterij
+// (kW/kWh), én round-trip efficiency (RTE), depth of discharge (DoD), gegarandeerde cycli. Daarom
+// simuleren we het SCENARIO ZOALS GEPRESENTEERD in de offerte, in drie lagen:
+//   (1) base case sturing ZONDER onbalans (spot day-ahead/intraday arbitrage),
+//   (2) windfall op onbalans (imbalance settlement — passieve respons),
+//   (3) betalend laden (laadplein-opbrengst uit de geoffreerde palen).
+// Hergebruikt de bestaande engine 1-op-1: _ekBedrijfCtx (context/baseUi, zoals de bedrijf-flow) + _draaiSim3
+// met _simuleer_enkel (geen/sturing/onbalans in één run). De CUSTOM-batterij draagt de offerte-RTE/DoD/cycli. Additief.
+function _offerteBattCustom(offerte) {
+  const kwh = Number(offerte.batterij_kwh) || 0;
+  if (!(kwh > 0)) return null;
+  const kw = Number(offerte.batterij_kw) || Math.round(kwh / 2);
+  return {
+    naam: (offerte.installateur || 'offerte') + ' batterij', kw, kwh,
+    dod_pct: Number(offerte.batterij_dod_pct) || 90,
+    rte_pct: Number(offerte.batterij_rte_pct) || 90,
+    capex_eur: 0,                                   // capex telt niet mee in de energie-KPI's van deze run
+    max_cycli: Number(offerte.batterij_cycli) || 8000,
+  };
+}
+function _offertePleinen(offerte) {
+  return (Array.isArray(offerte.laadpalen) ? offerte.laadpalen : []).filter(p => p && Number(p.aantal) > 0).map((p, i) => {
+    const dc = /dc/i.test(String(p.type || '')) || Number(p.kw) >= 50;
+    const spd = 4;
+    return { naam: 'Laadplein ' + (i + 1), type_plein: 'bezoekers', betalend: true, paaltype: dc ? 'DC160' : 'AC22',
+      paal_kw: Number(p.kw) || (dc ? 160 : 22), aantal_palen: Math.round(Number(p.aantal)),
+      duur_min: dc ? 30 : 180, opbrengst_eur_mwh: dc ? 350 : 250, sessies_paal_dag: spd,
+      vensters: [{ start: 8, eind: 20, sessies: spd * Math.round(Number(p.aantal)) }] };
+  });
+}
+// POST /api/offerte-simulatie { token?, offerte?, afname_mwh?, aansluiting_kva?, spanning?, profielNaam?, grd? }
+// offerte uit de body of uit de lead (rec.offerte.offerte). Context uit de body, met fallback op de lead-samenvatting.
+app.post('/api/offerte-simulatie', async (req, res) => {
+  try {
+    if (!MARKT) return res.status(503).json({ ok: false, error: 'Marktdata nog niet geladen — probeer over 30 s opnieuw' });
+    const b = req.body || {};
+    const rec = b.token ? _leadLezen(b.token) : null;
+    const offerte = b.offerte || (rec && rec.offerte && rec.offerte.offerte) || null;
+    if (!offerte) return res.status(400).json({ ok: false, error: 'Geen offerte — geef body.offerte of een token met een geüploade offerte.' });
+    const s = (rec && rec.samenvatting) || {};
+    const afname_mwh = Number(b.afname_mwh) || Number(s.jaarverbruik_mwh) || Number(s.afname_mwh) || 0;
+    if (!(afname_mwh > 0)) return res.status(400).json({ ok: false, error: 'afname_mwh (jaarverbruik) verplicht (body of lead).' });
+    const pleinen = _offertePleinen(offerte);
+    const ctx = _ekBedrijfCtx({
+      afname_mwh,
+      aansluiting_kva: Number(b.aansluiting_kva) || Number(s.aansluiting_kva) || 0,
+      spanning: b.spanning || s.spanning,
+      profielNaam: b.profielNaam || s.profielNaam || 'kantoor',
+      grd: b.grd || s.grd || '', postcode: b.postcode || s.postcode || '',
+      pleinen,
+    });
+    const ui = ctx.baseUi();
+    ui.pv_kwp = Number(offerte.pv_kwp) || 0;
+    const bc = _offerteBattCustom(offerte);
+    if (bc) { ui.batterijId = 'CUSTOM'; ui.batterijCustom = bc; } else { ui.batterijId = ''; ui.batterijCustom = null; }
+    ui._simuleer_enkel = true;
+    const r = await _draaiSim3(ui, null);
+    const k = (r && r.kpi_sturing) || {};
+    const heeftFlex = (Number(ui.pv_kwp) > 0) || !!bc;
+    const lagen = {
+      basis:     { kost_jaar_excl_btw: Math.round(k.kost_geen_excl_btw || 0) },
+      arbitrage: { kost_jaar_excl_btw: Math.round(k.kost_sturing_excl_btw || 0), meerwaarde_vs_basis_jaar: Math.round(k.meerwaarde_sturing_excl_btw || 0) },
+      onbalans:  heeftFlex
+        ? { kost_jaar_excl_btw: Math.round(k.kost_onbalans_excl_btw || 0), meerwaarde_vs_arbitrage_jaar: Math.round(k.meerwaarde_onbalans_excl_btw || 0) }
+        : { niet_van_toepassing: true },
+      betalend_laden: pleinen.length
+        ? { palen: pleinen.map(p => ({ paaltype: p.paaltype, paal_kw: p.paal_kw, aantal: p.aantal_palen })), opmerking: 'opbrengst hangt af van de bezoekers-/eenheden-sizing (zie /api/destination-raming).' }
+        : { geen_palen: true },
+    };
+    const hardware = { pv_kwp: ui.pv_kwp, batterij: bc ? { kw: bc.kw, kwh: bc.kwh, rte_pct: bc.rte_pct, dod_pct: bc.dod_pct, cycli: bc.max_cycli } : null,
+      laadpalen: pleinen.length, params_uit_offerte: !!(offerte.batterij_rte_pct || offerte.batterij_dod_pct || offerte.batterij_cycli) };
+    if (rec && b.token) { rec.offerte_simulatie = { hardware, lagen, ts: Date.now() }; try { _leadOpslaan(b.token, rec); } catch (e) {} }
+    res.json({ ok: true, hardware, lagen, capaciteit: (r && r.capaciteit) || null });
+  } catch (e) { console.error('[offerte-simulatie]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// ─── FACTUURMAIL-ABONNEMENT — Graph inbound (v15.139, Slice 1: intake + identificatie) ───────────
+// Guarded: enkel actief als graphInbound.graphEnabled() (de vier GRAPH_* ENV-vars gezet). Slice 1 leest de
+// afrekening uit de mailbox, identificeert de EAN, koppelt aan de bestaande lead en notificeert de back-office.
+// Slice 2 (later) = studie herrekenen op de recentste data + rapport naar het bevestigde adres + 13-maanden-venster.
+function _eanNorm(e) { return String(e || '').replace(/\D/g, ''); }
+function _leadVanEan(ean) {
+  const n = _eanNorm(ean); if (n.length < 12) return null;
+  for (const [token, rec] of _LEADS) {
+    if (!rec) continue;
+    const kand = [];
+    if (rec.mandaat && Array.isArray(rec.mandaat.eans)) rec.mandaat.eans.forEach(x => x && x.ean && kand.push(x.ean));
+    const bc = rec.baseCase || rec.factuur || {};
+    if (Array.isArray(bc.eanNrs)) bc.eanNrs.forEach(e => kand.push(e));
+    if (Array.isArray(bc.eanBlokken)) bc.eanBlokken.forEach(b => b && b.ean && kand.push(b.ean));
+    if (rec.factuurEan) kand.push(rec.factuurEan);
+    if (kand.some(e => _eanNorm(e) === n)) return { token, rec };
+  }
+  return null;
+}
+const _graphGezien = new Set();   // message-ids al verwerkt (in-memory dedup binnen de runtime)
+let _graphAlertTs = 0;            // throttle voor de faal-alert (max 1 / 6u)
+async function _graphAuthAlert(err) {
+  const nu = Date.now();
+  if (nu - _graphAlertTs < 6 * 3600 * 1000) return;   // niet spammen
+  _graphAlertTs = nu;
+  const msg = String((err && err.message) || err);
+  const txt = `⚠️ FACTUURMAIL-ABONNEMENT — Graph-intake FAALT\n\n`
+    + `De app kon niet inloggen bij / lezen uit de mailbox ${process.env.GRAPH_MAILBOX || '?'}.\n`
+    + `Fout: ${msg}\n\n`
+    + `Waarschijnlijke oorzaak: het clientgeheim (GRAPH_CLIENT_SECRET) is verlopen of ingetrokken, de admin-consent is weg, `
+    + `of een ENV-waarde is fout. Maak een nieuw clientgeheim in Entra (App-registraties → Certificaten en geheimen) en `
+    + `vervang GRAPH_CLIENT_SECRET op Railway.`;
+  try { await _brevoMail(LEAD_MAIL_TO, 'Graph-intake faalt — actie vereist', txt, null, 'Fluctus EnergieKompas'); } catch (e) {}
+  console.error('[graph-inbound] AUTH/FETCH FAALT:', msg);
+}
+async function _graphInboundSweep() {
+  if (!graphInbound.graphEnabled()) return { skipped: true, reden: 'GRAPH_* ENV niet gezet' };
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  let mails;
+  try { mails = await graphInbound.fetchUnread(); }   // token + ophalen; faalt bij verlopen geheim / weg consent / foute ENV
+  catch (e) { await _graphAuthAlert(e); return { ok: false, error: e.message, fase: 'inloggen/ophalen' }; }
+  const uit = [];
+  for (const m of mails) {
+    if (_graphGezien.has(m.id)) continue;
+    _graphGezien.add(m.id);
+    const res = { id: m.id, from: m.from, subject: m.subject, status: null };
+    try {
+      const pdfs = await graphInbound.getPdfAttachments(m.id);
+      if (!pdfs.length) { res.status = 'geen_pdf'; await graphInbound.markRead(m.id); uit.push(res); continue; }
+      if (!apiKey) { res.status = 'geen_apikey'; uit.push(res); continue; }   // niet markeren → later opnieuw
+      const r = await factuurExtract.run({ files: pdfs, postcodes: POSTCODES_DATA || {}, tarieven: TARIEVEN_MAP || {}, apiKey, model: process.env.FACTUUR_MODEL });
+      const bc = (r && r.baseCase) || {};
+      const ean = ((Array.isArray(bc.eanBlokken) && (bc.eanBlokken.find(b => b && b.rol === 'afname_elek') || bc.eanBlokken[0]) || {}).ean)
+        || (Array.isArray(bc.eanNrs) && bc.eanNrs[0]) || null;
+      const hit = ean ? _leadVanEan(ean) : null;
+      res.ean = ean; res.klant = bc.klantNaam || null; res.gekoppeld = !!hit; res.token = hit ? hit.token : null;
+      res.status = hit ? 'gekoppeld' : (ean ? 'onbekende_ean' : 'geen_ean');
+      const naar = hit && hit.rec ? (hit.rec.mail || '?') : '(geen geregistreerd adres)';
+      const txt = `FACTUURMAIL-ABONNEMENT — inkomende afrekening\n\nVan: ${m.from}\nOnderwerp: ${m.subject}\nEAN: ${ean || '—'}\nKlant (factuur): ${bc.klantNaam || '—'}\n\n`
+        + (hit ? `→ GEKOPPELD aan bestaande lead (token ${hit.token}, geregistreerd adres ${naar}).\n   Slice 2: studie herrekenen op de recentste data + rapport naar ${naar}.`
+               : `→ GEEN gekoppelde lead voor deze EAN. Behandel als nieuwe lead (niet auto-koppelen).`);
+      await _brevoMail(LEAD_MAIL_TO, `Abonnement — afrekening ontvangen (${bc.klantNaam || m.from})`, txt, null, 'Fluctus EnergieKompas');
+      await graphInbound.markRead(m.id);
+    } catch (e) { res.status = 'fout'; res.error = e.message; }   // niet markeren → volgende sweep herprobeert
+    uit.push(res);
+  }
+  return { ok: true, verwerkt: uit.length, resultaten: uit };
+}
+// Manager-endpoint om de sweep handmatig te draaien (test/monitoring).
+app.post('/api/graph/inbound-run', async (req, res) => {
+  try {
+    if (!(await _isManagerReq(req))) return res.status(401).json({ ok: false, error: 'Manager-login vereist' });
+    res.json(await _graphInboundSweep());
+  } catch (e) { console.error('[graph-inbound]', e.message); res.status(500).json({ ok: false, error: e.message }); }
+});
+// Scheduler — guarded: doet enkel werk als graphEnabled(). Interval via GRAPH_POLL_MIN (default 5, min 2).
+(function _startGraphInboundScheduler() {
+  const min = Math.max(2, Number(process.env.GRAPH_POLL_MIN) || 5);
+  setInterval(function () {
+    if (!graphInbound.graphEnabled()) return;
+    _graphInboundSweep().catch(e => console.error('[graph-inbound sweep]', e.message));
+  }, min * 60 * 1000);
+  if (graphInbound.graphEnabled()) console.log(`[graph-inbound] scheduler actief — poll elke ${min} min op ${process.env.GRAPH_MAILBOX}`);
+})();
 // MANAGER-ONLY: overzicht van de EnergieKompas-leads voor de supermanager/accountmanagers.
 app.get('/api/leads', async (req, res) => {
   try {

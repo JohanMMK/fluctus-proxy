@@ -1,0 +1,72 @@
+'use strict';
+// ─────────────────────────────────────────────────────────────────────────────
+// Microsoft Graph inbound-intake voor het gratis energie-abonnement (Slice 1).
+// Leest ongelezen mails MET bijlagen uit de M365-mailbox (GRAPH_MAILBOX) via de
+// client-credentials-flow (app-only). Volledig GEGUARD: zonder de vier ENV-vars is
+// graphEnabled() false en doet de module niets. Geen enkele bestaande flow raakt gewijzigd.
+//
+// Vereiste ENV (door Johan te zetten na Azure-app-registratie + M365-mailbox):
+//   GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, GRAPH_MAILBOX (bv. energiekompas@fluctus.net)
+// Azure app-permissions (Application): Mail.Read + Mail.ReadWrite (markeer gelezen) [+ Mail.Send indien we via Graph mailen].
+// ─────────────────────────────────────────────────────────────────────────────
+
+const _env = (k) => process.env[k] || '';
+function graphEnabled() {
+  return !!(_env('GRAPH_TENANT_ID') && _env('GRAPH_CLIENT_ID') && _env('GRAPH_CLIENT_SECRET') && _env('GRAPH_MAILBOX'));
+}
+
+let _tok = { value: null, exp: 0 };
+async function getToken() {
+  if (_tok.value && Date.now() < _tok.exp - 60000) return _tok.value;
+  const url = `https://login.microsoftonline.com/${encodeURIComponent(_env('GRAPH_TENANT_ID'))}/oauth2/v2.0/token`;
+  const body = new URLSearchParams({
+    client_id: _env('GRAPH_CLIENT_ID'), client_secret: _env('GRAPH_CLIENT_SECRET'),
+    scope: 'https://graph.microsoft.com/.default', grant_type: 'client_credentials',
+  });
+  const r = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  if (!r.ok) throw new Error('Graph token faalde: HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  const j = await r.json();
+  _tok = { value: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+  return _tok.value;
+}
+
+async function _g(path, opts) {
+  const tok = await getToken();
+  const headers = Object.assign({ Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, (opts && opts.headers) || {});
+  return fetch('https://graph.microsoft.com/v1.0' + path, Object.assign({}, opts || {}, { headers }));
+}
+
+// Ongelezen mails MET bijlagen (max 10), oudste eerst.
+async function fetchUnread() {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const q = `/users/${mb}/messages?$filter=isRead eq false and hasAttachments eq true`
+    + `&$select=id,subject,from,receivedDateTime&$orderby=receivedDateTime asc&$top=10`;
+  const r = await _g(q);
+  if (!r.ok) throw new Error('Graph fetchUnread: HTTP ' + r.status + ' ' + (await r.text()).slice(0, 200));
+  const j = await r.json();
+  return (j.value || []).map(m => ({
+    id: m.id, subject: m.subject || '',
+    from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
+    ontvangen: m.receivedDateTime || '',
+  }));
+}
+
+// PDF-bijlagen van één mail als [{ base64, mediaType, fileName }].
+async function getPdfAttachments(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,contentBytes,size`);
+  if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status);
+  const j = await r.json();
+  return (j.value || [])
+    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes)
+    .filter(a => /pdf/i.test(a.contentType || '') || /\.pdf$/i.test(a.name || ''))
+    .map(a => ({ base64: a.contentBytes, mediaType: 'application/pdf', fileName: a.name || 'factuur.pdf' }));
+}
+
+async function markRead(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}`, { method: 'PATCH', body: JSON.stringify({ isRead: true }) });
+  return r.ok;
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, getPdfAttachments, markRead };
