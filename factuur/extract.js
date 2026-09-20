@@ -1244,11 +1244,15 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   //   Sinds 2023 heeft elke digitale meter in Vlaanderen capaciteitstarief → géén capaciteit + géén maandpiek/toegang
   //   ⇒ hoogstwaarschijnlijk analoog. Gevolg downstream: geen piekmeting, geen relevante Fluvius-kwartierdata → studie
   //   op standaardprofiel geschaald op het verbruik (geen mandaat/kwartierdata-opt-in in de EK-flow).
-  const _capEur = parseFloat(parsed.totaalCapaciteitExclBtw) || 0;
-  const _capRegels = Array.isArray(parsed._capaciteitstariefRegels) ? parsed._capaciteitstariefRegels : [];
-  const _maandpiekKw = parseFloat((bron && bron.maandpiekKw) || 0) || 0;
-  const _toegangKw = parseFloat((bron && bron.toegangsvermogenKw) || 0) || 0;
-  const heeftPiekmeting = (_capEur > 0) || (_capRegels.length > 0) || (_maandpiekKw > 0) || (_toegangKw > 0);
+  // v1.5.1 (Johan-debug LUMINUS): meterType-detectie ROBUUST gemaakt. VALKUIL: een ANALOGE (klassieke) meter betaalt
+  //   óók een "Vaste Bijdrage Capaciteit" (bv. Fluvius E292 — een FORFAIT in €/jaar) en distributie op kWh-tarief
+  //   (E291 Verbruik) — maar heeft GEEN gemeten maandpiek in kW. Een DIGITALE meter betaalt capaciteitstarief op een
+  //   GEMETEN MAANDPIEK (kW). Daarom is enkel een gemeten piek IN kW (maandpiek/capaciteit-kW) een betrouwbaar digitaal
+  //   signaal. De capaciteit-in-€ (forfait) én een afgeleid toegangs-/aansluitvermogen NIET: die verschijnen/leiden we
+  //   ook op een analoge factuur af, waardoor dezelfde factuur soms vals als 'digitaal' werd herkend (8 kW-default).
+  const _maandpiekKw  = parseFloat((bron && bron.maandpiekKw) || 0) || 0;
+  const _capaciteitKw = parseFloat((bron && bron.capaciteitKw) || 0) || 0;
+  const heeftPiekmeting = (_maandpiekKw > 0) || (_capaciteitKw > 0);   // enkel een GEMETEN piek in kW = digitale kwartiermeter
   const meterType = heeftPiekmeting ? 'digitaal' : 'analoog';
 
   const baseCase = {
