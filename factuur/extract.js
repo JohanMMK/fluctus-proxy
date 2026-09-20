@@ -1239,11 +1239,25 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   if (_voorschot.is_voorschot && !_provider_flags.includes('voorschotfactuur')) _provider_flags.push('voorschotfactuur');
 
   // Stap 3: response payload
+  // v1.5.0 (Johan): METERTYPE-DETECTIE. Een DIGITALE meter draagt capaciteitstarief + gemeten maandpiek/
+  //   toegangsvermogen; een ANALOGE (klassieke) meter heeft dat NIET (geen piekmeting, enkel jaarlijkse standen).
+  //   Sinds 2023 heeft elke digitale meter in Vlaanderen capaciteitstarief → géén capaciteit + géén maandpiek/toegang
+  //   ⇒ hoogstwaarschijnlijk analoog. Gevolg downstream: geen piekmeting, geen relevante Fluvius-kwartierdata → studie
+  //   op standaardprofiel geschaald op het verbruik (geen mandaat/kwartierdata-opt-in in de EK-flow).
+  const _capEur = parseFloat(parsed.totaalCapaciteitExclBtw) || 0;
+  const _capRegels = Array.isArray(parsed._capaciteitstariefRegels) ? parsed._capaciteitstariefRegels : [];
+  const _maandpiekKw = parseFloat((bron && bron.maandpiekKw) || 0) || 0;
+  const _toegangKw = parseFloat((bron && bron.toegangsvermogenKw) || 0) || 0;
+  const heeftPiekmeting = (_capEur > 0) || (_capRegels.length > 0) || (_maandpiekKw > 0) || (_toegangKw > 0);
+  const meterType = heeftPiekmeting ? 'digitaal' : 'analoog';
+
   const baseCase = {
     ...parsed,
     is_voorschot: _voorschot.is_voorschot,
     voorschot_reden: _voorschot.voorschot_reden,
     factuurType,
+    meterType,               // v1.5.0: 'digitaal' | 'analoog'
+    heeftPiekmeting,         // v1.5.0: false = geen gemeten piek → standaardprofiel, geen kwartierdata/mandaat
     aansluitVermogenKva,
     totaalExclBtw: totaalExclBtwFinal,
     totaalInclBtw: totaalInclBtwFinal,
