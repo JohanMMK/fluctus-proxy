@@ -8662,10 +8662,15 @@ app.post('/api/lead-bevraging', async (req, res) => {
   try {
     const b = req.body || {}; const rec = _leadLezen(b.token);
     if (!rec) return res.status(404).json({ ok: false, error: 'Lead niet gevonden of verlopen.' });
-    rec.bevraging = { aangevraagd: true, ts: Date.now() };
+    // v15.155: samenstelling (PV/batterij/palen) meenemen zodat de bevraging concreet is (cut-the-crap-CTA).
+    const sm = (b.samenstelling && typeof b.samenstelling === 'object') ? {
+      pv_kwp: +b.samenstelling.pv_kwp || 0, batt_kwh: +b.samenstelling.batt_kwh || 0,
+      palen: +b.samenstelling.palen || 0, investering_eur: +b.samenstelling.investering_eur || 0 } : null;
+    rec.bevraging = { aangevraagd: true, ts: Date.now(), samenstelling: sm };
     _leadEvent(rec, 'bevraging_aangevraagd', {}, b.token);   // logt + slaat op
     const s = rec.samenvatting || {};
-    const lTxt = `ANONIEME OFFERTE-BEVRAGING aangevraagd (EnergieKompas${rec.partner ? ' ' + rec.partner : ''})\n\nNaam : ${rec.naam || '—'}\nMail : ${rec.mail}\nTel  : ${rec.tel || '—'}\n\n→ Leg het dossier GEANONIMISEERD (mini-bestek) voor aan de betrouwbare partners; bezorg de klant de offertes ter vergelijking. KU Leuven-verificatie enkel op de partnerofferte.\n\nAfname-marge ${_eurTxt(s.afname_marge_jaar || 0)}/j${rec.kamino_project_id ? ('\nKamino-project: ' + rec.kamino_project_id) : ''}`;
+    const smLijn = sm ? `\n\nSamenstelling (klant-keuze): PV ${sm.pv_kwp} kWp · batterij ${sm.batt_kwh} kWh · ${sm.palen} laadpaal(en)${sm.investering_eur ? (' · ± €' + Math.round(sm.investering_eur)) : ''}` : '';
+    const lTxt = `ANONIEME OFFERTE-BEVRAGING aangevraagd (EnergieKompas${rec.partner ? ' ' + rec.partner : ''})\n\nNaam : ${rec.naam || '—'}\nMail : ${rec.mail}\nTel  : ${rec.tel || '—'}${smLijn}\n\n→ Leg het dossier GEANONIMISEERD (mini-bestek) voor aan de betrouwbare partners; bezorg de klant de offertes ter vergelijking. KU Leuven-verificatie enkel op de partnerofferte.\n\nAfname-marge ${_eurTxt(s.afname_marge_jaar || 0)}/j${rec.kamino_project_id ? ('\nKamino-project: ' + rec.kamino_project_id) : ''}`;
     await _brevoMail(LEAD_MAIL_TO, `BEVRAGING EnergieKompas — ${rec.naam || rec.mail}`, lTxt, null, 'Fluctus EnergieKompas');
     res.json({ ok: true });
   } catch (e) { console.error('[lead-bevraging]', e.message); res.status(500).json({ ok: false, error: e.message }); }
