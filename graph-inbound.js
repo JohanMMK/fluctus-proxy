@@ -105,4 +105,21 @@ async function markRead(msgId) {
   return r.ok;
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead };
+// v15.157: KLANTMAIL VIA GRAPH — verstuur vanuit de EK-mailbox zelf (energiekompas@fluctus.net). Dit is een échte
+// mail uit de mailbox (geen List-Unsubscribe/"mailinglijst"-banner zoals bij Brevo), passend bij "reactie op de klant".
+// Vereist Azure app-permission Mail.Send. to = string of [strings]. Gooit bij HTTP-fout zodat de caller kan terugvallen.
+async function sendMail(to, subject, htmlContent, textContent) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const lijst = (Array.isArray(to) ? to : [to]).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
+  if (!lijst.length) throw new Error('sendMail: geen geldige ontvanger');
+  const message = {
+    subject: String(subject || ''),
+    body: htmlContent ? { contentType: 'HTML', content: htmlContent } : { contentType: 'Text', content: String(textContent || '') },
+    toRecipients: lijst,
+  };
+  const r = await _g(`/users/${mb}/sendMail`, { method: 'POST', body: JSON.stringify({ message, saveToSentItems: true }) });
+  if (!r.ok && r.status !== 202) throw new Error('Graph sendMail: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  return { sent: true };
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, sendMail };
