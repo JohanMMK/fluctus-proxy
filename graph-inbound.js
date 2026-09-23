@@ -108,6 +108,7 @@ async function markRead(msgId) {
 // v15.157: KLANTMAIL VIA GRAPH — verstuur vanuit de EK-mailbox zelf (energiekompas@fluctus.net). Dit is een échte
 // mail uit de mailbox (geen List-Unsubscribe/"mailinglijst"-banner zoals bij Brevo), passend bij "reactie op de klant".
 // Vereist Azure app-permission Mail.Send. to = string of [strings]. Gooit bij HTTP-fout zodat de caller kan terugvallen.
+// v15.161.2 (2026-09-23, redeploy-forced om Railway COPY-cache te busten): idem v15.161.1.
 // v15.161.1: KOGELVRIJE CHARSET — de HTML-body werd bij sommige ontvangers als verkeerde charset gerenderd
 // (dubbele mis-encoding → mojibake op € ± → én accenten in klantnamen). Oplossing: elke niet-ASCII codepoint
 // omzetten naar een numerieke HTML-entiteit (&#NNN;). De payload is dan pure ASCII en dus immuun voor ELKE
