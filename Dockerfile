@@ -16,7 +16,13 @@ RUN npm install --omit=dev
 COPY requirements.txt ./
 RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirements.txt
 
-# Copy rest of app (server.js, simulator.py, data/)
+# ── CACHE-BUST (2026-09-23): verhoog APP_CACHEBUST om een VERSE COPY van de app-bestanden
+# te forceren. Railway hergebruikte de 'COPY . .'-laag met verouderde graph-inbound.js;
+# deze RUN met wisselende waarde invalideert die laag zodat de nieuwste bestanden mee gaan.
+ARG APP_CACHEBUST=2026-09-23-2115
+RUN echo "app cache-bust ${APP_CACHEBUST}"
+
+# Copy rest of app (server.js, graph-inbound.js, simulator.py, data/)
 COPY . .
 
 ENV PORT=3000
