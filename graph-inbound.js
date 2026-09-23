@@ -108,13 +108,33 @@ async function markRead(msgId) {
 // v15.157: KLANTMAIL VIA GRAPH — verstuur vanuit de EK-mailbox zelf (energiekompas@fluctus.net). Dit is een échte
 // mail uit de mailbox (geen List-Unsubscribe/"mailinglijst"-banner zoals bij Brevo), passend bij "reactie op de klant".
 // Vereist Azure app-permission Mail.Send. to = string of [strings]. Gooit bij HTTP-fout zodat de caller kan terugvallen.
+// v15.161.1: KOGELVRIJE CHARSET — de HTML-body werd bij sommige ontvangers als verkeerde charset gerenderd
+// (dubbele mis-encoding → mojibake op € ± → én accenten in klantnamen). Oplossing: elke niet-ASCII codepoint
+// omzetten naar een numerieke HTML-entiteit (&#NNN;). De payload is dan pure ASCII en dus immuun voor ELKE
+// charset-interpretatie. Array.from splitst per codepoint (surrogate-safe voor eventuele emoji). Plus expliciete
+// UTF-8 meta als het fragment geen eigen <html>-document is.
+function _htmlNaarAscii(s) {
+  return Array.from(String(s == null ? '' : s))
+    .map(ch => { const cp = ch.codePointAt(0); return cp > 127 ? '&#' + cp + ';' : ch; })
+    .join('');
+}
 async function sendMail(to, subject, htmlContent, textContent) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const lijst = (Array.isArray(to) ? to : [to]).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
   if (!lijst.length) throw new Error('sendMail: geen geldige ontvanger');
+  let body;
+  if (htmlContent) {
+    const ascii = _htmlNaarAscii(htmlContent);
+    const html = /^\s*<(!doctype|html)[\s>]/i.test(ascii)
+      ? ascii
+      : `<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>${ascii}</body></html>`;
+    body = { contentType: 'HTML', content: html };
+  } else {
+    body = { contentType: 'Text', content: String(textContent || '') };
+  }
   const message = {
     subject: String(subject || ''),
-    body: htmlContent ? { contentType: 'HTML', content: htmlContent } : { contentType: 'Text', content: String(textContent || '') },
+    body,
     toRecipients: lijst,
   };
   const r = await _g(`/users/${mb}/sendMail`, { method: 'POST', body: JSON.stringify({ message, saveToSentItems: true }) });
