@@ -143,4 +143,7 @@ async function sendMail(to, subject, htmlContent, textContent) {
   return { sent: true };
 }
 
+// Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
+try { console.log('[graph-inbound] module v15.161.2 geladen — charset-fix (niet-ASCII → HTML-entiteiten) ACTIEF'); } catch (e) {}
+
 module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, sendMail };
