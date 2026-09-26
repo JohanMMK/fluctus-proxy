@@ -87,6 +87,11 @@
 #   aantal standaard 2u-eenheden (120 kW/260 kWh) dat op de bestaande aansluiting 100% van de km
 #   levert met gespreid, energie-begrensd (spot-slim) laden — i.p.v. de 2-uurs-batterij op piekvermogen.
 #   Zo valt opstelling 2 samen met het groeipad en met de goedkoopste-km/beste-NPV-filosofie.
+# Versie:        v1.9.3 (batterij-profielen soc_kwh/batt_ontladen_kw/batt_laden_kw ENKEL bij inp['emit_batt_profielen'])
+# Wijziging v1.9.3 vs v1.9.2: de drie batterij-arrays worden alleen nog geëmit als de aanroeper emit_batt_profielen
+#   zet (het klantrapport /api/energiekompas/bedrijf-rapport). Standaard weg → /api/opstelling geeft de VOLLE
+#   sim-resultaten van 3 varianten terug, dus die verdubbelde 'profielen'-payload deed de opstelling-sweep vastlopen
+#   ("Load failed", vooral zonder batterij = grotere zoekruimte). REGRESSIE-FIX.
 # Versie:        v1.9.2 (batterij-profielen in output.profielen: soc_kwh, batt_ontladen_kw, batt_laden_kw)
 # Wijziging v1.9.2 vs v1.9.1: output.profielen krijgt drie extra per-kwartier arrays (soc_kwh uit soc_all,
 #   batt_ontladen_kw uit p_dis_all, batt_laden_kw uit p_ch_all) t.b.v. de klantrapport-heatmaps (SOC / ontladen /
@@ -3776,6 +3781,7 @@ def run_simulation(inp: dict) -> dict:
         # (afname: spot+markup+belastingen ; injectie: −(spot−markdown), = inkomst).
         'profielen': (lambda _mk=(inp['contract'].get('markup_eur_mwh',0) or 0),
                              _md=(inp['contract'].get('markdown_eur_mwh',0) or 0),
+                             _eb=bool(inp.get('emit_batt_profielen')),
                              _bel=((inp['contract'].get('gsc_eur_mwh',0) or 0)
                                    +(inp['contract'].get('wkk_eur_mwh',0) or 0)
                                    +(inp['contract'].get('vergroening_eur_per_mwh',0) or 0)): {
@@ -3788,11 +3794,16 @@ def run_simulation(inp: dict) -> dict:
                       else -(spot_actual[i] - _md), 1)
                 for i in range(N)
             ],
-            # v1.8.12: batterij-profielen voor het klantrapport (heatmaps SOC / ontladen / laden + cycli).
-            # Additief; leeg als de lengte niet klopt (geen batterij / edge-case) → server valt terug.
-            'soc_kwh':          ([round(soc_all[i], 1)   for i in range(N)] if len(soc_all)   >= N else []),
-            'batt_ontladen_kw': ([round(p_dis_all[i], 1) for i in range(N)] if len(p_dis_all) >= N else []),
-            'batt_laden_kw':    ([round(p_ch_all[i], 1)  for i in range(N)] if len(p_ch_all)  >= N else []),
+            # v1.9.3 (26-09): batterij-profielen ENKEL op verzoek (emit_batt_profielen, gezet door
+            #   /api/energiekompas/bedrijf-rapport). Standaard weggelaten: ze verdubbelden anders de
+            #   'profielen'-payload (~700 KB → ~1,4 MB) op ELKE sim. /api/opstelling geeft de VOLLE sim-resultaten
+            #   van 3 varianten terug → bij de opstelling-sweep (veel calls, extra groot zonder batterij) liep de
+            #   client vast met "Load failed". De consument (bedrijf-rapport) valt terug op [] als ze ontbreken.
+            **({
+                'soc_kwh':          ([round(soc_all[i], 1)   for i in range(N)] if len(soc_all)   >= N else []),
+                'batt_ontladen_kw': ([round(p_dis_all[i], 1) for i in range(N)] if len(p_dis_all) >= N else []),
+                'batt_laden_kw':    ([round(p_ch_all[i], 1)  for i in range(N)] if len(p_ch_all)  >= N else []),
+            } if _eb else {}),
         })(),
         'piekoverschrijdingen': {
             'aantal_zacht': aantal_overschr_zacht,
