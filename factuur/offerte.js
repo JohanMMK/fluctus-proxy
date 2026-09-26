@@ -40,8 +40,11 @@ verzin nooit een getal):
   "jaarlijkse_kost_excl_btw": number|null,// terugkerende kost/jaar (onderhoud, abonnement, monitoring) excl. btw
   "looptijd_jaar": number|null,           // contract-/garantie-/afschrijvingslooptijd in jaren
   "pv_kwp": number|null,                  // geoffreerd PV-vermogen in kWp
-  "batterij_kwh": number|null,            // batterijcapaciteit in kWh
-  "batterij_kw": number|null,             // batterijvermogen in kW
+  "batterij_kwh": number|null,            // batterijcapaciteit in kWh (nominaal)
+  "batterij_kw": number|null,             // batterijvermogen in kW (laad/ontlaad)
+  "batterij_rte_pct": number|null,        // round-trip efficiency in % (bv. 90) — enkel als de offerte ze vermeldt
+  "batterij_dod_pct": number|null,        // depth of discharge / bruikbaar % (bv. 90) — enkel als vermeld
+  "batterij_cycli": number|null,          // gegarandeerd aantal cycli (bv. 6000) — enkel als vermeld
   "laadpalen": [ { "aantal": number, "kw": number|null, "type": string|null } ],
   "belooft_besparing_eur_jaar": number|null, // als de offerte een jaarlijkse besparing claimt (EUR/jaar)
   "belooft_payback_jaar": number|null,       // als de offerte een terugverdientijd claimt (jaren)
@@ -110,6 +113,9 @@ function _normaliseerOfferte(parsed) {
     pv_kwp: pos(parsed.pv_kwp),
     batterij_kwh: pos(parsed.batterij_kwh),
     batterij_kw: pos(parsed.batterij_kw),
+    batterij_rte_pct: pos(parsed.batterij_rte_pct),
+    batterij_dod_pct: pos(parsed.batterij_dod_pct),
+    batterij_cycli: pos(parsed.batterij_cycli),
     laadpalen: laad,
     belooft_besparing_eur_jaar: pos(parsed.belooft_besparing_eur_jaar),
     belooft_payback_jaar: pos(parsed.belooft_payback_jaar),
@@ -135,7 +141,7 @@ async function extractOfferte({ files, apiKey, model, retries = 1 }) {
   }
   if (!parsed) throw new Error(`Offerte-extractie mislukt: ${lastError ? lastError.message : 'onbekende fout'}`);
   const offerte = _normaliseerOfferte(parsed);
-  return { ok: true, offerte, _meta: { model: usedModel, duration_ms: Date.now() - t0, input_tokens: raw && raw.usage.input_tokens, output_tokens: raw && raw.usage.output_tokens, version: '1.0.0' } };
+  return { ok: true, offerte, _meta: { model: usedModel, duration_ms: Date.now() - t0, input_tokens: raw && raw.usage.input_tokens, output_tokens: raw && raw.usage.output_tokens, version: '1.1.0' } };
 }
 
 // ─── Heranalyse (puur) — vergelijk de offerte met de EnergieKompas-studie ─────────────────────────
