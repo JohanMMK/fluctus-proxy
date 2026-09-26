@@ -29,7 +29,8 @@
 
 const crypto = require('crypto');
 
-const VERSIE = '1.1.0';   // v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
+const VERSIE = '1.2.0';   // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
+// v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
 const N = 35040;
 const CUMDAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 const MAAND_NAAM = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
@@ -234,6 +235,20 @@ function builtinSpec(sn) {
       has_header: sn.has_header, skip_rows: sn.skip_rows,
       datetime: { col: 0, time_col: null, date_order: 'DMY', label: 'start' },
       value_columns: { afname: [1], injectie: null }, unit: /\bkw\b(?!h)/.test(h1) ? 'kW' : 'kWh', resolution: 'auto', timezone: 'local',
+    } };
+  }
+  // (c) Simulator-profiel breed: "date, demand.power (afname), pv.power_max (injectie)" — waarden in Watt
+  const iDate = hn.findIndex(h => h.includes('date') || h.includes('datum'));
+  const iDem = hn.findIndex(h => h.includes('demand'));
+  const iPv = hn.findIndex(h => h.includes('pv'));
+  if (iDate >= 0 && iDem >= 0 && iPv >= 0 && iDem !== iPv &&
+      sn.types[iDem] === 'n' && sn.types[iPv] === 'n' &&
+      (sn.types[iDate] === 'dt' || sn.types[iDate] === 'd')) {
+    return { bron: 'builtin', spec: {
+      naam: 'Simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W)',
+      delimiter: sn.delimiter || ',', decimal: sn.decimal, has_header: true, skip_rows: sn.skip_rows,
+      datetime: { col: iDate, time_col: null, date_order: _guessOrderFromShape(sn, iDate), label: 'start' },
+      value_columns: { afname: [iDem], injectie: [iPv] }, unit: 'W', resolution: 'auto', timezone: 'local',
     } };
   }
   return null;
