@@ -4,7 +4,9 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
- * Versie: 1.4.7 (augustus 2026)
+ * Versie: 1.5.2 (2026-09-26) — CONSOLIDATIE factuurpiek: baseCase.toegangsvermogenKw = gekozenMaxKw (max van
+ *   toegangsvermogen/maandpiek/capaciteit) wanneer top-level leeg is → één bron van waarheid voor alle afnemers.
+ *   Additief (overschrijft nooit een ingelezen toegangsvermogen). v1.4.7 (augustus 2026)
  *
  * Wijziging v1.4.6 → v1.4.7 (VOORSCHOTFACTUUR-GATE):
  *   Nieuwe velden is_voorschot (+ voorschot_reden) op de baseCase. Een voorschot-/
@@ -1064,6 +1066,13 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
     if (idx >= 0) _uncertain.splice(idx, 1);
   } else if (aansluitVermogenKva === null || aansluitVermogenKva === undefined) {
     if (!_uncertain.includes('aansluitVermogenKva')) _uncertain.push('aansluitVermogenKva');
+  }
+  // v1.5.2: CONSOLIDATIE — schrijf de gekozen factuurpiek (max van toegangsvermogen/maandpiek/capaciteit) terug naar
+  //   het top-level baseCase.toegangsvermogenKw, zodat ALLE afnemers (EK, Kamino, CRM, simulator-flows) dezelfde
+  //   piek zien i.p.v. terug te vallen op aansluitVermogenKva×0,9. ADDITIEF: enkel invullen als er nog geen
+  //   expliciet top-level toegangsvermogen is (nooit een ingelezen waarde overschrijven).
+  if ((parsed.toegangsvermogenKw == null || !(+parsed.toegangsvermogenKw > 0)) && gekozenKw != null && gekozenKw > 0) {
+    parsed.toegangsvermogenKw = gekozenKw;
   }
 
   // 2c. Leeftijdscheck + tariefjaar-analyse
