@@ -119,7 +119,7 @@ function _htmlNaarAscii(s) {
     .map(ch => { const cp = ch.codePointAt(0); return cp > 127 ? '&#' + cp + ';' : ch; })
     .join('');
 }
-async function sendMail(to, subject, htmlContent, textContent) {
+async function sendMail(to, subject, htmlContent, textContent, attachments) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const lijst = (Array.isArray(to) ? to : [to]).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
   if (!lijst.length) throw new Error('sendMail: geen geldige ontvanger');
@@ -138,12 +138,21 @@ async function sendMail(to, subject, htmlContent, textContent) {
     body,
     toRecipients: lijst,
   };
+  // v15.163: optionele bijlagen (bv. klantrapport-PDF). contentBytes = kale base64 (geen data:-prefix).
+  if (Array.isArray(attachments) && attachments.length) {
+    message.attachments = attachments.filter(a => a && a.contentBytes).map(a => ({
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: String(a.name || 'bijlage.pdf'),
+      contentType: String(a.contentType || 'application/pdf'),
+      contentBytes: String(a.contentBytes)
+    }));
+  }
   const r = await _g(`/users/${mb}/sendMail`, { method: 'POST', body: JSON.stringify({ message, saveToSentItems: true }) });
   if (!r.ok && r.status !== 202) throw new Error('Graph sendMail: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   return { sent: true };
 }
 
 // Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
-try { console.log('[graph-inbound] module v15.161.2 geladen — charset-fix (niet-ASCII → HTML-entiteiten) ACTIEF'); } catch (e) {}
+try { console.log('[graph-inbound] module v15.163.0 geladen — charset-fix ACTIEF + sendMail bijlagen (fileAttachment)'); } catch (e) {}
 
 module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, sendMail };

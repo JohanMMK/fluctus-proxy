@@ -87,6 +87,11 @@
 #   aantal standaard 2u-eenheden (120 kW/260 kWh) dat op de bestaande aansluiting 100% van de km
 #   levert met gespreid, energie-begrensd (spot-slim) laden — i.p.v. de 2-uurs-batterij op piekvermogen.
 #   Zo valt opstelling 2 samen met het groeipad en met de goedkoopste-km/beste-NPV-filosofie.
+# Versie:        v1.9.2 (batterij-profielen in output.profielen: soc_kwh, batt_ontladen_kw, batt_laden_kw)
+# Wijziging v1.9.2 vs v1.9.1: output.profielen krijgt drie extra per-kwartier arrays (soc_kwh uit soc_all,
+#   batt_ontladen_kw uit p_dis_all, batt_laden_kw uit p_ch_all) t.b.v. de klantrapport-heatmaps (SOC / ontladen /
+#   laden) en het cycli-kengetal. Additief; leeg als de arraylengte < N (geen batterij / edge-case). De bestaande
+#   velden (vermogen_aansluiting_kw, spot_prijs_eur_mwh, kost_eur_mwh) blijven ongewijzigd.
 # Versie:        v1.9.1 (energie-begrensde batterij-headroom in _bouw_ev_load)
 # Wijziging v1.9.1 vs v1.9.0: _bouw_ev_load begrenst de batterij-bijdrage aan de EV-headroom nu door
 #   haar bruikbare energie per laadsessie (nieuwe param battery_kwh = kWh × DoD) i.p.v. haar vermogen
@@ -3783,6 +3788,11 @@ def run_simulation(inp: dict) -> dict:
                       else -(spot_actual[i] - _md), 1)
                 for i in range(N)
             ],
+            # v1.8.12: batterij-profielen voor het klantrapport (heatmaps SOC / ontladen / laden + cycli).
+            # Additief; leeg als de lengte niet klopt (geen batterij / edge-case) → server valt terug.
+            'soc_kwh':          ([round(soc_all[i], 1)   for i in range(N)] if len(soc_all)   >= N else []),
+            'batt_ontladen_kw': ([round(p_dis_all[i], 1) for i in range(N)] if len(p_dis_all) >= N else []),
+            'batt_laden_kw':    ([round(p_ch_all[i], 1)  for i in range(N)] if len(p_ch_all)  >= N else []),
         })(),
         'piekoverschrijdingen': {
             'aantal_zacht': aantal_overschr_zacht,
