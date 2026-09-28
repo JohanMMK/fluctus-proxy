@@ -85,7 +85,9 @@ async function getPdfAttachments(msgId) {
 // en sorteren oudste-eerst. Het datum-venster + de verwerkt-lijst worden server-side toegepast.
 async function fetchRecent() {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
-  const q = `/users/${mb}/messages?$select=id,subject,from,receivedDateTime,hasAttachments&$top=50`;
+  // v15.184: enkel de INBOX (niet de hele mailbox) → een naar 'Verwerkt' verplaatste mail valt uit de fetch en
+  //   kan dus fysiek niet meer opnieuw verwerkt worden (belt-and-suspenders bovenop de verwerkt-lijst + in-proces dedup).
+  const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments&$top=50`;
   const r = await _g(q);
   if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
@@ -103,6 +105,27 @@ async function markRead(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}`, { method: 'PATCH', body: JSON.stringify({ isRead: true }) });
   return r.ok;
+}
+
+// v15.184: 'Verwerkt'-submap onder de Inbox — verwerkte mails worden hierheen verplaatst zodat de poller (fetchRecent,
+// enkel Inbox) ze nooit meer oppikt. Robuust tegen elke staat/cache-lag. Vereist Mail.ReadWrite (zelfde als markRead).
+let _verwerktFolderId = null;
+async function ensureVerwerktFolder() {
+  if (_verwerktFolderId) return _verwerktFolderId;
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/mailFolders/inbox/childFolders?$select=id,displayName&$top=100`);
+  if (r.ok) { const j = await r.json(); const f = (j.value || []).find(x => String(x.displayName || '').toLowerCase() === 'verwerkt'); if (f) { _verwerktFolderId = f.id; return _verwerktFolderId; } }
+  const c = await _g(`/users/${mb}/mailFolders/inbox/childFolders`, { method: 'POST', body: JSON.stringify({ displayName: 'Verwerkt' }) });
+  if (!c.ok) throw new Error('Graph ensureVerwerktFolder: HTTP ' + c.status + ' ' + (await c.text().catch(() => '')).slice(0, 200));
+  const cj = await c.json(); _verwerktFolderId = cj.id; return _verwerktFolderId;
+}
+// Verplaats één mail naar 'Verwerkt'. Move geeft een NIEUW message-id terug; we gebruiken het niet verder (mail is uit de Inbox).
+async function moveToVerwerkt(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const dest = await ensureVerwerktFolder();
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/move`, { method: 'POST', body: JSON.stringify({ destinationId: dest }) });
+  if (!r.ok) throw new Error('Graph moveToVerwerkt: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  return true;
 }
 
 // v15.157: KLANTMAIL VIA GRAPH — verstuur vanuit de EK-mailbox zelf (energiekompas@fluctus.net). Dit is een échte
@@ -155,4 +178,4 @@ async function sendMail(to, subject, htmlContent, textContent, attachments) {
 // Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
 try { console.log('[graph-inbound] module v15.163.0 geladen — charset-fix ACTIEF + sendMail bijlagen (fileAttachment)'); } catch (e) {}
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, sendMail };
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, moveToVerwerkt, ensureVerwerktFolder, sendMail };
