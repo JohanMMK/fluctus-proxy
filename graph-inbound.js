@@ -146,8 +146,11 @@ function _htmlNaarAscii(s) {
     .map(ch => { const cp = ch.codePointAt(0); return cp > 127 ? '&#' + cp + ';' : ch; })
     .join('');
 }
+function _geenEuroSymbool(s) { return (s == null) ? s : String(s).replace(/€\s*/g, 'EUR '); }
 async function sendMail(to, subject, htmlContent, textContent, attachments) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  // v15.190 (Johan): NOOIT het €-symbool in uitgaande mail (mojibake). Vervang aan de verzend-grens door "EUR ".
+  subject = _geenEuroSymbool(subject); htmlContent = _geenEuroSymbool(htmlContent); textContent = _geenEuroSymbool(textContent);
   const lijst = (Array.isArray(to) ? to : [to]).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
   if (!lijst.length) throw new Error('sendMail: geen geldige ontvanger');
   let body;
