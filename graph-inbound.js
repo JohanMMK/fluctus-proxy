@@ -91,12 +91,13 @@ async function fetchRecent() {
   const r = await _g(q);
   if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
+  // v15.185: ALLE Inbox-mails (niet enkel met bijlage) → de sweep kan zo triageren (facturen → Verwerkt, rest → Andere).
   return (j.value || [])
-    .filter(m => m.hasAttachments)
     .map(m => ({
       id: m.id, subject: m.subject || '',
       from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
       ontvangen: m.receivedDateTime || '',
+      heeftBijlage: !!m.hasAttachments,
     }))
     .sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));
 }
@@ -107,26 +108,29 @@ async function markRead(msgId) {
   return r.ok;
 }
 
-// v15.184: 'Verwerkt'-submap onder de Inbox — verwerkte mails worden hierheen verplaatst zodat de poller (fetchRecent,
-// enkel Inbox) ze nooit meer oppikt. Robuust tegen elke staat/cache-lag. Vereist Mail.ReadWrite (zelfde als markRead).
-let _verwerktFolderId = null;
-async function ensureVerwerktFolder() {
-  if (_verwerktFolderId) return _verwerktFolderId;
+// v15.184/185: submappen onder de Inbox ('Verwerkt' = afgehandelde facturen, 'Andere' = bekeken niet-factuur). Verwerkte
+// mails worden hierheen verplaatst zodat de poller (fetchRecent, enkel Inbox) ze nooit meer oppikt en de Inbox leeg blijft.
+// Robuust tegen elke staat/cache-lag. Vereist Mail.ReadWrite (zelfde als markRead). Folder-id's per naam gecachet.
+const _folderIds = {};
+async function ensureFolder(name) {
+  const key = String(name).toLowerCase();
+  if (_folderIds[key]) return _folderIds[key];
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const r = await _g(`/users/${mb}/mailFolders/inbox/childFolders?$select=id,displayName&$top=100`);
-  if (r.ok) { const j = await r.json(); const f = (j.value || []).find(x => String(x.displayName || '').toLowerCase() === 'verwerkt'); if (f) { _verwerktFolderId = f.id; return _verwerktFolderId; } }
-  const c = await _g(`/users/${mb}/mailFolders/inbox/childFolders`, { method: 'POST', body: JSON.stringify({ displayName: 'Verwerkt' }) });
-  if (!c.ok) throw new Error('Graph ensureVerwerktFolder: HTTP ' + c.status + ' ' + (await c.text().catch(() => '')).slice(0, 200));
-  const cj = await c.json(); _verwerktFolderId = cj.id; return _verwerktFolderId;
+  if (r.ok) { const j = await r.json(); const f = (j.value || []).find(x => String(x.displayName || '').toLowerCase() === key); if (f) { _folderIds[key] = f.id; return f.id; } }
+  const c = await _g(`/users/${mb}/mailFolders/inbox/childFolders`, { method: 'POST', body: JSON.stringify({ displayName: name }) });
+  if (!c.ok) throw new Error('Graph ensureFolder(' + name + '): HTTP ' + c.status + ' ' + (await c.text().catch(() => '')).slice(0, 200));
+  const cj = await c.json(); _folderIds[key] = cj.id; return cj.id;
 }
-// Verplaats één mail naar 'Verwerkt'. Move geeft een NIEUW message-id terug; we gebruiken het niet verder (mail is uit de Inbox).
-async function moveToVerwerkt(msgId) {
+// Verplaats één mail naar een submap onder de Inbox. Move geeft een NIEUW message-id terug; we gebruiken het niet verder.
+async function moveToFolder(msgId, name) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
-  const dest = await ensureVerwerktFolder();
+  const dest = await ensureFolder(name);
   const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/move`, { method: 'POST', body: JSON.stringify({ destinationId: dest }) });
-  if (!r.ok) throw new Error('Graph moveToVerwerkt: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  if (!r.ok) throw new Error('Graph moveToFolder(' + name + '): HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   return true;
 }
+async function moveToVerwerkt(msgId) { return moveToFolder(msgId, 'Verwerkt'); }   // back-compat
 
 // v15.157: KLANTMAIL VIA GRAPH — verstuur vanuit de EK-mailbox zelf (energiekompas@fluctus.net). Dit is een échte
 // mail uit de mailbox (geen List-Unsubscribe/"mailinglijst"-banner zoals bij Brevo), passend bij "reactie op de klant".
@@ -178,4 +182,4 @@ async function sendMail(to, subject, htmlContent, textContent, attachments) {
 // Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
 try { console.log('[graph-inbound] module v15.163.0 geladen — charset-fix ACTIEF + sendMail bijlagen (fileAttachment)'); } catch (e) {}
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, moveToVerwerkt, ensureVerwerktFolder, sendMail };
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail };
