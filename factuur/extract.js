@@ -4,6 +4,12 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
+ * Versie: 1.5.3 (2026-09-28) — AFNAME-OVERREAD-GUARD (Johan): de LLM telde soms de verbruiksHISTORIEK-grafiek mee bij
+ *   afnameKwh/kost → fysiek onmogelijke afname (bv. 1368 MWh op 60 kW = loadfactor 260%). Fix: (1) prompt-hardening
+ *   (gebruik NOOIT de historiek; afnameKwh = enkel de energie-verbruiksregels van deze periode) + (2) deterministische
+ *   na-check: is afname > piek_kW×24×dagen (100% LF), corrigeer naar de som van de energie-verbruiksregels (piek+dal) en
+ *   de kost-groepstotalen naar de geverifieerde regelsommen; geen regelsom → vlag afname_loadfactor_onmogelijk + _uncertain.
+ *   Dormant bij normale facturen (ruim onder de cap). _lijnSommen helper. Flags: afname_overread_gecorrigeerd / _loadfactor_onmogelijk.
  * Versie: 1.5.2 (2026-09-26) — CONSOLIDATIE factuurpiek: baseCase.toegangsvermogenKw = gekozenMaxKw (max van
  *   toegangsvermogen/maandpiek/capaciteit) wanneer top-level leeg is → één bron van waarheid voor alle afnemers.
  *   Additief (overschrijft nooit een ingelezen toegangsvermogen). v1.4.7 (augustus 2026)
@@ -186,6 +192,17 @@ Zoek naar regels met "Capaciteitstarief" / "Capaciteitsterm" als kostenpost.
 Voor ELKE periode-regel:
   { van: "YYYY-MM-DD", tot: "YYYY-MM-DD", bedragExclBtw: <getal> }
 Plaats deze als array in _capaciteitstariefRegels.
+
+AFNAME / VERBRUIK — ENKEL DE FACTUURPERIODE (ZEER BELANGRIJK):
+- afnameKwh = de totale afname (kWh) van de VERBRUIKSPERIODE van DEZE factuur — dat is
+  de som van de energie-verbruiksregels in de kostentabel (bv. "Elektriciteit piekuren"
+  + "Elektriciteit daluren", of één "Elektriciteit"-regel).
+- GEBRUIK NOOIT de "Verbruikshistoriek" / "Uw historisch verbruik" / de grafiek met
+  meerdere maanden/balken om afnameKwh of de kost te bepalen. Die toont vorige periodes
+  en mag NIET opgeteld of overgenomen worden. Enkel de kostentabel van deze factuur telt.
+- Controle: afnameKwh moet ≈ (piekuren kWh + daluren kWh) van deze periode zijn, en mag
+  NOOIT groter zijn dan maandpiek_kW × 24 × aantal_dagen (dat zou loadfactor > 100% = onmogelijk).
+  Klopt dat niet, dan heb je de historiek meegeteld — herlees en neem enkel de periode.
 
 DAG/NACHT VERBRUIK:
 - Als factuur expliciete kWh-totalen toont voor dag/nacht: vul direct in.
@@ -947,6 +964,26 @@ function _voorschotPeriodeDagen(van, tot) {
   var d = Math.round((b - a) / 86400000);
   return (d >= 0 && d < 3660) ? d : null;
 }
+// v1.5.x (Johan): sommen uit de (rekenkundig geverifieerde) factuurregels — de sterkste bron van waarheid.
+//   afnameKwhLijn = som van de ECHTE afname-verbruiksregels (eenheid kWh, aantal>0), ZONDER injectie/teruglevering
+//   en ZONDER groene-stroom/WKC-certificaatregels (die dragen soms hetzelfde kWh-getal → dubbeltelling vermijden).
+function _lijnSommen(regels) {
+  const out = { groep: { energie: 0, distributie: 0, heffing: 0 }, somAlle: 0, afnameKwhLijn: 0 };
+  if (!Array.isArray(regels)) return out;
+  const injRe = /injec|teruglever|teruggelever/i;
+  const certRe = /certificaat|groene\s*stroom|warmtekracht|\bgsc\b|\bwkc\b/i;
+  regels.forEach(r => {
+    if (!r) return;
+    const b = Number(r.bedrag_excl) || 0; out.somAlle += b;
+    if (out.groep[r.groep] != null) out.groep[r.groep] += b;
+    const eenh = String(r.eenheid || '').toLowerCase();
+    const oms = String(r.omschrijving || '');
+    if (/wh/.test(eenh) && Number(r.aantal) > 0 && r.is_capaciteit !== true && !injRe.test(oms) && !certRe.test(oms)) {
+      out.afnameKwhLijn += Number(r.aantal);
+    }
+  });
+  return out;
+}
 function detecteerVoorschot(parsed) {
   var lc = function (s) { return String(s == null ? '' : s).toLowerCase(); };
   var regels = Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [];
@@ -1073,6 +1110,41 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   //   expliciet top-level toegangsvermogen is (nooit een ingelezen waarde overschrijven).
   if ((parsed.toegangsvermogenKw == null || !(+parsed.toegangsvermogenKw > 0)) && gekozenKw != null && gekozenKw > 0) {
     parsed.toegangsvermogenKw = gekozenKw;
+  }
+
+  // 2b-bis. AFNAME-OVERREAD-GUARD (v1.5.x, Johan). VALKUIL: de LLM telt soms de verbruiksHISTORIEK-grafiek onderaan de
+  //   factuur mee bij afnameKwh (en de kost) → een fysiek onmogelijke periode-afname. Deterministische na-check: de
+  //   maximale periode-afname bij 100% loadfactor t.o.v. de gemeten piek/toegang = piek_kW × 24 × dagen. Ligt de gelezen
+  //   afname dáárboven, dan is ze onmogelijk. We corrigeren dan naar de som van de ECHTE energie-verbruiksregels (piek+dal,
+  //   rekenkundig geverifieerd) en corrigeren de kost-groepstotalen mee waar ze de regelsom fors overschrijden. Bij
+  //   normale facturen zit de afname ruim onder de cap → guard is dormant → geen regressie.
+  const _dagenNa = _voorschotPeriodeDagen(parsed.periodeVan, parsed.periodeTot);
+  const _capKwNa = (gekozenKw && gekozenKw > 0) ? gekozenKw : ((bron && +bron.maandpiekKw > 0) ? +bron.maandpiekKw : 0);
+  if (_dagenNa != null && _dagenNa > 0 && _capKwNa > 0) {
+    const _maxAfname = _capKwNa * 24 * _dagenNa;                 // 100% loadfactor t.o.v. de gemeten piek/toegang
+    const _afnameGelezen = Number(parsed.afnameKwh) || 0;
+    if (_afnameGelezen > _maxAfname * 1.02) {                    // > 100% LF (2% marge) = fysiek onmogelijk
+      const _ls = _lijnSommen(parsed._factuurRegels);
+      if (_ls.afnameKwhLijn > 0 && _ls.afnameKwhLijn <= _maxAfname * 1.02) {
+        _provider_flags.push('afname_overread_gecorrigeerd:' + Math.round(_afnameGelezen) + '->' + Math.round(_ls.afnameKwhLijn));
+        parsed.afnameKwh = Math.round(_ls.afnameKwhLijn);
+        // Kost-groepstotalen meecorrigeren naar de (geverifieerde) regelsommen wanneer ze de regelsom fors (>1,5×) overschrijden.
+        if (regels && regels.ok) {
+          if (_ls.groep.energie > 0 && Number(parsed.totaalEnergieExclBtw) > _ls.groep.energie * 1.5) parsed.totaalEnergieExclBtw = Math.round(_ls.groep.energie * 100) / 100;
+          if (_ls.groep.distributie > 0 && Number(parsed.totaalDistributieExclBtw) > _ls.groep.distributie * 1.5) parsed.totaalDistributieExclBtw = Math.round(_ls.groep.distributie * 100) / 100;
+          if (_ls.groep.heffing > 0 && Number(parsed.totaalHeffingenExclBtw) > _ls.groep.heffing * 1.5) parsed.totaalHeffingenExclBtw = Math.round(_ls.groep.heffing * 100) / 100;
+          if (_ls.somAlle > 0 && Number(parsed.totaalExclBtw) > _ls.somAlle * 1.5) parsed.totaalExclBtw = Math.round(_ls.somAlle * 100) / 100;
+        }
+        // dag/nacht-splitsing wissen als ze niet meer bij de gecorrigeerde afname past.
+        if ((Number(parsed.afnameDagKwh) || 0) + (Number(parsed.afnameNachtKwh) || 0) > parsed.afnameKwh * 1.2) { parsed.afnameDagKwh = null; parsed.afnameNachtKwh = null; }
+        console.warn(`[extract] afname-overread gecorrigeerd: ${Math.round(_afnameGelezen)} → ${parsed.afnameKwh} kWh (max ${Math.round(_maxAfname)} @100%LF, piek ${_capKwNa}kW × ${_dagenNa}d)`);
+      } else {
+        // Geen betrouwbare regelsom om naar te corrigeren → NIET stil doorgaan: vlag als onbetrouwbaar (wizard waarschuwt).
+        _provider_flags.push('afname_loadfactor_onmogelijk:' + Math.round(_afnameGelezen) + '_max' + Math.round(_maxAfname));
+        if (!_uncertain.includes('afnameKwh')) _uncertain.push('afnameKwh');
+        console.warn(`[extract] afname loadfactor ONMOGELIJK en geen regelsom: ${Math.round(_afnameGelezen)} kWh > max ${Math.round(_maxAfname)} — geflagd`);
+      }
+    }
   }
 
   // 2c. Leeftijdscheck + tariefjaar-analyse
@@ -1313,9 +1385,9 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.4.7'
+      version: '1.5.3'
     }
   };
 }
 
-module.exports = { run, DNB_TO_TARIEF_KEY, detecteerVoorschot };
+module.exports = { run, DNB_TO_TARIEF_KEY, detecteerVoorschot, _lijnSommen };
