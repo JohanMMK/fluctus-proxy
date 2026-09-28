@@ -29,12 +29,12 @@
 
 const crypto = require('crypto');
 
-const VERSIE = '1.2.0';   // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
+const VERSIE = '1.3.0';   // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
 // v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
 const N = 35040;
 const CUMDAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
 const MAAND_NAAM = ['jan', 'feb', 'mrt', 'apr', 'mei', 'jun', 'jul', 'aug', 'sep', 'okt', 'nov', 'dec'];
-const HERKOMST_LABELS = ['gemeten', 'interpolatie', 'typische-dag', 'SLP-fallback', 'uurresolutie', 'energiebalans'];
+const HERKOMST_LABELS = ['gemeten', 'interpolatie', 'typische-dag', 'SLP-fallback', 'uurresolutie', 'energiebalans', 'eigen-weekvorm'];
 const GAP_KORT = 4;        // ≤ 4 kwartieren → lineaire interpolatie
 const GAP_DAG = 96;        // ≤ 1 dag → typische-dag
 const DREMPEL_PCT = () => {
@@ -664,6 +664,24 @@ function fillShape(kwh, her, measuredMask, vorm, code) {
   }
 }
 
+// v1.6.0 (Johan): EIGEN-WEEKVORM voor lange gaten (afname). I.p.v. de generieke SLP-vorm bouwen we uit de GEMETEN data van
+//   de klant zelf een "typische week" (dag-van-week × kwartier-van-dag) en leggen die over de ontbrekende maanden. Dat vangt
+//   het echte werkritme (weekdag/weekend, dag/nacht) veel beter dan SLP. Het jaartotaal blijft nadien op de ingevulde MWh
+//   (de sim normaliseert de vorm som=1 en schaalt op het factuurvolume bij <12 gemeten maanden). Onvoldoende dekking van de
+//   weekvorm (< 85% van de 7×96 slots gemeten) → null → val terug op SLP (geen verslechtering).
+function eigenWeekVorm(kwh, mask) {
+  const SLOT = 7 * 96, sum = new Float64Array(SLOT), cnt = new Int32Array(SLOT);
+  const base = new Date(Date.UTC(2025, 0, 1)).getUTCDay();   // 3 = woensdag (vaste 2025-kalenderindex)
+  for (let i = 0; i < N; i++) { if (!mask[i]) continue; const doy = Math.floor(i / 96), q = i % 96; const dow = (base + doy) % 7; const s = dow * 96 + q; sum[s] += kwh[i]; cnt[s]++; }
+  let filled = 0; for (let s = 0; s < SLOT; s++) if (cnt[s] > 0) filled++;
+  if (filled < SLOT * 0.85) return null;   // te weinig dekking → laat SLP het doen
+  const week = new Float64Array(SLOT); for (let s = 0; s < SLOT; s++) week[s] = cnt[s] > 0 ? sum[s] / cnt[s] : 0;
+  const out = new Float64Array(N); let tot = 0;
+  for (let i = 0; i < N; i++) { const doy = Math.floor(i / 96), q = i % 96; const dow = (base + doy) % 7; const v = week[dow * 96 + q]; out[i] = v > 0 ? v : 0; tot += out[i]; }
+  if (!(tot > 0)) return null;
+  for (let i = 0; i < N; i++) out[i] /= tot;   // som = 1
+  return out;
+}
 // Synthetische PV-vorm (fallback wanneer MARKT.solar_norm ontbreekt): zonnehoogte (51° N, 4,5° O) × maandfactor BE.
 function synthPvVorm() {
   const maandW = [0.28, 0.45, 0.75, 1.0, 1.1, 1.1, 1.1, 1.0, 0.85, 0.6, 0.35, 0.25];
@@ -787,7 +805,7 @@ function _periodes(her) {
 }
 
 function _summary(kwh, her, stats, extra) {
-  const cnt = [0, 0, 0, 0, 0, 0];
+  const cnt = [0, 0, 0, 0, 0, 0, 0];   // v1.6.0: index 6 = eigen-weekvorm
   for (let i = 0; i < N; i++) cnt[her[i]]++;
   const pct = c => Math.round(c / N * 1000) / 10;
   let som = 0, piek = 0; const maandMwh = new Array(12).fill(0), maandGemeten = new Array(12).fill(0), maandN = new Array(12).fill(0);
@@ -799,11 +817,15 @@ function _summary(kwh, her, stats, extra) {
   // v15.191 (Johan): GEEN subjectieve kwalificatie ("onbetrouwbaar, controleer") in het klantgerichte label —
   //   dat ondergraaft de geloofwaardigheid. Enkel feitelijke info: X gemeten, rest aangevuld met standaardprofiel.
   //   De flags blijven in het object (intern/debug), maar staan niet meer in het label.
-  let label = pctAfgeleid <= drempel ? 'gemeten' : `12-maand profiel — ${_spanTekst(nMeas)}, aangevuld met standaardprofiel`;
+  // v1.6.0 (Johan): benoem de dominante aanvul-bron feitelijk. Eigen-weekvorm (6) > SLP (3); energiebalans (5) apart.
+  const _aanvulBron = (cnt[6] > 0 && cnt[6] >= cnt[3]) ? 'uw eigen gemeten profiel'
+    : (cnt[5] > 0 && cnt[5] >= cnt[3] && cnt[5] >= cnt[6]) ? 'een energiebalans-reconstructie'
+    : 'standaardprofiel';
+  let label = pctAfgeleid <= drempel ? 'gemeten' : `12-maand profiel — ${_spanTekst(nMeas)}, aangevuld met ${_aanvulBron}`;
   return {
     label, label_type: pctAfgeleid <= drempel ? 'gemeten' : 'geextrapoleerd', drempel_pct: drempel,
     pct_gemeten: pct(cnt[0]), pct_uurresolutie: pct(cnt[4]), pct_interpolatie: pct(cnt[1]), pct_typische_dag: pct(cnt[2]),
-    pct_slp: pct(cnt[3]), pct_energiebalans: pct(cnt[5]), pct_afgeleid: pctAfgeleid,
+    pct_slp: pct(cnt[3]), pct_energiebalans: pct(cnt[5]), pct_eigen_weekvorm: pct(cnt[6]), pct_afgeleid: pctAfgeleid,
     gemeten_kwartieren: nMeas, gemeten_span: _spanTekst(nMeas), gemeten_maanden: stats.gemeten_maanden,
     van: stats.van, tot: stats.tot,
     maandpiek_kw: Math.round(piek * 10) / 10, maandpiek_kw_gemeten: stats.maandpiek_kw_gemeten,
@@ -853,7 +875,13 @@ function reconstrueer(conv, slp, pvVorm, opts) {
   }
   for (const t of types) {
     const r = res[t];
-    if (r.kwh.some(v => isNaN(v))) fillShape(r.kwh, r.her, r.mask, t === 'injectie' ? pvN : slpN, 3);
+    if (r.kwh.some(v => isNaN(v))) {
+      // v1.6.0 (Johan): afname → eigen-weekvorm van de klant (code 6) i.p.v. generiek SLP; injectie → PV-vorm (seizoen).
+      //   Onvoldoende gemeten dekking → eigenWeekVorm=null → val terug op SLP (code 3), geen verslechtering.
+      const eigen = (t === 'afname') ? eigenWeekVorm(r.kwh, r.mask) : null;
+      if (eigen) fillShape(r.kwh, r.her, r.mask, eigen, 6);
+      else fillShape(r.kwh, r.her, r.mask, t === 'injectie' ? pvN : slpN, 3);
+    }
   }
   const out = { types: {}, energiebalans: eb && eb.ok ? { pv: eb.pv, kwaliteit: eb.kwaliteit, iteraties: eb.iteraties } : null, flags };
   for (const t of types) {
