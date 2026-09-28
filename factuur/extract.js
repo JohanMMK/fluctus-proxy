@@ -4,6 +4,11 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
+ * Versie: 1.5.4 (2026-09-28) — AFNAME-OVERREAD-GUARD v2 (Johan): sterker anker. De LLM sommeerde de verbruiksHISTORIEK
+ *   (12-13 mnd) als "periode-afname"; ek.html annualiseert dat (×365/periodedagen) → absurde MWh (bv. 2012 MWh op 38 kW,
+ *   1-maandfactuur). Fix: correctie in prioriteit (1) piek+dal van DEZE periode (staan expliciet op de factuur, los van de
+ *   historiek), (2) rekenkundige regelsom; is er GEEN plausibel anker, begrens dan op de fysieke max (piek×24×dagen) i.p.v.
+ *   de onmogelijke waarde te bewaren + vlag _uncertain. Zo belandt er nooit een geannualiseerde absurde afname in het rapport.
  * Versie: 1.5.3 (2026-09-28) — AFNAME-OVERREAD-GUARD (Johan): de LLM telde soms de verbruiksHISTORIEK-grafiek mee bij
  *   afnameKwh/kost → fysiek onmogelijke afname (bv. 1368 MWh op 60 kW = loadfactor 260%). Fix: (1) prompt-hardening
  *   (gebruik NOOIT de historiek; afnameKwh = enkel de energie-verbruiksregels van deze periode) + (2) deterministische
@@ -1124,10 +1129,17 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
     const _maxAfname = _capKwNa * 24 * _dagenNa;                 // 100% loadfactor t.o.v. de gemeten piek/toegang
     const _afnameGelezen = Number(parsed.afnameKwh) || 0;
     if (_afnameGelezen > _maxAfname * 1.02) {                    // > 100% LF (2% marge) = fysiek onmogelijk
+      // v1.5.4 (Johan): correctiebronnen in PRIORITEIT. De VALKUIL is dat de LLM de verbruiksHISTORIEK (12-13 maanden)
+      //   optelt als "periode-afname" → na annualisatie in ek.html (×365/periodedagen) explodeert dat tot absurde MWh.
+      //   Sterkste anker = piek+dal van DEZE periode (staan expliciet op de factuur, los van de historiekgrafiek).
+      const _dn = (Number(parsed.afnameDagKwh) || 0) + (Number(parsed.afnameNachtKwh) || 0);
       const _ls = _lijnSommen(parsed._factuurRegels);
-      if (_ls.afnameKwhLijn > 0 && _ls.afnameKwhLijn <= _maxAfname * 1.02) {
-        _provider_flags.push('afname_overread_gecorrigeerd:' + Math.round(_afnameGelezen) + '->' + Math.round(_ls.afnameKwhLijn));
-        parsed.afnameKwh = Math.round(_ls.afnameKwhLijn);
+      let _corr = null, _corrBron = null;
+      if (_dn > 0 && _dn <= _maxAfname * 1.02) { _corr = _dn; _corrBron = 'piek+dal'; }
+      else if (_ls.afnameKwhLijn > 0 && _ls.afnameKwhLijn <= _maxAfname * 1.02) { _corr = _ls.afnameKwhLijn; _corrBron = 'regelsom'; }
+      if (_corr != null) {
+        _provider_flags.push('afname_overread_gecorrigeerd:' + Math.round(_afnameGelezen) + '->' + Math.round(_corr) + '(' + _corrBron + ')');
+        parsed.afnameKwh = Math.round(_corr);
         // Kost-groepstotalen meecorrigeren naar de (geverifieerde) regelsommen wanneer ze de regelsom fors (>1,5×) overschrijden.
         if (regels && regels.ok) {
           if (_ls.groep.energie > 0 && Number(parsed.totaalEnergieExclBtw) > _ls.groep.energie * 1.5) parsed.totaalEnergieExclBtw = Math.round(_ls.groep.energie * 100) / 100;
@@ -1135,14 +1147,16 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
           if (_ls.groep.heffing > 0 && Number(parsed.totaalHeffingenExclBtw) > _ls.groep.heffing * 1.5) parsed.totaalHeffingenExclBtw = Math.round(_ls.groep.heffing * 100) / 100;
           if (_ls.somAlle > 0 && Number(parsed.totaalExclBtw) > _ls.somAlle * 1.5) parsed.totaalExclBtw = Math.round(_ls.somAlle * 100) / 100;
         }
-        // dag/nacht-splitsing wissen als ze niet meer bij de gecorrigeerde afname past.
-        if ((Number(parsed.afnameDagKwh) || 0) + (Number(parsed.afnameNachtKwh) || 0) > parsed.afnameKwh * 1.2) { parsed.afnameDagKwh = null; parsed.afnameNachtKwh = null; }
-        console.warn(`[extract] afname-overread gecorrigeerd: ${Math.round(_afnameGelezen)} → ${parsed.afnameKwh} kWh (max ${Math.round(_maxAfname)} @100%LF, piek ${_capKwNa}kW × ${_dagenNa}d)`);
+        // dag/nacht-splitsing wissen als ze niet meer bij de gecorrigeerde afname past (enkel als we NIET op piek+dal corrigeerden).
+        if (_corrBron !== 'piek+dal' && ((Number(parsed.afnameDagKwh) || 0) + (Number(parsed.afnameNachtKwh) || 0) > parsed.afnameKwh * 1.2)) { parsed.afnameDagKwh = null; parsed.afnameNachtKwh = null; }
+        console.warn(`[extract] afname-overread gecorrigeerd (${_corrBron}): ${Math.round(_afnameGelezen)} → ${parsed.afnameKwh} kWh (max ${Math.round(_maxAfname)} @100%LF, piek ${_capKwNa}kW × ${_dagenNa}d)`);
       } else {
-        // Geen betrouwbare regelsom om naar te corrigeren → NIET stil doorgaan: vlag als onbetrouwbaar (wizard waarschuwt).
-        _provider_flags.push('afname_loadfactor_onmogelijk:' + Math.round(_afnameGelezen) + '_max' + Math.round(_maxAfname));
+        // Geen betrouwbaar anker → NOOIT de fysiek onmogelijke waarde bewaren (die belandt anders geannualiseerd in het rapport).
+        //   Begrens op de fysieke max (100% LF) én vlag krachtig als onzeker zodat de wizard/adviseur het controleert.
+        _provider_flags.push('afname_loadfactor_onmogelijk_capped:' + Math.round(_afnameGelezen) + '->' + Math.round(_maxAfname));
+        parsed.afnameKwh = Math.round(_maxAfname);
         if (!_uncertain.includes('afnameKwh')) _uncertain.push('afnameKwh');
-        console.warn(`[extract] afname loadfactor ONMOGELIJK en geen regelsom: ${Math.round(_afnameGelezen)} kWh > max ${Math.round(_maxAfname)} — geflagd`);
+        console.warn(`[extract] afname loadfactor ONMOGELIJK, geen anker → begrensd op max ${Math.round(_maxAfname)} kWh (was ${Math.round(_afnameGelezen)}) — geflagd`);
       }
     }
   }
