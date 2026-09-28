@@ -796,8 +796,10 @@ function _summary(kwh, her, stats, extra) {
   const pctAfgeleid = Math.round((1 - nMeas / N) * 1000) / 10;
   const drempel = DREMPEL_PCT();
   const flags = (extra && extra.flags) || [];
-  let label = pctAfgeleid <= drempel ? 'gemeten' : `12-maand profiel op basis van ${_spanTekst(nMeas)}`;
-  if (flags.length) label += ' — onbetrouwbaar, controleer';
+  // v15.191 (Johan): GEEN subjectieve kwalificatie ("onbetrouwbaar, controleer") in het klantgerichte label —
+  //   dat ondergraaft de geloofwaardigheid. Enkel feitelijke info: X gemeten, rest aangevuld met standaardprofiel.
+  //   De flags blijven in het object (intern/debug), maar staan niet meer in het label.
+  let label = pctAfgeleid <= drempel ? 'gemeten' : `12-maand profiel — ${_spanTekst(nMeas)}, aangevuld met standaardprofiel`;
   return {
     label, label_type: pctAfgeleid <= drempel ? 'gemeten' : 'geextrapoleerd', drempel_pct: drempel,
     pct_gemeten: pct(cnt[0]), pct_uurresolutie: pct(cnt[4]), pct_interpolatie: pct(cnt[1]), pct_typische_dag: pct(cnt[2]),
