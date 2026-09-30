@@ -4,6 +4,12 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
+ * Versie: 1.5.5 (2026-09-30) — PERIODE-RECONCILIATIE via tot_excl (Johan): sommige facturen leveren de ENERGIE-post én de
+ *   afname als JAARcijfer terwijl distributie/heffingen/tot_excl de VERBRUIKSPERIODE (maand) betreffen (gemengde-periode-
+ *   extractie; bv. Gerresheimer Momignies). tot_excl = periodetotaal = energie+distr+heffingen → energie_periode =
+ *   tot_excl−distr−heffingen. Wijkt de gelezen energie daar >1,5× van af, dan herschalen we energie naar dat periode-bedrag
+ *   en de afname met dezelfde factor (tenzij de overread-guard de afname al plausibel maakte). Alle posten op één periode-
+ *   basis → ek.html annualiseert (×jf) uniform correct. Additief: mono-periode-facturen ongewijzigd.
  * Versie: 1.5.4 (2026-09-28) — AFNAME-OVERREAD-GUARD v2 (Johan): sterker anker. De LLM sommeerde de verbruiksHISTORIEK
  *   (12-13 mnd) als "periode-afname"; ek.html annualiseert dat (×365/periodedagen) → absurde MWh (bv. 2012 MWh op 38 kW,
  *   1-maandfactuur). Fix: correctie in prioriteit (1) piek+dal van DEZE periode (staan expliciet op de factuur, los van de
@@ -1161,6 +1167,39 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
     }
   }
 
+  // 2b-ter. PERIODE-RECONCILIATIE via tot_excl (v1.5.5, Johan). VALKUIL: sommige facturen leveren de ENERGIE-post (en de
+  //   afname) als JAARcijfer — bv. een "jaarverbruik/jaartotaal"-lijn — terwijl distributie/heffingen én tot_excl de
+  //   VERBRUIKSPERIODE (bv. één maand) betreffen (gemengde-periode-extractie; bv. Gerresheimer Momignies: energie €4,65M +
+  //   afname 74,3 GWh JAARLIJKS, maar distr €127k / heffingen €105k / tot_excl €636k MAANDELIJKS). tot_excl is per definitie
+  //   het periodetotaal (= energie + distributie + heffingen), dus de energie die de periode impliceert = tot_excl − distr −
+  //   heffingen. Wijkt de gelezen energie daar FORS van af (>1,5×), dan is ze een verkeerde-periode-lezing → herschaal de
+  //   energie naar het periode-bedrag en de afname met DEZELFDE factor (ze delen de periode-fout), tenzij de afname hierboven
+  //   al door de overread-guard tot een fysiek plausibele periode-waarde is teruggebracht. Zo staan alle posten op één basis.
+  //   ADDITIEF: bij een normale (mono-periode) factuur past de energie al bij tot_excl → guard dormant → geen regressie.
+  (function () {
+    const _tx = Number(parsed.totaalExclBtw) || 0;
+    const _en = Number(parsed.totaalEnergieExclBtw) || 0;
+    const _di = Number(parsed.totaalDistributieExclBtw) || 0;
+    const _he = Number(parsed.totaalHeffingenExclBtw) || 0;
+    if (!(_tx > 0 && _en > 0)) return;
+    const _enImpl = _tx - _di - _he;                        // energie die het periodetotaal impliceert
+    if (!(_enImpl > 0) || _en <= _enImpl * 1.5) return;     // energie past al bij de periode (of geen betrouwbaar anker) → niks doen
+    const _afnOud = Number(parsed.afnameKwh) || 0;
+    parsed.totaalEnergieExclBtw = Math.round(_enImpl * 100) / 100;
+    // Afname enkel herschalen als ze NOG fysiek onmogelijk als periode-afname is (de overread-guard heeft ze dan niet al
+    //   via piek+dal/regelsom naar een plausibele periode-waarde teruggebracht — die anker is nauwkeuriger, dus voorrang).
+    //   De afname (kWh) schaalt op TIJD (periode/jaar = dagen/365), niet op de energie-kostfactor: zo blijft het
+    //   geannualiseerde jaarvolume exact gelijk aan het oorspronkelijk ingelezen jaarcijfer.
+    const _maxAfnamePer = (_dagenNa != null && _dagenNa > 0 && _capKwNa > 0) ? (_capKwNa * 24 * _dagenNa) : 0;
+    let _afnNieuw = _afnOud;
+    if (_afnOud > 0 && _dagenNa != null && _dagenNa > 0 && (!(_maxAfnamePer > 0) || _afnOud > _maxAfnamePer * 1.02)) {
+      _afnNieuw = Math.round(_afnOud * _dagenNa / 365);      // jaarcijfer → periode (tijd-evenredig)
+      parsed.afnameKwh = _afnNieuw;
+    }
+    _provider_flags.push('periode_reconciliatie:energie ' + Math.round(_en) + '->' + Math.round(_enImpl) + (_afnNieuw !== _afnOud ? (',afname ' + Math.round(_afnOud) + '->' + _afnNieuw) : ''));
+    console.warn(`[extract] periode-reconciliatie: energie ${Math.round(_en)}→${Math.round(_enImpl)} (= tot_excl−distr−heffingen)` + (_afnNieuw !== _afnOud ? `, afname ${Math.round(_afnOud)}→${_afnNieuw} (×${(_dagenNa/365).toFixed(3)} = periode/jaar)` : ', afname ongewijzigd (al plausibel)'));
+  })();
+
   // 2c. Leeftijdscheck + tariefjaar-analyse
   const leeftijd = isFactuurOud(parsed.factuurDatum);
   if (leeftijd.oud) {
@@ -1399,7 +1438,7 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.5.3'
+      version: '1.5.5'
     }
   };
 }
