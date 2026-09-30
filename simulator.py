@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.4 (2026-09-30, Johan): ONBALANS ENKEL OP FYSIEKE FLEX. De factuur-nominatie voor de
+#                onbalans-variant is nu de PASSIEVE fysieke positie (verbruik − PV) i.p.v. de LP-paper-nominatie
+#                (nom_eff = forecast + spec_dev/paper-capture). Gevolg: de deviation die aan de imbalanceprijs
+#                wordt afgerekend is precies de FYSIEKE flex — batterij-doorzet + PV-curtailment/injectie-modulatie
+#                — en NOOIT de fabriekslast. Zonder batterij/curtail is grid_in ≈ verbruik − PV ⇒ dev ≈ 0 ⇒
+#                onbalans ≈ €0 (bv. PV-only Gerresheimer, injectie ~1,4 MWh). De LP-dispatch (fysieke stromen,
+#                batterij tegen IMB) blijft ongewijzigd; enkel de settlement-basis verandert. Maakt paper_capture_
+#                rate/forecast_modus grotendeels irrelevant voor de onbalans-boeking. Spot-besparing ONGEWIJZIGD.
 # Versie:        v1.14.3 (2026-09-30, Johan): ONBALANS NOODVAL-COLLAPSE FIX (RCA). De nominatie-bovengrens in
 #                lp_dispatch_month_bsp stond op max_afname_hard. Zodra de fysieke lastpiek boven de aansluiting
 #                uitkwam (forecast_afn > contract, bv. Gerresheimer 10.765 kW > 9.200 kW) kon nom_afn de forecast
@@ -3586,18 +3594,29 @@ def run_simulation(inp: dict) -> dict:
                  f"{sum(nom_inj_arr)*0.25/1000:.1f} MWh injectie")
     if bsp_actief:
         contract_for_factuur['modus'] = 'passthrough'
-        # Gebruik effective nominatie uit LP (= forecast + paper-deviation).
-        # Dat is wat de ARP daadwerkelijk nomineert na BSP-strategie:
-        # forecast als basis + LP-bepaalde papier-dev op gunstige IMB-momenten.
-        if nom_eff_afn_kw_all and len(nom_eff_afn_kw_all) == N:
-            nom_afn_arr = nom_eff_afn_kw_all
-            nom_inj_arr = nom_eff_inj_kw_all
-            log.info(f"  BSP eff. nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
-        else:
-            # Fallback: forecast-only nominatie
-            nom_afn_arr = [max(consumption_forecast[i] - pv_forecast[i], 0) for i in range(N)]
-            nom_inj_arr = [max(pv_forecast[i] - consumption_forecast[i], 0) for i in range(N)]
-            log.info(f"  BSP forecast nominatie: nom_afn = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, nom_inj = {sum(nom_inj_arr)*0.25/1000:.1f} MWh")
+        # v1.14.4 (Johan 30-09): ONBALANS ENKEL OP FYSIEKE FLEX (batterij-doorzet +
+        # injectie-modulatie), NOOIT op de fabriekslast. De factuur-nominatie is NIET
+        # meer de LP-paper-nominatie (nom_eff = forecast + spec_dev/paper-capture), maar
+        # de PASSIEVE fysieke positie, zo gekozen dat de deviation die aan de imbalance-
+        # prijs wordt afgerekend precies de fysieke sturing is:
+        #   • AFNAME-kant: nom_afn = verbruik − (PV − curtailment) = de last na
+        #     werkelijk PV-gebruik. Deviation grid_in − nom_afn = ENKEL de batterij
+        #     (laden/ontladen). Zo wordt de fabriek NIET gemoduleerd en levert het
+        #     wegkappen van PV om aan negatieve prijzen bij te kopen (consumptie-gaming)
+        #     GEEN onbalans op. Zonder batterij ⇒ dev ≈ 0.
+        #   • INJECTIE-kant: nom_inj = PV(ongecurtaild) − verbruik = de passieve injectie.
+        #     Deviation grid_out − nom_inj = batterij + het wegkappen van injectie op
+        #     ongunstige (negatieve) injectie-momenten = échte injectie-modulatie.
+        # PV-only zonder batterij (bv. Gerresheimer, injectie ~1,4 MWh) ⇒ onbalans ≈ €0.
+        # De LP-DISPATCH (fysieke stromen, batterij tegen IMB) blijft ongewijzigd; enkel
+        # de settlement-basis verandert. Vervangt paper_capture_rate/forecast_modus/
+        # spec_dev volledig voor de onbalans-boeking.
+        _pvc = pv_curtailed_kw_bsp_all if (pv_curtailed_kw_bsp_all and len(pv_curtailed_kw_bsp_all) == N) else [0.0] * N
+        nom_afn_arr = [max(consumption_kw[i] - (pv_kw[i] - _pvc[i]), 0.0) for i in range(N)]
+        nom_inj_arr = [max(pv_kw[i] - consumption_kw[i], 0.0) for i in range(N)]
+        log.info(f"  BSP fysieke-flex nominatie: nom_afn(last na PV) = {sum(nom_afn_arr)*0.25/1000:.1f} MWh, "
+                 f"nom_inj(passief) = {sum(nom_inj_arr)*0.25/1000:.1f} MWh "
+                 f"(dev = batterij-doorzet + injectie-modulatie)")
 
     # v1.6 wijziging J: gebruik heeft_lp_output i.p.v. heeft_batterij.
     # Reden: bij PV-only + BSP zonder BESS draait de LP wél (BSP-modus
