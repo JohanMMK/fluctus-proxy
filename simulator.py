@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.2 (2026-09-30, Johan): ONBALANS-CAPTURE BEGRENSD IN DE MAAND-BSP-RETRY. De retry-ladder van
+#                lp_dispatch_month_bsp verwijderde bij niveau 2 het spec-budget (multiplier=-1) en gebruikte ×10 in de
+#                feasibility-terugval → de LP zette nom_afn≈0 en rekende de VOLLEDIGE afname aan de imbalanceprijs af
+#                → absurde onbalans-"besparing" (bv. €13,9M op een 67 GWh PV-only dossier; €110k op Microtherm). Fix:
+#                het spec-budget (paper-capture, gekalibreerd 1,8%) wordt NOOIT meer losgelaten; feasibility wordt
+#                uitsluitend opgelost via de ZACHTE fysieke caps (feasibility_only, big-M grid_in/out). Zo blijft de
+#                onbalans-boeking altijd begrensd tot de realistisch oogstbare flex (batterij-doorzet + PV-curtail/
+#                injectie). Spot-besparing (variant 'sturing', maand-arb-LP) ONGEWIJZIGD — enkel de onbalans-variant.
 # Versie:        v1.14.1 (2026-08-20 Europe/Brussels, Johan): BEZOEKERS — 'aantal_palen' begrenst de gelijktijdige
 #                sessies (fysieke palen); piek-vraag plein = aantal_palen × paal_kw, overvraag = gemist.
 # Versie:        v1.14.0 (2026-08-20 17:36 Europe/Brussels, Johan): NIEUW LAADPLEIN-TYPE 'betalende bezoekers'.
@@ -2169,12 +2177,12 @@ def lp_dispatch_month_bsp(
     retry_level = 0
 
     if status_str != 'Optimal':
-        log.warning(f"Maand-BSP-LP niveau 0 non-optimal ({status_str}) — retry niveau 1 (spec_budget × 10)")
-        status_str, r = _build_and_solve_month(10.0, 'n1')
+        log.warning(f"Maand-BSP-LP niveau 0 non-optimal ({status_str}) — retry niveau 1 (budget ×1, gekalibreerd)")
+        status_str, r = _build_and_solve_month(1.0, 'n1')   # v15.207 (Johan): budget NOOIT ophogen — imbalance-capture blijft op 1,8%
         retry_level = 1
         if status_str != 'Optimal':
-            log.warning(f"Maand-BSP-LP niveau 1 non-optimal ({status_str}) — retry niveau 2 (spec_budget verwijderd)")
-            status_str, r = _build_and_solve_month(-1.0, 'n2')
+            log.warning(f"Maand-BSP-LP niveau 1 non-optimal ({status_str}) — retry niveau 2 (budget ×1, gekalibreerd)")
+            status_str, r = _build_and_solve_month(1.0, 'n2')   # v15.207 (Johan): NIET meer -1. multiplier=-1 verwijderde het spec-budget → LP zette nom_afn≈0 → de VOLLEDIGE afname werd aan de imbalanceprijs afgerekend → absurde onbalans-"besparing" (bv. €13,9M op Gerresheimer). Feasibility hoort via de FYSIEKE caps, niet via het losgooien van de financiële paper-capture.
             retry_level = 2
             if status_str != 'Optimal':
                 # v1.8 — PRIORITEIT (Johan): eerst voldoen aan bestaand verbruik +
@@ -2190,7 +2198,7 @@ def lp_dispatch_month_bsp(
                 # v1.8.7: feasibility-solve houdt een (ruim) spec_budget aan i.p.v.
                 # het volledig te verwijderen — zo blijft de BSP-papierhandel
                 # begrensd, ook wanneer de fysieke caps gesoftend zijn.
-                status_str, r = _build_and_solve_month(10.0, 'n3', feasibility_only=True)
+                status_str, r = _build_and_solve_month(1.0, 'n3', feasibility_only=True)   # v15.207 (Johan): feasibility ENKEL via zachte fysieke caps (big-M grid_in/out), maar het spec-budget blijft op de gekalibreerde ×1 (1,8%) — de financiële imbalance-capture wordt nooit losgelaten. Zo kan de onbalans-boeking nooit boven de realistisch oogstbare flex (batterij-doorzet + PV-curtail/injectie) uitkomen.
                 retry_level = 3
                 if status_str != 'Optimal':
                     # Zou niet mogen gebeuren (big-M maakt het altijd haalbaar).
