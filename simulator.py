@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.3 (2026-09-30, Johan): ONBALANS NOODVAL-COLLAPSE FIX (RCA). De nominatie-bovengrens in
+#                lp_dispatch_month_bsp stond op max_afname_hard. Zodra de fysieke lastpiek boven de aansluiting
+#                uitkwam (forecast_afn > contract, bv. Gerresheimer 10.765 kW > 9.200 kW) kon nom_afn de forecast
+#                niet halen → de per-dag paper-budget-constraint (1,8%) werd INFEASIBLE → élke maand viel op de
+#                noodval (grid_in=0) → de VOLLEDIGE afname verdween uit de factuur → absurde onbalans-"besparing".
+#                Live diagnose: lp_diagnostics optimal_dagen=0, alle 365 dagen 'verloren'. Fix: nom-bovengrens =
+#                max(fysieke cap, forecast-piek) → spec_dev=0 altijd haalbaar → geen noodval; de 1,8%-budget-
+#                constraint houdt de paper-afwijking klein (geen runaway). Regressie-vrij voor piek<cap (byte-
+#                identiek). Spot-besparing (variant 'sturing', maand-arb-LP) ONGEWIJZIGD.
 # Versie:        v1.14.2 (2026-09-30, Johan): ONBALANS-CAPTURE BEGRENSD IN DE MAAND-BSP-RETRY. De retry-ladder van
 #                lp_dispatch_month_bsp verwijderde bij niveau 2 het spec-budget (multiplier=-1) en gebruikte ×10 in de
 #                feasibility-terugval → de LP zette nom_afn≈0 en rekende de VOLLEDIGE afname aan de imbalanceprijs af
@@ -2057,8 +2066,19 @@ def lp_dispatch_month_bsp(
         # FYSIEKE aansluiting — NOOIT de big-M van de feasibility-modus. Anders kon
         # de BSP-papierhandel in feasibility-modus (spec_budget verwijderd + nom-
         # bound 1e9) onbegrensd 'winst' genereren → absurde factuur (miljarden).
-        _nom_afn_ub = max_afname_hard
-        _nom_inj_ub = max_injectie_hard
+        # v1.14.3 (2026-09-30, Johan/onbalans-RCA): de bovengrens moet de FORECAST-
+        # positie ALTIJD kunnen dekken. Bleef ze op max_afname_hard, dan kan nom_afn
+        # de forecast-piek niet halen zodra de fysieke lastpiek boven de aansluiting
+        # uitkomt (forecast_afn > max_afname_hard, bv. Gerresheimer: piek 10.765 kW >
+        # 9.200 kW contract). De per-dag paper-budget-constraint (spec_dev = nom −
+        # forecast, ≤ 1,8% dagvolume) werd dan INFEASIBLE → élke maand viel terug op
+        # de noodval (grid_in=0) → de volledige afname verdween uit de factuur →
+        # absurde onbalans-"besparing" (miljoenen). Grens nu = max(fysieke cap,
+        # forecast-piek): spec_dev=0 blijft altijd haalbaar (geen noodval meer) en de
+        # 1,8%-budgetconstraint houdt de effectieve paper-afwijking nog steeds fysiek
+        # verantwoord klein (géén runaway — de winst blijft op de honeste 1,8%-capture).
+        _nom_afn_ub = max(max_afname_hard, max(forecast_afn) if forecast_afn else 0.0)
+        _nom_inj_ub = max(max_injectie_hard, max(forecast_inj) if forecast_inj else 0.0)
         nom_afn = []
         nom_inj = []
         for t in range(H):
