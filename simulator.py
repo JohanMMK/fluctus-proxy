@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.14.5 (2026-09-30, Johan): MAAND-ENERGIEBALANS. kpi.maand_energiebalans = per kalendermaand
+#                (jan..dec) de PV-bestemming in MWh — pv_direct_mwh / pv_via_batt_mwh / pv_injectie_mwh — uit
+#                dezelfde per-kwartier-routing die de jaartotalen levert. Voedt de nieuwe energiebalans-bijlage
+#                in het klantrapport (staafdiagram: positief zelfconsumptie PV direct + via batterij, negatief
+#                injectie) + de donuts (zelfconsumptie/zelfvoorziening). Geen gedragswijziging aan de dispatch.
 # Versie:        v1.14.4 (2026-09-30, Johan): ONBALANS ENKEL OP FYSIEKE FLEX. De factuur-nominatie voor de
 #                onbalans-variant is nu de PASSIEVE fysieke positie (verbruik − PV) i.p.v. de LP-paper-nominatie
 #                (nom_eff = forecast + spec_dev/paper-capture). Gevolg: de deviation die aan de imbalanceprijs
@@ -3683,6 +3688,13 @@ def run_simulation(inp: dict) -> dict:
     # v1.10.2: split van het DIRECTE zelfverbruik over gebouw vs laadpleinen (naar rato van de last).
     _pv_naar_gebouw = 0.0
     _pv_naar_laadplein = 0.0
+    # v1.14.5 (Johan): per-KALENDERMAAND-uitsplitsing van dezelfde routing (voor de energiebalans-bijlage in het
+    #   klantrapport: staafdiagram positief = zelfconsumptie PV direct + via batterij, negatief = injectie).
+    #   Bucket op sim_timestamps[i].month → kalendermaand jan..dec, ook bij een rolling12-venster.
+    _m_pv_direct = [0.0] * 12
+    _m_pv_batt   = [0.0] * 12
+    _m_pv_inj    = [0.0] * 12
+    _n_ts = len(sim_timestamps)
     if _load_gebouw_kw is None:
         _load_gebouw_kw = consumption_kw       # geen laadplein → alle last is gebouw
     _npch = len(p_ch_all)
@@ -3693,9 +3705,17 @@ def run_simulation(inp: dict) -> dict:
         _sur = _pvi - _d                                                   # PV-overschot (kW)
         _ch = p_ch_all[i] if (_heeft_batt and i < _npch) else 0.0
         _tb = _sur if _sur < _ch else _ch                                 # naar batterij (≤ laadvermogen)
-        _pv_direct    += _d           * 0.25 / 1000.0
-        _pv_naar_batt += _tb          * 0.25 / 1000.0
-        _pv_injectie  += (_sur - _tb) * 0.25 / 1000.0
+        _e_d  = _d           * 0.25 / 1000.0
+        _e_tb = _tb          * 0.25 / 1000.0
+        _e_in = (_sur - _tb) * 0.25 / 1000.0
+        _pv_direct    += _e_d
+        _pv_naar_batt += _e_tb
+        _pv_injectie  += _e_in
+        _mi = (sim_timestamps[i].month - 1) if i < _n_ts else -1
+        if 0 <= _mi < 12:
+            _m_pv_direct[_mi] += _e_d
+            _m_pv_batt[_mi]   += _e_tb
+            _m_pv_inj[_mi]    += _e_in
         if _lt > 1e-9 and _d > 0.0:
             _lg = _load_gebouw_kw[i] if i < len(_load_gebouw_kw) else _lt
             _fg = _lg / _lt
@@ -3739,6 +3759,13 @@ def run_simulation(inp: dict) -> dict:
         'pv_naar_eigen_verbruik_mwh': _pv_direct,   # = totaal direct zelfverbruik (alias)
         'pv_via_batterij_mwh': _pv_naar_batt,       # alias van pv_naar_batterij_mwh voor het rapport
         'energie_ontladen_mwh': energie_ontladen_mwh,   # batterij-doorzet (voor batterij_doorzet_mwh)
+        # v1.14.5 (Johan): per-kalendermaand PV-bestemming (MWh) — energiebalans-bijlage klantrapport.
+        #   pv_direct[m] + pv_via_batt[m] + injectie[m] = PV-productie (benut) van die maand.
+        'maand_energiebalans': {
+            'pv_direct_mwh':   [round(x, 3) for x in _m_pv_direct],
+            'pv_via_batt_mwh': [round(x, 3) for x in _m_pv_batt],
+            'pv_injectie_mwh': [round(x, 3) for x in _m_pv_inj],
+        },
         # Injectie-opbrengst (periode) — uit de factuur, zodat de UI één helder cijfer heeft.
         'injectie_energie_opbrengst_eur': factuur.get('injectie_energie_opbrengst_eur', 0.0),
         'injectie_netkost_eur': factuur.get('injectie_netkost_eur', 0.0),
