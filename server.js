@@ -6076,9 +6076,10 @@ app.post('/api/kamino/onderhandel', async (req, res) => {
     //   uit geannualiseerde totalen). Valt een post weg → terugval op round(energie/volume).
     const _netPer = distributie + (+bc.totaalCapaciteitExclBtw || 0);
     const _periodEnergie = (+bc.totaalExclBtw || 0) - _netPer - heffingen;
+    const _afnKwh = (+bc.afnameKwh || 0);
     const _piekKw = (+bc.toegangsvermogenKw || +bc.toegangsvermogen_kw || 0) || Math.round(kva * 0.9);
-    const _afnAlJaar = (_piekKw > 0 && dagen > 0 && (afnameKwh / (_piekKw * dagen * 24)) > 1.05);   // afname is JAAR, niet periode
-    const _periodMwh = ((_afnAlJaar ? (afnameKwh * dagen / 365) : afnameKwh) || 0) / 1000;
+    const _afnAlJaar = (_piekKw > 0 && dagen > 0 && (_afnKwh / (_piekKw * dagen * 24)) > 1.05);   // afname is JAAR, niet periode
+    const _periodMwh = ((_afnAlJaar ? (_afnKwh * dagen / 365) : _afnKwh) || 0) / 1000;
     const _nuEnergieMwh = (!_geenFactuur && _periodMwh > 0 && _periodEnergie > 0) ? Math.round(_periodEnergie / _periodMwh)
                           : ((!_geenFactuur && volumeMwh > 0) ? Math.max(0, Math.round(energie / volumeMwh)) : null);   // terugval
     const _margeEnergieMwh = (_nuEnergieMwh != null && _dynEnergieMwh != null) ? (_nuEnergieMwh - _dynEnergieMwh) : null;
