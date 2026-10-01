@@ -93,6 +93,25 @@ while cur < TOT_MARKT:
     cur += timedelta(minutes=15)
 sys.stderr.write(f"Markt: {len(spot_q)} kwartieren, spot gem={sum(spot_q)/len(spot_q):.1f} EUR/MWh\n")
 
+# ── v15.215 (Johan, bouwplan 01-10): SPOT-HISTORIEK per maand ─────────────────
+# De onderhandelingsnota moet een FACTUURPERIODE prijzen die vóór het 12-mnd marktvenster kan liggen
+# (bv. Momignies mei 2025, venster start sep 2025) én de spotmarkt-evolutie sinds die periode quantificeren.
+# We bouwen daarom een maandelijks spot-gemiddelde uit de VOLLEDIGE spot-cache (uurwaarden → maandgemiddelde).
+# Compact (±1 getal per maand) en periode-onafhankelijk: maand-gem €/MWh = afname-bedrag ÷ afname-MWh valt weg.
+spot_maand_hist = {}
+if spot_dict:
+    _acc = {}   # 'YYYY-MM' -> [som, n]
+    for _ht, _v in spot_dict.items():
+        _d = datetime.fromtimestamp(_ht / 1000, tz=timezone.utc)
+        _k = f"{_d.year:04d}-{_d.month:02d}"
+        a = _acc.setdefault(_k, [0.0, 0])
+        a[0] += _v; a[1] += 1
+    for _k in sorted(_acc):
+        _som, _n = _acc[_k]
+        if _n > 0:
+            spot_maand_hist[_k] = round(_som / _n, 2)
+    sys.stderr.write(f"Spot-historiek: {len(spot_maand_hist)} maanden ({min(spot_maand_hist)} → {max(spot_maand_hist)})\n")
+
 # Solar norm: volledig kalenderjaar 2025
 VAN_SOLAR = datetime(2025, 1, 1, tzinfo=timezone.utc)
 TOT_SOLAR = datetime(2026, 1, 1, tzinfo=timezone.utc)
@@ -124,6 +143,7 @@ out = {
     'tot':              (TOT_MARKT - timedelta(days=1)).strftime('%Y-%m-%d'),
     'n_kwartieren':     len(spot_q),
     'solar_kwartieren': len(solar_norm),
+    'spot_maand_hist':  spot_maand_hist,   # v15.215: {'YYYY-MM': gem €/MWh} over de volledige spot-cache (factuurperiode-prijzing + marktevolutie)
 }
 
 with open('/tmp/fluctus_markt.json', 'w') as f:
