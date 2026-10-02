@@ -147,7 +147,7 @@ function _htmlNaarAscii(s) {
     .join('');
 }
 function _geenEuroSymbool(s) { return (s == null) ? s : String(s).replace(/€\s*/g, 'EUR '); }
-async function sendMail(to, subject, htmlContent, textContent, attachments) {
+async function sendMail(to, subject, htmlContent, textContent, attachments, opts) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   // v15.190 (Johan): NOOIT het €-symbool in uitgaande mail (mojibake). Vervang aan de verzend-grens door "EUR ".
   subject = _geenEuroSymbool(subject); htmlContent = _geenEuroSymbool(htmlContent); textContent = _geenEuroSymbool(textContent);
@@ -168,6 +168,10 @@ async function sendMail(to, subject, htmlContent, textContent, attachments) {
     body,
     toRecipients: lijst,
   };
+  // v15.221 (Johan): optionele afwijkende afzender (From) — bv. noreply@energie-compas.eu, verstuurd via de
+  // GRAPH_MAILBOX (dossier@) met SendAs-recht op dat adres. Zonder SendAs geeft Graph een fout → de caller
+  // valt terug op Brevo (die met hetzelfde @energie-compas.eu-afzenderadres mailt).
+  if (opts && opts.from) message.from = { emailAddress: { address: String(opts.from) } };
   // v15.163: optionele bijlagen (bv. klantrapport-PDF). contentBytes = kale base64 (geen data:-prefix).
   if (Array.isArray(attachments) && attachments.length) {
     message.attachments = attachments.filter(a => a && a.contentBytes).map(a => ({
