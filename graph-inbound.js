@@ -65,7 +65,7 @@ async function fetchUnread() {
   })).sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));   // oudste eerst, client-side
 }
 
-// PDF-bijlagen van één mail als [{ base64, mediaType, fileName }].
+// Factuur-bijlagen van één mail als [{ base64, mediaType, fileName }] — PDF én foto's (jpeg/png/webp/gif). (v15.239)
 async function getPdfAttachments(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   // GEEN $select: contentBytes bestaat niet op het polymorfe base-type 'attachment' → $select met contentBytes gaf HTTP 400.
@@ -73,10 +73,27 @@ async function getPdfAttachments(msgId) {
   const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments`);
   if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
+  // v15.239 (Johan): accepteer OOK foto-bijlagen (jpeg/png/webp/gif), niet enkel PDF — een gemailde factuur is vaak een
+  //   gsm-foto/scan. Per bijlage het juiste mediaType doorgeven (factuurExtract aanvaardt pdf + deze image-types).
+  //   Inline-bijlagen (handtekening-logo's e.d.) worden uitgesloten zodat enkel de echte factuur-scan naar de extractor gaat.
+  const _mtVan = (a) => {
+    const ct = String(a.contentType || '').toLowerCase();
+    if (ct === 'application/pdf') return 'application/pdf';
+    if (ct === 'image/jpg' || ct === 'image/jpeg') return 'image/jpeg';
+    if (ct === 'image/png' || ct === 'image/webp' || ct === 'image/gif') return ct;
+    const n = String(a.name || '').toLowerCase();
+    if (/\.pdf$/.test(n)) return 'application/pdf';
+    if (/\.jpe?g$/.test(n)) return 'image/jpeg';
+    if (/\.png$/.test(n)) return 'image/png';
+    if (/\.webp$/.test(n)) return 'image/webp';
+    if (/\.gif$/.test(n)) return 'image/gif';
+    return null;
+  };
   return (j.value || [])
-    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes)
-    .filter(a => /pdf/i.test(a.contentType || '') || /\.pdf$/i.test(a.name || ''))
-    .map(a => ({ base64: a.contentBytes, mediaType: 'application/pdf', fileName: a.name || 'factuur.pdf' }));
+    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes && !a.isInline)
+    .map(a => ({ a, mt: _mtVan(a) }))
+    .filter(x => x.mt)
+    .map(x => ({ base64: x.a.contentBytes, mediaType: x.mt, fileName: x.a.name || 'factuur' }));
 }
 
 // v15.142.4: recente mails MET bijlage, ONAFHANKELIJK van gelezen/ongelezen (robuuste intake met durabel watermerk
@@ -187,6 +204,6 @@ async function sendMail(to, subject, htmlContent, textContent, attachments, opts
 }
 
 // Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
-try { console.log('[graph-inbound] module v15.163.0 geladen — charset-fix ACTIEF + sendMail bijlagen (fileAttachment)'); } catch (e) {}
+try { console.log('[graph-inbound] module v15.239.0 geladen — foto-bijlagen (jpeg/png/webp/gif) + PDF ACTIEF; inline uitgesloten'); } catch (e) {}
 
 module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail };

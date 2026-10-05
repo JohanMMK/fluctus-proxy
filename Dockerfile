@@ -24,7 +24,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirement
 # ── CACHE-BUST (2026-09-23): verhoog APP_CACHEBUST om een VERSE COPY van de app-bestanden
 # te forceren. Railway hergebruikte de 'COPY . .'-laag met verouderde graph-inbound.js;
 # deze RUN met wisselende waarde invalideert die laag zodat de nieuwste bestanden mee gaan.
-ARG APP_CACHEBUST=2026-10-05-factuur-recall
+ARG APP_CACHEBUST=2026-10-05-inbound-foto
 RUN echo "app cache-bust ${APP_CACHEBUST}"
 
 # Copy rest of app (server.js, graph-inbound.js, simulator.py, data/)
