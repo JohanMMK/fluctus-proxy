@@ -622,6 +622,16 @@ function dagenTussen(vanStr, totStr) {
   return Math.round(ms / 86400000) + 1;
 }
 
+// v1.5.2 (Johan): WERKELIJK GEFACTUREERDE DAGEN. 'tot' op de 1e van een maand = EXCLUSIEVE einddatum
+//   (bv. 01-06 tot 01-07 = 30 dagen, niet 31) → belangrijk voor kW×dagen-capaciteitsposten.
+function billedDays(vanStr, totStr) {
+  const d = dagenTussen(vanStr, totStr); if (!d) return d;
+  const t = String(totStr || ''); let dag = null;
+  let m = t.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/); if (m) dag = +m[3];
+  else { m = t.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/); if (m) dag = +m[1]; }
+  return (dag === 1) ? Math.max(1, d - 1) : d;
+}
+
 // v1.4.6: PER-DAG-VERMOGEN-CORRECTIE (YUSO/Luminus).
 // Sommige leveranciers tonen de kW-posten (toegangsvermogen/maandpiek/overschrijding) als
 // "kW × aantal dagen" met eenheidsprijs = maandtarief/dagen. Dan klopt aantal × eenheidsprijs = bedrag
@@ -682,6 +692,36 @@ function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
   }
   if (typeof parsed.aansluitVermogenKva === 'number')
     parsed.aansluitVermogenKva = corr(parsed.aansluitVermogenKva, ['toegang', 'aansluit', 'vermogen'], 'aansluitVermogenKva');
+
+  // v1.5.2 (Johan): TARIEF-VERANKERD TOEGANGSVERMOGEN. Het €-bedrag van "Kosten toegangsvermogen"
+  //   ÷ (Fluvius-tarief toegangsvermogen €/kW/jaar × dagen/365) = het echte kW, ON-afhankelijk van de
+  //   afgelezen kW (vangt bv. een LLM-mislezing 250 i.p.v. 425). Enkel bij gekende LS/MS + tarief + plausibele LF.
+  try {
+    const _sp = (parsed.spanningsniveau === 'MS' || parsed.spanningsniveau === 'LS') ? parsed.spanningsniveau : null;
+    const _tkT = (_sp && dnbTariefKey) ? tarieven[dnbTariefKey + '|' + _sp] : null;
+    const _Tt = _tkT ? (Number(_tkT.toegangsvermogen_eur_kw_jaar) || 0) : 0;
+    const _dB = billedDays(parsed.periodeVan, parsed.periodeTot) || dagen;
+    let _bedragToeg = 0;
+    for (const r of regels) {
+      if (!r || r.is_capaciteit !== true) continue;
+      const o = String(r.omschrijving || '').toLowerCase(), e = String(r.eenheid || '').toLowerCase();
+      if (e.indexOf('kw') !== 0) continue;
+      if (o.indexOf('overschrijd') !== -1) continue;
+      if (o.indexOf('toegang') !== -1) { const b = Number(r.bedrag_excl); if (isFinite(b) && b > 0) _bedragToeg += b; }
+    }
+    if (_Tt > 0 && _bedragToeg > 0 && _dB > 1) {
+      const _impl = Math.round(_bedragToeg / (_Tt * _dB / 365));
+      const _lf = afname > 0 ? afname / (_impl * _dB * 24) : 0.1;
+      if (_impl > 0 && _lf > 0.02 && _lf < 0.95) {
+        const _rauw = (bron && Number(bron.toegangsvermogenKw)) || null;
+        if (bron) bron.toegangsvermogenKw = _impl;
+        parsed.toegangsvermogen_kw = _impl;
+        parsed.aansluitVermogenKva = _impl;
+        info.gecorrigeerd.push({ post: 'toegangsvermogen', methode: 'tariefkaart_bedrag', rauw_kw: _rauw, gecorrigeerd_kw: _impl });
+        info.tariefVerankerdToegang = { bedrag_excl: Math.round(_bedragToeg), tarief_eur_kw_jaar: _Tt, dagen: _dB, kW: _impl, rauw_kW: _rauw, spanning: _sp };
+      }
+    }
+  } catch (e) {}
 
   // Ook de rauwe kW/kVA-capaciteitsregels normaliseren (consistentie + weergave).
   if (info.gecorrigeerd.length) {
