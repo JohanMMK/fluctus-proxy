@@ -644,6 +644,7 @@ function billedDays(vanStr, totStr) {
 function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
   const dagen = dagenTussen(parsed.periodeVan, parsed.periodeTot);
   if (!(dagen > 1)) return null;
+  const dagenBill = billedDays(parsed.periodeVan, parsed.periodeTot) || dagen;   // v1.5.2: werkelijk gefactureerde dagen (maand-exclusieve einddatum) i.p.v. dagen+1
   const tk = dnbTariefKey ? (tarieven[dnbTariefKey + '|LS'] || tarieven[dnbTariefKey + '|MS']) : null;
   const T = tk ? Number(tk.maandpiek_eur_kw_jaar) : null;   // €/kW/jaar — schaal-referentie
   const regels = Array.isArray(parsed._factuurRegels) ? parsed._factuurRegels : [];
@@ -678,7 +679,7 @@ function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
   function corr(kw, keywords, label) {
     if (!(typeof kw === 'number' && kw > 0)) return kw;
     if (isPerDag(kw, bedragVoor(keywords))) {
-      const echt = Math.round(kw / dagen);
+      const echt = Math.round(kw / dagenBill);
       info.gecorrigeerd.push({ post: label, rauw_kw: Math.round(kw), gecorrigeerd_kw: echt });
       return echt;
     }
@@ -730,7 +731,7 @@ function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
       const e = String(r.eenheid || '').toLowerCase();
       const a = Number(r.aantal), b = Number(r.bedrag_excl);
       if ((e.indexOf('kw') === 0 || e.indexOf('kva') === 0) && a > 0 && isPerDag(a, isFinite(b) ? b : 0)) {
-        r._aantal_rauw = a; r.aantal = Math.round(a / dagen); r._perdag = true;
+        r._aantal_rauw = a; r.aantal = Math.round(a / dagenBill); r._perdag = true;
       }
     }
   }
