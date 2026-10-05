@@ -724,6 +724,39 @@ function corrigeerPerDagVermogen(parsed, bron, dnbTariefKey, tarieven) {
     }
   } catch (e) {}
 
+  // v1.5.3 (Johan): kW ROBUUST uit bedrag ÷ eenheidsprijs (de factuur-eigen rekensom, LLM-ONAFHANKELIJK). Een gescande
+  //   factuur laat de LLM soms het Belgische duizendpunt vallen ("12.750,00 kW" → 12,75); bedrag_excl/eenheidsprijs
+  //   herstelt dan het echte kW(×dagen) → ÷ gefactureerde dagen = echt kW. Werkt OOK zonder gekende DNB-tariefkaart
+  //   (i.t.t. de tarief-verankering hierboven). Overschrijft enkel bij >20% afwijking van de afgelezen kW.
+  try {
+    const _toegBedragKw = (keywords) => {
+      let raw = 0, ok = false;
+      for (const r of regels) {
+        if (!r || r.is_capaciteit !== true) continue;
+        const o = String(r.omschrijving || '').toLowerCase(), e = String(r.eenheid || '').toLowerCase();
+        if (e.indexOf('kw') !== 0) continue;
+        if (o.indexOf('overschrijd') !== -1) continue;
+        if (!keywords.some(k => o.indexOf(k) !== -1)) continue;
+        const b = Number(r.bedrag_excl), p = Number(r.eenheidsprijs);
+        if (isFinite(b) && b > 0 && isFinite(p) && p > 0) { raw += b / p; ok = true; }
+      }
+      return ok ? raw : null;
+    };
+    const _raw = _toegBedragKw(['toegang']);
+    if (_raw && _raw > 0 && !info.tariefVerankerdToegang) {   // tarief-verankering (indien die al corrigeerde) heeft voorrang
+      const _echt = isPerDag(_raw, bedragVoor(['toegang'])) ? Math.round(_raw / dagenBill) : Math.round(_raw);
+      const _huidig = (bron && Number(bron.toegangsvermogenKw)) || Number(parsed.toegangsvermogen_kw) || Number(parsed.aansluitVermogenKva) || 0;
+      if (_echt > 0 && (_huidig <= 0 || Math.abs(_echt - _huidig) / _echt > 0.2)) {
+        if (bron) bron.toegangsvermogenKw = _echt;
+        parsed.toegangsvermogen_kw = _echt;
+        // aansluitVermogenKva enkel overschrijven als ze ontbreekt of >50% afwijkt (behoud cosφ-waarde zoals 447 bij 425 kW).
+        if (!(Number(parsed.aansluitVermogenKva) > 0) || Math.abs(Number(parsed.aansluitVermogenKva) - _echt) / _echt > 0.5)
+          parsed.aansluitVermogenKva = _echt;
+        info.gecorrigeerd.push({ post: 'toegangsvermogen', methode: 'bedrag_div_eenheidsprijs', rauw_kw: _huidig || null, gecorrigeerd_kw: _echt });
+      }
+    }
+  } catch (e) {}
+
   // Ook de rauwe kW/kVA-capaciteitsregels normaliseren (consistentie + weergave).
   if (info.gecorrigeerd.length) {
     for (const r of regels) {
