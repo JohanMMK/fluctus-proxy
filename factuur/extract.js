@@ -632,6 +632,41 @@ function billedDays(vanStr, totStr) {
   return (dag === 1) ? Math.max(1, d - 1) : d;
 }
 
+// v1.5.6 (Johan): ROBUUSTE FACTUURPERIODE. De kW×dagen-capaciteitsposten (toegangsvermogen ÷ dagen) ÉN de
+//   client-annualisatie in ek.html (afname ×365/periodedagen) hangen beide VOLLEDIG af van de factuurperiode.
+//   Een gescande factuur laat de LLM de EINDdatum soms fout lezen (bv. 08-07 i.p.v. 01-07 → 37 i.p.v. 30 dagen)
+//   → toegangsvermogen 12.750/37 = 345 i.p.v. /30 = 425, én afname ×(365/37) i.p.v. ×12 (≈662 i.p.v. ≈805 MWh).
+//   Fix: een periode die duidelijk ~1 maand of ~1 jaar is maar met een AFWIJKEND dagaantal, snappen we naar de
+//   exacte kalendermaand / het exacte jaar vanaf de (betrouwbaardere) STARTdatum, en corrigeren parsed.periodeTot
+//   zodat ALLE afnemers (server-per-dag-correctie + client-annualisatie) dezelfde juiste dagen zien. Puur string-
+//   rekenwerk (geen Date-TZ-valkuilen). Een plausibel maand- (28–31) of jaaraantal (362–366) blijft ONGEMOEID.
+function normaliseerPeriode(parsed) {
+  try {
+    const vs = String((parsed && parsed.periodeVan) || '');
+    let y, mo, da, m;
+    if ((m = vs.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +m[1]; mo = +m[2]; da = +m[3]; }
+    else if ((m = vs.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})/))) { da = +m[1]; mo = +m[2]; y = +m[3]; }
+    if (!y || !mo || !da) return null;
+    const bill = billedDays(parsed.periodeVan, parsed.periodeTot) || dagenTussen(parsed.periodeVan, parsed.periodeTot);
+    if (!(bill > 1)) return null;
+    const p2 = n => (n < 10 ? '0' : '') + n;
+    let doel = null, soort = null;
+    if (bill >= 26 && bill <= 46 && !(bill >= 28 && bill <= 31)) {              // ~maand maar afwijkend → kalendermaand vanaf start
+      let ny = y, nm = mo + 1; if (nm > 12) { nm = 1; ny++; }
+      doel = ny + '-' + p2(nm) + '-' + p2(da); soort = 'maand';
+    } else if (bill >= 330 && bill <= 400 && !(bill >= 362 && bill <= 366)) {   // ~jaar maar afwijkend → exact 1 jaar vanaf start
+      doel = (y + 1) + '-' + p2(mo) + '-' + p2(da); soort = 'jaar';
+    }
+    if (!doel) return null;
+    const nieuwBill = billedDays(parsed.periodeVan, doel);
+    if (!(nieuwBill > 1) || doel === parsed.periodeTot) return null;
+    const info = { van: parsed.periodeVan, tot_rauw: parsed.periodeTot, tot_norm: doel, dagen_rauw: bill, dagen_norm: nieuwBill, soort };
+    parsed._periodeNorm = info;
+    parsed.periodeTot = doel;
+    return info;
+  } catch (e) { return null; }
+}
+
 // v1.4.6: PER-DAG-VERMOGEN-CORRECTIE (YUSO/Luminus).
 // Sommige leveranciers tonen de kW-posten (toegangsvermogen/maandpiek/overschrijding) als
 // "kW × aantal dagen" met eenheidsprijs = maandtarief/dagen. Dan klopt aantal × eenheidsprijs = bedrag
@@ -1164,6 +1199,9 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       bron[k] = isNaN(n) ? null : n;
     }
   });
+  // v1.5.6 (Johan): factuurperiode robuust maken VÓÓR de per-dag-correctie (÷dagen) én vóór de client-annualisatie
+  //   (ek.html leest parsed.periodeTot) → een mislezen einddatum (37 i.p.v. 30 dagen) verstoort toegangsvermogen/afname niet meer.
+  try { const _pn = normaliseerPeriode(parsed); if (_pn) _provider_flags.push('periode_norm:' + _pn.dagen_rauw + '→' + _pn.dagen_norm); } catch (e) {}
   // v1.4.6: per-dag-vermogen-correctie VÓÓR de consolidatie, zodat de gekozen kW/kVA klopt.
   const _pdTariefKey = dnbFinal ? DNB_TO_TARIEF_KEY[dnbFinal] : null;
   const _pdInfo = corrigeerPerDagVermogen(parsed, bron, _pdTariefKey, tarieven);
@@ -1512,7 +1550,7 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       input_tokens: aiResult.usage.input_tokens,
       output_tokens: aiResult.usage.output_tokens,
       n_files: files.length,
-      version: '1.5.5'
+      version: '1.5.6'
     }
   };
 }
