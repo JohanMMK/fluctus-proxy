@@ -4,6 +4,11 @@
  * Fluctus Simulator — BaseCase factuur-extractie
  * ===============================================
  * Module: factuur/extract.js
+ * Versie: 1.6.0 (2026-10-10) — ALLE EAN'S (Johan): (1) prompt: scan ELKE pagina (ook bijlagen/overzichten per aansluiting,
+ *   collectieve facturen) en lijst ELKE EAN; (2) eanNrs die niet in eanBlokken zitten worden nu WEL toegevoegd (vroeger
+ *   enkel als eanBlokken leeg was) met _rol_bron 'eanNrs'; (3) deterministische PDF-tekstscan (zlib-inflate van de
+ *   content-streams, GS1-controlecijfer) vult ontbrekende EAN's aan (_rol_bron 'pdf_scan'); (4) dedup op 18 cijfers;
+ *   (5) aansluitingen-telling eanAansluitingen {afname, injectie, gas, zeker_afname, zeker_injectie} voor de splits-check.
  * Versie: 1.5.5 (2026-09-30) — PERIODE-RECONCILIATIE via tot_excl (Johan): sommige facturen leveren de ENERGIE-post én de
  *   afname als JAARcijfer terwijl distributie/heffingen/tot_excl de VERBRUIKSPERIODE (maand) betreffen (gemengde-periode-
  *   extractie; bv. Gerresheimer Momignies). tot_excl = periodetotaal = energie+distr+heffingen → energie_periode =
@@ -352,6 +357,11 @@ injectie, aardgas). Lijst ELKE gevonden EAN in "eanBlokken" met zijn rol en
 leveringsadres. Blijf daarnaast eanNrs vullen (alle EAN-strings) voor compat.
   - rol = "afname_elek" | "injectie_elek" | "gas"
   - Bij twijfel over de rol: kies "afname_elek".
+  - v1.6 VOLLEDIGHEID: overloop ELKE pagina van ELK document, ook bijlagen, detail- of
+    overzichtstabellen per aansluiting/leveringspunt en collectieve facturen met meerdere
+    sites. Een EAN is een code van 18 cijfers die begint met 54 (vaak "5414…"), soms met
+    spaties gegroepeerd — schrijf hem zonder spaties. Mis er GEEN enkele: elke afname-,
+    injectie- en gas-EAN moet in eanBlokken én eanNrs staan, elk één keer.
 
 TARIEFKAART (v1.4, best-effort):
 Vul "_tariefkaart" met de EENHEIDSTARIEVEN die letterlijk op de factuur staan
@@ -1128,6 +1138,69 @@ function detecteerVoorschot(parsed) {
   var isV = llm || structureel;
   return { is_voorschot: !!isV, voorschot_reden: isV ? redenen.join('; ') : null };
 }
+// v1.6.0 (Johan): DETERMINISTISCHE EAN-SCAN in de PDF zelf (geen extra library). We inflaten de content-streams
+// (FlateDecode via zlib), nemen de letterlijke tekst-operanden (...) in volgorde en zoeken daar 18-cijferige EAN's
+// (54…, eventueel met spaties/punten gegroepeerd). Enkel EAN's met een geldig GS1-controlecijfer tellen. Werkt niet bij
+// PDF's met glyph-gecodeerde fonts of scans — dan levert het gewoon niets op (de AI-extractie blijft leidend).
+function _gs1Ok(d) {
+  if (!/^\d{18}$/.test(d)) return false;
+  let som = 0;
+  for (let i = 0; i < 17; i++) { const n = +d[16 - i]; som += (i % 2 === 0) ? n * 3 : n; }
+  return ((10 - (som % 10)) % 10) === +d[17];
+}
+function _pdfLiteralTekst(str) {
+  // verzamel (…)-strings (met escapes) in volgorde; hex-strings <…> enkel als ze ASCII-cijfers coderen
+  let out = '', i = 0;
+  while (i < str.length) {
+    const c = str[i];
+    if (c === '(') {
+      let diep = 1, j = i + 1, buf = '';
+      while (j < str.length && diep > 0) {
+        const ch = str[j];
+        if (ch === '\\') { const nx = str[j + 1]; if (/[0-7]/.test(nx)) { const m = str.slice(j + 1, j + 4).match(/^[0-7]{1,3}/)[0]; buf += String.fromCharCode(parseInt(m, 8)); j += 1 + m.length; continue; } buf += ({ n: '\n', r: '\r', t: '\t' })[nx] || nx || ''; j += 2; continue; }
+        if (ch === '(') diep++; else if (ch === ')') { diep--; if (diep === 0) break; }
+        buf += ch; j++;
+      }
+      out += buf; i = j + 1; continue;
+    }
+    if (c === '<' && str[i + 1] !== '<') {
+      const e = str.indexOf('>', i + 1);
+      if (e > i && e - i < 200) { const hx = str.slice(i + 1, e).replace(/\s+/g, ''); if (/^(3[0-9]|20)+$/.test(hx)) { for (let k = 0; k + 1 < hx.length; k += 2) out += String.fromCharCode(parseInt(hx.slice(k, k + 2), 16)); } i = e + 1; continue; }
+    }
+    if (c === 'E' && str[i + 1] === 'T') out += ' ';   // einde tekstblok → scheiding
+    i++;
+  }
+  return out;
+}
+function _pdfEanScan(files) {
+  const zlib = require('zlib');
+  const gevonden = new Set();
+  for (const f of (Array.isArray(files) ? files : [])) {
+    if (!f || !f.base64 || (f.mediaType && f.mediaType !== 'application/pdf')) continue;
+    let buf; try { buf = Buffer.from(String(f.base64).replace(/^data:[^,]*,/, ''), 'base64'); } catch (e) { continue; }
+    if (!buf || buf.length < 8 || buf.length > 25 * 1024 * 1024) continue;
+    const raw = buf.toString('latin1');
+    const teksten = [raw];
+    let pos = 0, n = 0;
+    while (n < 4000) {
+      const s0 = raw.indexOf('stream', pos); if (s0 < 0) break;
+      let st = s0 + 6; if (raw[st] === '\r') st++; if (raw[st] === '\n') st++;
+      const e0 = raw.indexOf('endstream', st); if (e0 < 0) break;
+      const chunk = buf.subarray(st, e0);
+      try { teksten.push(zlib.inflateSync(chunk).toString('latin1')); } catch (e) { try { teksten.push(zlib.inflateRawSync(chunk.subarray(2)).toString('latin1')); } catch (e2) {} }
+      pos = e0 + 9; n++;
+    }
+    for (const t of teksten) {
+      const lit = _pdfLiteralTekst(t);
+      for (const bron of [lit, lit.replace(/[\s.]/g, '')]) {
+        const re = /5\s?4(?:[\s.]?\d){16}/g; let m;
+        while ((m = re.exec(bron))) { const d = m[0].replace(/\D/g, ''); if (_gs1Ok(d)) gevonden.add(d); }
+      }
+    }
+  }
+  return Array.from(gevonden);
+}
+
 async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY niet beschikbaar');
   if (!Array.isArray(files) || files.length === 0) throw new Error('Geen bestanden meegegeven');
@@ -1443,12 +1516,27 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
       rol: geldigeRollen.includes(b.rol) ? b.rol : 'afname_elek',
       leveringsadres: b.leveringsadres || parsed.leveringsadres || null,
     }));
-  // Fallback: geen eanBlokken maar wel eanNrs → bouw afname-blokken.
-  if (eanBlokken.length === 0 && Array.isArray(parsed.eanNrs)) {
-    eanBlokken = parsed.eanNrs.filter(Boolean).map(e => ({
-      ean: String(e).trim(), rol: 'afname_elek', leveringsadres: parsed.leveringsadres || null,
-    }));
-  }
+  // v1.6.0 (Johan): ALLE EAN'S. (a) EAN's normaliseren (enkel cijfers) + dedup; (b) elke eanNrs-EAN die nog niet in
+  //   eanBlokken zit wordt toegevoegd (vroeger enkel als eanBlokken leeg was → een 2e/3e EAN viel weg); (c) deterministische
+  //   PDF-tekstscan vult aan wat de AI miste. Rol van aangevulde EAN's is onzeker → _rol_bron ≠ 'ai'.
+  const _eanD = (x) => String(x == null ? '' : x).replace(/\D/g, '');
+  const _gezien = new Set();
+  eanBlokken = eanBlokken.map(b => Object.assign({}, b, { ean: _eanD(b.ean) || b.ean, _rol_bron: 'ai' }))
+    .filter(b => { const k = _eanD(b.ean); if (!k || _gezien.has(k)) return false; _gezien.add(k); return true; });
+  const _extra = [];
+  (Array.isArray(parsed.eanNrs) ? parsed.eanNrs : []).forEach(e => { const k = _eanD(e); if (k.length >= 13 && !_gezien.has(k)) { _gezien.add(k); _extra.push({ ean: k, bron: 'eanNrs' }); } });
+  try { _pdfEanScan(files).forEach(k => { if (!_gezien.has(k)) { _gezien.add(k); _extra.push({ ean: k, bron: 'pdf_scan' }); } }); } catch (e) { console.warn('[extract] PDF-EAN-scan faalde (niet-blokkerend):', e.message); }
+  _extra.forEach(x => eanBlokken.push({ ean: x.ean, rol: 'afname_elek', leveringsadres: parsed.leveringsadres || null, _rol_bron: x.bron }));
+  if (_extra.length) { console.log(`[extract] v1.6: ${_extra.length} extra EAN('s) aangevuld: ${_extra.map(x => x.ean + ' (' + x.bron + ')').join(', ')}`); if (!_provider_flags.includes('ean_aangevuld')) _provider_flags.push('ean_aangevuld'); }
+  parsed.eanNrs = eanBlokken.map(b => b.ean);
+  const eanAansluitingen = {
+    afname: eanBlokken.filter(b => b.rol === 'afname_elek').length,
+    injectie: eanBlokken.filter(b => b.rol === 'injectie_elek').length,
+    gas: eanBlokken.filter(b => b.rol === 'gas').length,
+    zeker_afname: eanBlokken.filter(b => b.rol === 'afname_elek' && b._rol_bron === 'ai').length,
+    zeker_injectie: eanBlokken.filter(b => b.rol === 'injectie_elek' && b._rol_bron === 'ai').length,
+    totaal_elek: eanBlokken.filter(b => b.rol !== 'gas').length,
+  };
   const primaireAfnameEan =
     (eanBlokken.find(b => b.rol === 'afname_elek') || eanBlokken[0] || {}).ean || null;
   const injectieEan = (eanBlokken.find(b => b.rol === 'injectie_elek') || {}).ean || null;
@@ -1513,6 +1601,7 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
     totaalInclBtw: totaalInclBtwFinal,
     _voorschot_correctie: voorschotCorrectie,
     eanBlokken,
+    eanAansluitingen,        // v1.6.0: telling per rol (splits-check meerdere aansluitingen)
     _crmVelden,
     spanningsniveau: spanningsniveauFinal,
     dnb: dnbFinal,
@@ -1555,4 +1644,4 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   };
 }
 
-module.exports = { run, DNB_TO_TARIEF_KEY, detecteerVoorschot, _lijnSommen };
+module.exports = { run, DNB_TO_TARIEF_KEY, detecteerVoorschot, _lijnSommen, _pdfEanScan, _gs1Ok };
