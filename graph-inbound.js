@@ -206,4 +206,14 @@ async function sendMail(to, subject, htmlContent, textContent, attachments, opts
 // Opstart-marker: zo is in de Railway-deploy-log meteen te zien welke graph-inbound-versie effectief draait.
 try { console.log('[graph-inbound] module v15.239.0 geladen — foto-bijlagen (jpeg/png/webp/gif) + PDF ACTIEF; inline uitgesloten'); } catch (e) {}
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail };
+// v15.269.0 (Johan): tekst van één mail in de eigen dossier-mailbox (platte tekst). uniqueBody = enkel het nieuwe deel
+//   (zonder geciteerde thread); body = alles. Ophalen VÓÓR het verplaatsen (een verplaatste mail krijgt een nieuwe id).
+async function getBody(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}?$select=uniqueBody,body`, { headers: { Prefer: 'outlook.body-content-type="text"' } });
+  if (!r.ok) throw new Error('Graph body: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return { uniek: (j.uniqueBody && j.uniqueBody.content) || '', volledig: (j.body && j.body.content) || '' };
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail };
