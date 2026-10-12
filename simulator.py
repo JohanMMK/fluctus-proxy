@@ -1,6 +1,15 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.16.0 (2026-10-12, Johan): VOLLEDIGE AFNAMEKOST IN DE STURING + AFREMMEN IN DE LP. (1) De LP-objective
+#                kende per MWh afname enkel spot + marge + GSC/WKK/vergroening; het proportionele nettarief, transport-
+#                kWh, ODV/toeslagen/saldi en de accijns (marginale schijf) zaten enkel in de factuur. Daardoor zag de LP
+#                laden van het net bij ±0 €/MWh als gratis (Solidaris: +13 MWh afname met batterij) en verkoos ze dat
+#                boven zonnestroom opslaan. Nu: contract['_lp_vol_afn'] / ['_lp_vol_inj'] (€/MWh, uit de netbeheer-
+#                tarieven, gezet in run_simulation) tellen mee in ALLE LP's. (2) Met batterij wordt PV niet meer vóór de
+#                LP afgekapt (pv_curtailment 'cap_op_verbruik'): de maand-arbitrage-LP krijgt een pv_curt-variabele en
+#                kiest zelf tussen opslaan, verbruiken, injecteren of afremmen. Afgeremde PV (LP, ook BSP) wordt na de
+#                factuur van pv_kw afgetrokken en telt in kpi.pv_curtailed_mwh. Zonder batterij: ongewijzigd.
 # Versie:        v1.15.0 (2026-10-12, Johan): REALISTISCHE PIEKAFVLAKKING. De LP kent de toekomst perfect en shaaft de
 #                maandpiek dus maximaal (bv. 153 → 77 kW). Een echte EMS werkt met een voorspelde netlimiet en haalt
 #                dat niet volledig. Nieuw (opt-in via inp['piek_realisatie'] = f, 0 ≤ f < 1, enkel met batterij): de
@@ -1201,6 +1210,33 @@ def _gin_cap_normaal(consumption_kw: list, pv_kw: list, max_afname_hard: float) 
     return min(max_afname_hard, math.ceil(p_nat))
 
 
+def _lp_volume_kosten(tarieven: dict, jaar_mwh: float):
+    """v1.16.0: marginale VOLUME-kosten per MWh die de factuur aanrekent maar die niet in spot/markup/GSC/WKK/
+    vergroening zitten → (afname_eur_mwh, injectie_eur_mwh) voor de LP-objective. Zelfde tariefsleutels als
+    bereken_jaarfactuur (groep B proportioneel, D transport-kWh, E heffingen + accijns op de marginale schijf)."""
+    t = tarieven or {}
+    afn = (float(t.get('proportioneel_eur_mwh', 0.0) or 0.0)
+           + float(t.get('transport_systeembeheer_eur_mwh', 0.0) or 0.0)
+           + float(t.get('transport_reserves_eur_mwh', 0.0) or 0.0)
+           + float(t.get('transport_marktintegratie_eur_mwh', 0.0) or 0.0)
+           + float(t.get('odv_eur_mwh', 0.0) or 0.0)
+           + float(t.get('surcharges_eur_mwh', 0.0) or 0.0)
+           + float(t.get('soldes_eur_mwh', 0.0) or 0.0)
+           + float(t.get('accijns_basis_eur_mwh', 0.0) or 0.0))
+    staffel = t.get('accijnzen_staffel') or [(3, 14.21), (20, 14.21), (50, 12.09), (1000, 11.39), (9999999, 10.00)]
+    marg = 0.0
+    try:
+        for grens, tarief in staffel:
+            marg = float(tarief)
+            if (jaar_mwh or 0.0) <= float(grens):
+                break
+    except Exception:
+        marg = 0.0
+    afn += marg
+    inj = float(t.get('injectie_proportioneel_eur_mwh', 0.0) or 0.0)
+    return max(0.0, afn), max(0.0, inj)
+
+
 def lp_dispatch_day(
     consumption_kw: list,         # 96 kwartieren
     pv_kw: list,                  # 96 kwartieren
@@ -1266,6 +1302,8 @@ def lp_dispatch_day(
 
     vergroening = pricing['vergroening']
     gsc = pricing['gsc']
+    _vol_afn = float(contract.get('_lp_vol_afn', 0.0) or 0.0)   # v1.16.0
+    _vol_inj = float(contract.get('_lp_vol_inj', 0.0) or 0.0)
     wkk = pricing['wkk']
 
     # v1.5 Stacked: gebruik IMB-prijs voor dispatch als meegegeven
@@ -1318,8 +1356,8 @@ def lp_dispatch_day(
         # Energiekost afname (€/kwartier): kW * 0.25 * (€/MWh) / 1000
         # v1.1: vergroening (€/MWh) wordt opgeteld bij afnameprijs.
         # Geen floor op injectieprijs — kan negatief zijn bij negatieve spot.
-        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
-        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh) / 1000.0
+        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening + _vol_afn) / 1000.0   # v1.16.0: + volume-kosten
+        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh - _vol_inj) / 1000.0
         obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
         obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
         # Cyclus-kost: ontladen kost
@@ -1461,6 +1499,8 @@ def lp_dispatch_month_arb(
         markdown_per_mwh = pricing['markdown_dam']
     vergroening = pricing['vergroening']
     gsc = pricing['gsc']
+    _vol_afn = float(contract.get('_lp_vol_afn', 0.0) or 0.0)   # v1.16.0
+    _vol_inj = float(contract.get('_lp_vol_inj', 0.0) or 0.0)
     wkk = pricing['wkk']
 
     dispatch_prijs = imb_eur_mwh if imb_eur_mwh is not None else spot_eur_mwh
@@ -1496,11 +1536,14 @@ def lp_dispatch_month_arb(
 
     # v1.11: één monthly_peak over de hele maand, bound door alle grid_in[t].
     monthly_peak = pulp.LpVariable('monthly_peak', 0, _gin_cap)
+    # v1.16.0: afremmen IN de LP (enkel als contract['_lp_pv_curt']) → opslaan gaat vóór afremmen.
+    _mag_curt = bool(contract.get('_lp_pv_curt', False))
+    pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(0.0, pv_kw[t])) for t in range(H)] if _mag_curt else None
 
     prob += soc[0] == soc_start_kwh
 
     for t in range(H):
-        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + pv_kw[t] + ev_tekort[t] == consumption_kw[t]
+        prob += grid_in[t] - grid_out[t] + p_dis[t] - p_ch[t] + (pv_kw[t] - (pv_curt[t] if pv_curt else 0)) + ev_tekort[t] == consumption_kw[t]
         prob += soc[t + 1] == soc[t] + eta * p_ch[t] * dt_h - (1.0 / eta) * p_dis[t] * dt_h
         prob += monthly_peak >= grid_in[t]  # v1.11 piekshaving
         prob += over_afn_zacht[t] >= grid_in[t] - max_afname_zacht
@@ -1510,8 +1553,8 @@ def lp_dispatch_month_arb(
     obj_terms = []
     eps_penalty = 1.0 / 1000.0
     for t in range(H):
-        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening) / 1000.0
-        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh) / 1000.0
+        prijs_afn_t = (dispatch_prijs[t] + markup_per_mwh + gsc + wkk + vergroening + _vol_afn) / 1000.0   # v1.16.0: + volume-kosten
+        prijs_inj_t = (dispatch_prijs[t] - markdown_per_mwh - _vol_inj) / 1000.0
         obj_terms.append(prijs_afn_t * grid_in[t] * dt_h)
         obj_terms.append(-prijs_inj_t * grid_out[t] * dt_h)
         obj_terms.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
@@ -1561,6 +1604,7 @@ def lp_dispatch_month_arb(
         'over_inj_hard': [0.0] * H,
         'monthly_peak': pulp.value(monthly_peak) or 0.0,
         'ev_tekort_kwh': sum((pulp.value(v) or 0.0) for v in ev_tekort) * dt_h,   # v1.11.2
+        'pv_curtailed_kw': ([max(0.0, pulp.value(v) or 0.0) for v in pv_curt] if pv_curt else [0.0] * H),   # v1.16.0
         'lp_status': status_str,
     }
 
@@ -1648,6 +1692,8 @@ def lp_dispatch_day_bsp(
     markdown_per_mwh = pricing['markdown_dam']
     vergroening = pricing['vergroening']
     gsc = pricing['gsc']
+    _vol_afn = float(contract.get('_lp_vol_afn', 0.0) or 0.0)   # v1.16.0
+    _vol_inj = float(contract.get('_lp_vol_inj', 0.0) or 0.0)
     wkk = pricing['wkk']
 
     # ── NOMINATIE = forecast met ruis (referentie voor speculation budget) ──
@@ -1722,10 +1768,11 @@ def lp_dispatch_day_bsp(
             prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0
             prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
             prijs_imb = imb_eur_mwh[t] / 1000.0
-            belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
+            belastingen_per_kwh = (gsc + wkk + vergroening + _vol_afn) / 1000.0   # v1.16.0: + volume-kosten afname
 
             obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
             obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+            obj_terms.append((_vol_inj / 1000.0) * grid_out[t] * dt_h)   # v1.16.0: proportioneel injectietarief
             obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
             obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
             obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
@@ -2001,6 +2048,8 @@ def lp_dispatch_month_bsp(
     markdown_per_mwh = pricing['markdown_dam']
     vergroening = pricing['vergroening']
     gsc = pricing['gsc']
+    _vol_afn = float(contract.get('_lp_vol_afn', 0.0) or 0.0)   # v1.16.0
+    _vol_inj = float(contract.get('_lp_vol_inj', 0.0) or 0.0)
     wkk = pricing['wkk']
 
     # Nominatie = forecast-met-ruis (referentie voor speculation budget)
@@ -2146,10 +2195,11 @@ def lp_dispatch_month_bsp(
             prijs_dam_afn = (spot_eur_mwh[t] + markup_per_mwh) / 1000.0
             prijs_dam_inj = (spot_eur_mwh[t] - markdown_per_mwh) / 1000.0
             prijs_imb = imb_eur_mwh[t] / 1000.0
-            belastingen_per_kwh = (gsc + wkk + vergroening) / 1000.0
+            belastingen_per_kwh = (gsc + wkk + vergroening + _vol_afn) / 1000.0   # v1.16.0: + volume-kosten afname
 
             obj_terms.append(prijs_dam_afn * nom_afn[t] * dt_h)
             obj_terms.append(-prijs_dam_inj * nom_inj[t] * dt_h)
+            obj_terms.append((_vol_inj / 1000.0) * grid_out[t] * dt_h)   # v1.16.0: proportioneel injectietarief
             obj_terms.append(prijs_imb * (grid_in[t] - nom_afn[t]) * dt_h)
             obj_terms.append(-prijs_imb * (grid_out[t] - nom_inj[t]) * dt_h)
             obj_terms.append(belastingen_per_kwh * grid_in[t] * dt_h)
@@ -2852,8 +2902,8 @@ def lp_dispatch_day_stacked(
         # v1.6: anti-fake-volume eps op (gin + gout)
         eps_penalty = 1.0 / 1000.0
         for t in range(H):
-            prijs_afn = (prijs[t] + markup) / 1000.0
-            prijs_inj = (prijs[t] - markdown) / 1000.0
+            prijs_afn = (prijs[t] + markup + float(contract.get('_lp_vol_afn', 0.0) or 0.0)) / 1000.0   # v1.16.0
+            prijs_inj = (prijs[t] - markdown - float(contract.get('_lp_vol_inj', 0.0) or 0.0)) / 1000.0
             obj.append(prijs_afn  * gin[t]  * dt_h)
             obj.append(-prijs_inj * gout[t] * dt_h)
             obj.append(cyclus_kost_eur_per_kwh * p_dis[t] * dt_h)
@@ -3181,7 +3231,12 @@ def run_simulation(inp: dict) -> dict:
     vermeden_kost_eur = 0.0         # wat injectie zonder curtailment zou hebben gekost (positief = besparing)
     pv_kw_origineel = list(pv_kw)   # bewaar zonder curtailment voor KPI
 
-    if pv_curt_cfg.get('actief', False) and max(pv_kw) > 0:
+    # v1.16.0: met batterij beslist de LP over afremmen (opslaan gaat vóór afremmen) → geen voorafgaande cap.
+    _batt_lp = (inp.get('batterij', {}).get('kwh', 0) or 0) > 0 and (inp.get('batterij', {}).get('kw', 0) or 0) > 0 and not bool(inp.get('geen_arbitrage', False))
+    _lp_curt = bool(pv_curt_cfg.get('actief', False)) and _batt_lp and max(pv_kw) > 0
+    if _lp_curt:
+        log.info("PV-afremmen: met batterij beslist de LP (opslaan vóór afremmen) — geen cap vóór de LP")
+    if pv_curt_cfg.get('actief', False) and max(pv_kw) > 0 and not _lp_curt:
         trigger = pv_curt_cfg.get('trigger_eur_mwh', 0.0)
         log.info(f"PV-curtailment actief (cap op verbruik) — trigger: spot < {trigger} €/MWh")
         for i in range(N):
@@ -3229,6 +3284,16 @@ def run_simulation(inp: dict) -> dict:
     else:
         cyclus_kost = 0.0
     log.info(f"Cyclus-kost: €{cyclus_kost:.4f}/kWh ontladen")
+    # v1.16.0: volledige marginale afname-/injectiekost in de LP (tarieven uit inp['netbeheer']).
+    try:
+        _jv = float(inp['contract'].get('jaarverbruik_mwh', 0.0) or 0.0) or (sum(consumption_kw) * 0.25 / 1000.0 * 35040.0 / max(1, N))
+        _vA, _vI = _lp_volume_kosten(inp.get('netbeheer', {}).get('tarieven', {}), _jv)
+    except Exception as _e:
+        _vA, _vI = 0.0, 0.0
+        log.warning(f"LP-volumekosten niet bepaald: {_e}")
+    inp['contract'] = dict(inp['contract'], _lp_vol_afn=_vA, _lp_vol_inj=_vI, _lp_pv_curt=_lp_curt)
+    log.info(f"LP-volumekosten: afname +{_vA:.1f} €/MWh, injectie −{_vI:.1f} €/MWh (netkost kWh + heffingen + accijns) · afremmen in LP: {_lp_curt}")
+    _pv_curt_arb_all = []   # v1.16.0
 
     # ---- LP per dag ----
     log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
@@ -3555,6 +3620,7 @@ def run_simulation(inp: dict) -> dict:
                 grid_out_all.extend(result['grid_out'])
                 p_dis_all.extend(result['p_discharge'])
                 p_ch_all.extend(result['p_charge'])
+                _pv_curt_arb_all.extend(result.get('pv_curtailed_kw') or [0.0] * (i1 - i0))   # v1.16.0
                 soc_all.extend(result['soc'][1:])
                 _new_soc = result['soc'][-1] if result['soc'] else None
                 _soc_max = batt['kwh'] * dod
@@ -3687,6 +3753,15 @@ def run_simulation(inp: dict) -> dict:
                         if (inp.get('piek_realisatie') is not None and (batt.get('kw', 0) or 0) > 0) else None),
         piek_realisatie=(inp.get('piek_realisatie') if (batt.get('kw', 0) or 0) > 0 else None),
     )
+
+    # v1.16.0: PV die de LP afremde (maand-arbitrage of BSP) hoort niet bij de benutte PV → aftrekken + als afgeremd tellen.
+    _lpc = _pv_curt_arb_all if len(_pv_curt_arb_all) == N else (pv_curtailed_kw_bsp_all if len(pv_curtailed_kw_bsp_all) == N else None)
+    if _lpc and any(v > 1e-6 for v in _lpc):
+        _c = [min(max(0.0, _lpc[i]), pv_kw[i]) for i in range(N)]
+        pv_curtailed_kwh += sum(_c) * 0.25
+        pv_curtailed_kwartieren += sum(1 for v in _c if v > 1e-3)
+        pv_kw = [pv_kw[i] - _c[i] for i in range(N)]
+        log.info(f"  LP-afremmen: {sum(_c)*0.25/1000:.2f} MWh PV afgeremd ({sum(1 for v in _c if v > 1e-3)} kwartieren)")
 
     # ---- KPI's ----
     pv_naar_eigen_verbruik = sum(min(consumption_kw[i], pv_kw[i]) * 0.25 / 1000.0 for i in range(N))
