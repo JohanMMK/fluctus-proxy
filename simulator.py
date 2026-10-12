@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.15.0 (2026-10-12, Johan): REALISTISCHE PIEKAFVLAKKING. De LP kent de toekomst perfect en shaaft de
+#                maandpiek dus maximaal (bv. 153 → 77 kW). Een echte EMS werkt met een voorspelde netlimiet en haalt
+#                dat niet volledig. Nieuw (opt-in via inp['piek_realisatie'] = f, 0 ≤ f < 1, enkel met batterij): de
+#                GEFACTUREERDE maandpiek = ref − f × (ref − LP-piek), met ref = de passieve piek zonder batterij
+#                (verbruik − PV). Ligt de LP-piek boven ref → ongewijzigd. Dispatch/LP ongewijzigd; enkel de
+#                facturatie (capaciteit + jaarpiek-output). Zonder parameter → identiek aan v1.14.5.
 # Versie:        v1.14.5 (2026-09-30, Johan): MAAND-ENERGIEBALANS. kpi.maand_energiebalans = per kalendermaand
 #                (jan..dec) de PV-bestemming in MWh — pv_direct_mwh / pv_via_batt_mwh / pv_injectie_mwh — uit
 #                dezelfde per-kwartier-routing die de jaartotalen levert. Voedt de nieuwe energiebalans-bijlage
@@ -2354,6 +2360,8 @@ def bereken_jaarfactuur(
     nom_inj_kw_all: list = None,   # v1.4 BSP: genomineerde injectie
     effectief_jaarverbruik_voor_pricing: float = None,  # v1.5 sessie 4
     aansluiting: dict = None,      # v1.6 sessie 6: voor twee-bucket Groep B
+    ref_grid_in_kw: list = None,   # v1.15.0: passieve afname ZONDER batterij (piek-realisatie)
+    piek_realisatie: float = None, # v1.15.0: aandeel van de LP-piekverlaging dat gefactureerd wordt (0..1)
 ) -> dict:
     """
     Bereken jaarfactuur volgens groepen A-E.
@@ -2453,6 +2461,25 @@ def bereken_jaarfactuur(
     # Maandpieken (kW, ceil)
     maandpieken_afname = [math.ceil(max(m)) if m else 0 for m in maand_kw_afname]
     maandpieken_injectie = [math.ceil(max(m)) if m else 0 for m in maand_kw_injectie]
+    # v1.15.0: realistische piekafvlakking — enkel een deel (piek_realisatie) van de LP-piekverlaging t.o.v. de
+    #   passieve piek zonder batterij wordt gefactureerd. LP-piek boven de referentie → ongewijzigd.
+    maandpieken_afname_lp = list(maandpieken_afname)
+    _piek_real_toegepast = False
+    if (ref_grid_in_kw is not None and piek_realisatie is not None
+            and 0.0 <= float(piek_realisatie) < 1.0 and len(ref_grid_in_kw) == N):
+        _f = float(piek_realisatie)
+        _maand_ref = [[] for _ in range(12)]
+        for i, ts in enumerate(timestamps):
+            _maand_ref[ts.month - 1].append(ref_grid_in_kw[i])
+        _ref_pk = [math.ceil(max(m)) if m else 0 for m in _maand_ref]
+        _nieuw = []
+        for _p, _r in zip(maandpieken_afname, _ref_pk):
+            if _r > _p:
+                _nieuw.append(int(math.ceil(_r - _f * (_r - _p))))
+            else:
+                _nieuw.append(_p)
+        maandpieken_afname = _nieuw
+        _piek_real_toegepast = True
 
     # v1.6: jaarpieken expliciet afname EN injectie.
     # jaarpiek_afname_kw = max(maandpieken_afname) — was in v1.5 een aparte
@@ -2720,6 +2747,8 @@ def bereken_jaarfactuur(
         'btw_bedrag': btw_bedrag,
         'totaal_incl_btw': totaal_incl_btw,
         'maandpieken_afname_kw': maandpieken_afname,
+        'maandpieken_afname_lp_kw': maandpieken_afname_lp,          # v1.15.0: LP-pieken (perfecte voorkennis)
+        'piek_realisatie': (float(piek_realisatie) if _piek_real_toegepast else None),
         'maandpieken_injectie_kw': maandpieken_injectie,
         # v1.6: expliciete splitsing afname/injectie. toegangsvermogen_kw blijft
         # als backwards-compat alias voor jaarpiek_afname_kw.
@@ -3653,6 +3682,10 @@ def run_simulation(inp: dict) -> dict:
         nom_inj_kw_all=nom_inj_arr,
         effectief_jaarverbruik_voor_pricing=effectief_jaarverbruik_mwh,
         aansluiting=inp.get('aansluiting'),  # v1.6 wijziging K
+        # v1.15.0: realistische piekafvlakking (opt-in, enkel met batterij)
+        ref_grid_in_kw=([max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+                        if (inp.get('piek_realisatie') is not None and (batt.get('kw', 0) or 0) > 0) else None),
+        piek_realisatie=(inp.get('piek_realisatie') if (batt.get('kw', 0) or 0) > 0 else None),
     )
 
     # ---- KPI's ----
