@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.17.0 (2026-10-13, Johan): BETALEND PLEIN LEVERT DE GEVRAAGDE KM. (1) paal_kw van de rij wint van het
+#                paaltype-default (11 kW opgegeven = 11 kW per wagen; vroeger AC22 → 22 kW, dubbele energie). (2) Plein-vlag
+#                'wachtrij': is er geen paal vrij, dan wacht de sessie tot er één vrijkomt (zelfde dag) i.p.v. te vervallen.
+#                (3) Nachtvenster (start > eind, bv. 19→7 u) wordt gesplitst in 19–24 + 0–7 (sessies pro rata de uren).
+#                (4) inp['bezoekers_leveren'] (EK): ook met een betalend plein verhoogt de sim het toegangsvermogen tot alles
+#                geleverd is (gebouw + laadplein op dezelfde aansluiting). Zonder vlag: ongewijzigd (nooit verhogen).
+#                Generator-pleinen (paaltype GEN) blijven buiten de verhoging.
 # Versie:        v1.16.0 (2026-10-12, Johan): VOLLEDIGE AFNAMEKOST IN DE STURING + AFREMMEN IN DE LP. (1) De LP-objective
 #                kende per MWh afname enkel spot + marge + GSC/WKK/vergroening; het proportionele nettarief, transport-
 #                kWh, ODV/toeslagen/saldi en de accijns (marginale schijf) zaten enkel in de factuur. Daardoor zag de LP
@@ -743,7 +750,7 @@ def _is_laaddag(dt, dpw: int) -> bool:
     return wd <= 4       # ma-vr
 
 
-def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen=1, base_seed=20260):
+def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen=1, base_seed=20260, wachtrij=False):
     """Betalende-bezoekers-plein: random sessies in 1..n vensters, elk `dur_min` lang aan
     `paal_kw`. Return per-kwartier VRAAG (kW) over de sim-periode. Reproduceerbaar (seed per dag).
     vensters = lijst van (start_uur, eind_uur, aantal_sessies).
@@ -757,6 +764,7 @@ def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_pa
     palen = max(1, int(aantal_palen or 1))
     dur_q = max(1, int(round(float(dur_min) / 15.0)))
     cnt = [0] * N   # aantal gelijktijdige sessies per kwartier (ongecapt)
+    occ = [0] * N   # v1.17.0 wachtrij: bezette palen per kwartier
     per_dag = {}
     for i, ts in enumerate(sim_timestamps):
         per_dag.setdefault(ts.date(), []).append((i, ts.hour + ts.minute / 60.0))
@@ -766,6 +774,30 @@ def _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_pa
         rng = random.Random(base_seed + dag.toordinal())
         day_idx = [i for (i, _u) in items]
         day_uur = [u for (_i, u) in items]
+        if wachtrij:
+            # v1.17.0: doorlopende tijdlijn (een sessie mag over middernacht lopen; venster-eind > 24 = volgende dag).
+            #   Sessies op aankomstvolgorde; geen paal vrij → wachten tot er één vrijkomt (max. 24 u), anders gemist.
+            d0 = day_idx[0] - int(round(day_uur[0] * 4))
+            st_all = []
+            for (u0, u1, n) in vensters:
+                n = int(n or 0)
+                if n <= 0:
+                    continue
+                st = [d0 + q for q in range(int(round(u0 * 4)), int(round(u1 * 4)))
+                      if d0 + q >= 0 and d0 + q + dur_q <= N]
+                if not st:
+                    continue
+                st_all += [rng.choice(st) for _ in range(n)]
+            for k in sorted(st_all):
+                kk, lim = k, min(N - dur_q, k + 96)
+                while kk <= lim and any(occ[q] >= palen for q in range(kk, kk + dur_q)):
+                    kk += 1
+                if kk > lim:
+                    continue
+                for q in range(kk, kk + dur_q):
+                    occ[q] += 1
+                    cnt[q] += 1
+            continue
         for (u0, u1, n) in vensters:
             n = int(n or 0)
             if n <= 0:
@@ -804,7 +836,8 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
         # ── Betalende bezoekers (v1.14): random sessies in 2 vensters, vaste duur aan paalvermogen.
         # Vraag komt uit vrije aansluitruimte + batterij (nooit verzwaren); rest = gemist. ──
         if str(p.get('type_plein', '')).lower() == 'bezoekers':
-            paal_kw = _LAADPUNT_KW.get(p.get('paaltype', 'AC22'), float(p.get('paal_kw', 22) or 22))
+            # v1.17.0: opgegeven paal_kw (vermogen per wagen) wint van het paaltype-default.
+            paal_kw = float(p.get('paal_kw') or 0) or _LAADPUNT_KW.get(p.get('paaltype', 'AC22'), 22.0)
             dur_min = float(p.get('duur_min', 30) or 30)
             aantal_palen = max(1, int(p.get('aantal_palen', 1) or 1))
             dpw = int(p.get('dagen_per_week', 7) or 7)
@@ -816,7 +849,19 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
                 ns = int(v.get('sessies', 0) or 0)
                 if ns > 0 and ve > vs:
                     vensters.append((vs, ve, ns))
-            demand = _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen)
+                elif ns > 0 and ve < vs and p.get('wachtrij'):
+                    vensters.append((vs, 24.0 + ve, ns))   # v1.17.0: doorlopend nachtvenster (wachtrij-tijdlijn)
+                elif ns > 0 and ve < vs:
+                    # v1.17.0: nachtvenster (bv. 19→7 u) = vs–24 + 0–ve, sessies pro rata de uren.
+                    h1, h2 = 24.0 - vs, ve
+                    n1 = int(round(ns * h1 / (h1 + h2))) if (h1 + h2) > 0 else ns
+                    if n1 > 0:
+                        vensters.append((vs, 24.0, n1))
+                    if ns - n1 > 0 and ve > 0:
+                        vensters.append((0.0, ve, ns - n1))
+            _gen = (str(p.get('paaltype', '')).upper() == 'GEN') or bool(p.get('_generator'))
+            demand = _bezoekers_demand(sim_timestamps, paal_kw, vensters, dur_min, dpw, aantal_palen,
+                                       wachtrij=bool(p.get('wachtrij')) and not _gen)
             periode_kwh = sum(demand) * 0.25
             sessies_dag = sum(ns for (_a, _b, ns) in vensters)
             dur_q = max(1, int(round(dur_min / 15.0)))
@@ -829,6 +874,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
                 'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
                 'modus': 'bezoekers', 'demand_kw': demand, 'paal_kw': paal_kw,
                 'duur_min': dur_min, 'vensters': vensters, 'aantal_palen': aantal_palen,
+                'generator': _gen,
             }
             out.append(rec)
             tot_cap_kw += rec['cap_kw']
@@ -3173,6 +3219,11 @@ def run_simulation(inp: dict) -> dict:
         # v1.14: bij een BEZOEKERS-plein is tekort = gemiste sessies BY DESIGN (throttling) —
         # de aansluiting wordt bewust NIET verhoogd; de batterij + vrije ruimte bepalen de service.
         _has_bezoekers = any(r.get('modus') == 'bezoekers' for r in _lp_prep['pleinen'])
+        # v1.17.0: inp['bezoekers_leveren'] (EK) → ook een betalend plein moet volledig geleverd worden: de aansluiting
+        #   stijgt dan net als bij een wagenpark (gebouw + plein op dezelfde aansluiting). Generator-pleinen niet.
+        if _has_bezoekers and bool(inp.get('bezoekers_leveren')) and \
+                any(r.get('modus') == 'bezoekers' and not r.get('generator') for r in _lp_prep['pleinen']):
+            _has_bezoekers = False
         if (not inp.get('geen_arbitrage', False)) and (not inp.get('geen_aansluiting_verhoging', False)) \
                 and (not _has_bezoekers) and _ev_tekort > 1e-6 and _ev_conn < 1e11:
             _lo = _ev_conn
