@@ -60,6 +60,20 @@ def laatste_volledige_dag(timestamps_ms):
 
 # Laad de drie caches
 spot_dict,  spot_ts  = load_cache('fluctus-cache-spot.json')
+# v15.288.0 (2026-10-13, Johan): KWARTIERPRIJZEN. Sinds 1 okt 2025 is de day-ahead (SDAC) per kwartier; voorheen nam de prebuild
+#   enkel de uur-sleutel (het :00-kwartier) voor het hele uur → gem. spreiding binnen het uur (±25 €/MWh) ging verloren.
+#   Nu: exacte kwartier-sleutel → anders het gemiddelde van de beschikbare kwartieren van dat uur → anders 80 (fallback).
+#   Vóór okt 2025 (uurprijzen) geeft dit exact hetzelfde als vroeger.
+_spot_uur = {}
+for _t, _v in spot_dict.items():
+    _h = (_t // 3600000) * 3600000
+    a = _spot_uur.setdefault(_h, [0.0, 0]); a[0] += _v; a[1] += 1
+def spot_kwartier(ts):
+    if ts in spot_dict: return spot_dict[ts]
+    h = (ts // 3600000) * 3600000
+    if h in spot_dict: return spot_dict[h]
+    a = _spot_uur.get(h)
+    return (a[0] / a[1]) if a and a[1] else 80.0
 imb_dict,   imb_ts   = load_cache('fluctus-cache-imb.json')
 solar_dict, solar_ts = load_cache('fluctus-cache-solar.json')
 
@@ -87,9 +101,9 @@ spot_q, imb_q = [], []
 cur = VAN_MARKT
 while cur < TOT_MARKT:
     ts = int(cur.timestamp() * 1000)
-    ht = (ts // 3600000) * 3600000
-    spot_q.append(spot_dict.get(ht, 80.0))
-    imb_q.append(imb_dict.get(ts, spot_dict.get(ht, 80.0)))
+    sv = spot_kwartier(ts)
+    spot_q.append(sv)
+    imb_q.append(imb_dict.get(ts, sv))
     cur += timedelta(minutes=15)
 sys.stderr.write(f"Markt: {len(spot_q)} kwartieren, spot gem={sum(spot_q)/len(spot_q):.1f} EUR/MWh\n")
 
