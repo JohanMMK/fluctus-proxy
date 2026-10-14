@@ -3,7 +3,9 @@
  * Fluctus Simulator — Profiel-import (AI-formaatherkenning → gemeten profiel)
  * ===========================================================================
  * Module: profiel/import.js
- * Versie: 1.1.2 (2026-10-14, Johan): overgeslagen rijen (reactieve registers, niet-gevraagde registers) tellen niet
+ * Versie: 1.1.3 (2026-10-14, Johan): preview — typische week = de week met de hoogste gemeten dekking, bij gelijke dekking
+ *   de week die het dichtst bij de mediaan-week ligt (niet langer altijd de eerste week van januari); her mag ontbreken.
+ * 1.1.2 (2026-10-14, Johan): overgeslagen rijen (reactieve registers, niet-gevraagde registers) tellen niet
  *         meer mee in de parse-rate van sanity() — anders viel de Fluvius-builtin (1 op 4 rijen = actief) op '25% geparst'
  *         en won de heuristiek (Volume-kolom over alle registers → 236 MWh). Heuristiek gebruikt nu ook een eenheidkolom.
  * Versie: 1.1.1 (2026-10-14, Johan): ook BREED formaat — waardekolommen met een reactieve kop (kVArh, reactief,
@@ -940,11 +942,21 @@ function sanity(conv) {
 // ─── preview ────────────────────────────────────────────────────────────────────────────────
 function preview(kwh, her) {
   // typische week: week met de hoogste gemeten dekking (ma→zo), uurgemiddelde kW
-  let best = 0, bestScore = -1;
+  // v1.1.3 (14-10, Johan): bij gelijke dekking (vaak: volledig gemeten jaar) de week waarvan het volume het dichtst bij de
+  //   MEDIAAN-week ligt, i.p.v. de eerste (begin januari = feestdagenweek → niet typisch). her ontbreekt → alles telt als gemeten.
+  const _her = Array.isArray(her) ? her : null;
+  const kand = [];
   for (let d = 0; d + 7 <= 365; d++) {
     if (_weekdag(d * 96) !== 1) continue;
-    let sc = 0; for (let i = d * 96; i < (d + 7) * 96; i++) if (her[i] === 0 || her[i] === 4) sc++;
-    if (sc > bestScore) { bestScore = sc; best = d; }
+    let sc = 0, e = 0;
+    for (let i = d * 96; i < (d + 7) * 96; i++) { if (!_her || _her[i] === 0 || _her[i] === 4) sc++; e += (+kwh[i] || 0); }
+    kand.push({ d, sc, e });
+  }
+  const _es = kand.map(k => k.e).sort((a, b) => a - b), _med = _es.length ? _es[Math.floor(_es.length / 2)] : 0;
+  let best = 0, bestScore = -1, bestAfw = Infinity;
+  for (const k of kand) {
+    const afw = Math.abs(k.e - _med);
+    if (k.sc > bestScore || (k.sc === bestScore && afw < bestAfw)) { bestScore = k.sc; best = k.d; bestAfw = afw; }
   }
   const week = [];
   for (let h = 0; h < 168; h++) { let s = 0; for (let k = 0; k < 4; k++) s += kwh[best * 96 + h * 4 + k]; week.push(Math.round(s * 100) / 100); }   // kWh/uur = kW gem.
