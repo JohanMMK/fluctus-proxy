@@ -3,6 +3,8 @@
  * Fluctus Simulator — Profiel-import (AI-formaatherkenning → gemeten profiel)
  * ===========================================================================
  * Module: profiel/import.js
+ * Versie: 1.1.1 (2026-10-14, Johan): ook BREED formaat — waardekolommen met een reactieve kop (kVArh, reactief,
+ *         inductief, capacitief) worden in validateSpec geschrapt, voor élke spec-bron (builtin/heuristiek/AI/registry/manueel).
  * Versie: 1.1.0 (2026-10-14, Johan): REACTIEVE REGISTERS GENEGEERD. Fluvius-AMR-exports bevatten per kwartier naast
  *         'Afname Actief' (kWh) ook 'Afname Reactief/Capacitief/Inductief' (kVArh). Die bevatten 'afname' en de eenheid
  *         kVArh werd niet herkend → viel terug op kWh → alles opgeteld (bv. Seuropak 944,7 MWh/j · 723,8 kW i.p.v.
@@ -198,7 +200,8 @@ function validateSpec(spec, sn) {
   if (!isCol(dt.col)) fout.push('datetime.col ongeldig');
   if (!order) fout.push('datetime.date_order ongeldig');
   s.datetime = { col: dt.col, time_col: isCol(dt.time_col) ? dt.time_col : null, date_order: order || 'DMY', label: dt.label === 'end' ? 'end' : 'start' };
-  const cols = v => (Array.isArray(v) ? v : (v == null ? [] : [v])).filter(isCol);
+  const _hdr = (sn && Array.isArray(sn.header)) ? sn.header : [];
+  const cols = v => (Array.isArray(v) ? v : (v == null ? [] : [v])).filter(isCol).filter(c => !isReactief(_hdr[c]));   // v1.1.1: geen kVArh-kolommen
   const vc = spec.value_columns || {};
   const a = cols(vc.afname), i = cols(vc.injectie);
   s.value_columns.afname = a.length ? a : null;
