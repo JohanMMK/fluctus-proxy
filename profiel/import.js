@@ -3,6 +3,11 @@
  * Fluctus Simulator — Profiel-import (AI-formaatherkenning → gemeten profiel)
  * ===========================================================================
  * Module: profiel/import.js
+ * Versie: 1.1.0 (2026-10-14, Johan): REACTIEVE REGISTERS GENEGEERD. Fluvius-AMR-exports bevatten per kwartier naast
+ *         'Afname Actief' (kWh) ook 'Afname Reactief/Capacitief/Inductief' (kVArh). Die bevatten 'afname' en de eenheid
+ *         kVArh werd niet herkend → viel terug op kWh → alles opgeteld (bv. Seuropak 944,7 MWh/j · 723,8 kW i.p.v.
+ *         ±713 MWh · 427,5 kW). Nu: eenheid kvarh/kvar/varh/var = reactief → rij overgeslagen; registers met
+ *         reactief/inductief/capacitief/blind worden nooit als afname/injectie gematcht.
  * Versie: 1.0.0 (2026-09-22)
  *
  * KERNPRINCIPE
@@ -431,6 +436,11 @@ function parseStamp(row, dt) {
   return { ms: Date.UTC(y, mo - 1, d, hh, mi), utc: false };
 }
 
+// v1.1.0: reactieve energie/vermogen (kVArh, kvar, varh, var) — nooit actieve afname/injectie.
+function isReactief(txt) {
+  const u = String(txt || '').toLowerCase().replace(/[^a-z]/g, '');
+  return /^(k|m)?varh?$/.test(u) || /reactie|inductie|inductief|capacitie|capacitief|blind/.test(String(txt || '').toLowerCase());
+}
 function unitFactor(unitTxt) {
   const u = String(unitTxt || '').toLowerCase().replace(/[^a-z]/g, '');
   if (u === 'mwh') return { f: 1000, vermogen: false };
@@ -493,7 +503,9 @@ function applySpec(rows, spec, rol) {
     else if (spec.timezone === 'utc') { utcSeen = true; }
     const tIsUtc = st.utc || spec.timezone === 'utc';
     let uf = baseUnit;
-    if (spec.unit_col != null) { const u2 = unitFactor(row[spec.unit_col]); if (u2) uf = u2; else if (!uf) { eenheidOnbekend++; continue; } }
+    if (spec.unit_col != null) {
+      if (isReactief(row[spec.unit_col])) continue;   // v1.1.0: kVArh-rij (reactief register) → overslaan, niet als kWh tellen
+      const u2 = unitFactor(row[spec.unit_col]); if (u2) uf = u2; else if (!uf) { eenheidOnbekend++; continue; } }
     if (!uf) { eenheidOnbekend++; continue; }
     if (uf.vermogen) vermogenGlobaal = true;
     const key0 = (tIsUtc ? 'u' : 'n') + t;
@@ -503,6 +515,7 @@ function applySpec(rows, spec, rol) {
       const v = parseNum(row[lf.value_col], spec.decimal);
       if (isNaN(v)) { continue; }
       const k = String(row[lf.key_col] || '').toLowerCase().trim();
+      if (isReactief(k)) continue;   // v1.1.0: 'Afname Reactief/Inductief/Capacitief' is geen actieve afname
       if (lfA.length && matches(k, lfA)) { add('afname', key0, k, Math.abs(v) * uf.f); ok = true; }
       else if (lfI.length && matches(k, lfI)) { add('injectie', key0, k, Math.abs(v) * uf.f); ok = true; }
       else continue;
