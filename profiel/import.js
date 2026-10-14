@@ -3,6 +3,9 @@
  * Fluctus Simulator — Profiel-import (AI-formaatherkenning → gemeten profiel)
  * ===========================================================================
  * Module: profiel/import.js
+ * Versie: 1.1.2 (2026-10-14, Johan): overgeslagen rijen (reactieve registers, niet-gevraagde registers) tellen niet
+ *         meer mee in de parse-rate van sanity() — anders viel de Fluvius-builtin (1 op 4 rijen = actief) op '25% geparst'
+ *         en won de heuristiek (Volume-kolom over alle registers → 236 MWh). Heuristiek gebruikt nu ook een eenheidkolom.
  * Versie: 1.1.1 (2026-10-14, Johan): ook BREED formaat — waardekolommen met een reactieve kop (kVArh, reactief,
  *         inductief, capacitief) worden in validateSpec geschrapt, voor élke spec-bron (builtin/heuristiek/AI/registry/manueel).
  * Versie: 1.1.0 (2026-10-14, Johan): REACTIEVE REGISTERS GENEGEERD. Fluvius-AMR-exports bevatten per kwartier naast
@@ -283,7 +286,9 @@ function heuristicSpec(sn) {
   if (!afn.length && !inj.length) afn = [numCols[numCols.length - 1]];
   const unitTxt = hn.join(' ');
   const unit = /\bkw\b(?!h)|\(kw\)/.test(unitTxt) && !/kwh/.test(unitTxt) ? 'kW' : 'kWh';
+  const _iEenh = hn.findIndex(h => h.includes('eenheid') || h === 'unit');   // v1.1.2: eenheid per rij → kVArh-rijen overslaan
   return { bron: 'heuristiek', spec: {
+    unit_col: _iEenh >= 0 ? _iEenh : null,
     naam: 'Heuristisch herkend formaat', delimiter: sn.delimiter || ';', decimal: sn.decimal, has_header: sn.has_header, skip_rows: sn.skip_rows,
     datetime: { col, time_col: dtCol < 0 && tCol >= 0 ? tCol : null, date_order: _guessOrderFromShape(sn, col), label: 'start' },
     value_columns: { afname: afn.length ? afn : null, injectie: inj.length ? inj : null },
@@ -489,7 +494,7 @@ function applySpec(rows, spec, rol) {
     let m = perType[type].get(t); if (!m) { m = new Map(); perType[type].set(t, m); }
     const e = m.get(key); if (e) { e.s += v; e.c++; } else m.set(key, { s: v, c: 1 });
   };
-  let geparst = 0, fout = 0, negatief = 0, eenheidOnbekend = 0, utcSeen = false;
+  let geparst = 0, fout = 0, negatief = 0, eenheidOnbekend = 0, utcSeen = false, overgeslagen = 0;   // v1.1.2: overgeslagen = bewust genegeerde rijen
   const baseUnit = spec.unit ? unitFactor(spec.unit) : null;
   const units = new Map();   // t → unitFactor (voor vermogen-conversie na resolutiedetectie)
   let vermogenGlobaal = baseUnit ? baseUnit.vermogen : false;
@@ -507,7 +512,7 @@ function applySpec(rows, spec, rol) {
     const tIsUtc = st.utc || spec.timezone === 'utc';
     let uf = baseUnit;
     if (spec.unit_col != null) {
-      if (isReactief(row[spec.unit_col])) continue;   // v1.1.0: kVArh-rij (reactief register) → overslaan, niet als kWh tellen
+      if (isReactief(row[spec.unit_col])) { overgeslagen++; continue; }   // v1.1.0: kVArh-rij (reactief register) → overslaan, niet als kWh tellen
       const u2 = unitFactor(row[spec.unit_col]); if (u2) uf = u2; else if (!uf) { eenheidOnbekend++; continue; } }
     if (!uf) { eenheidOnbekend++; continue; }
     if (uf.vermogen) vermogenGlobaal = true;
@@ -518,10 +523,10 @@ function applySpec(rows, spec, rol) {
       const v = parseNum(row[lf.value_col], spec.decimal);
       if (isNaN(v)) { continue; }
       const k = String(row[lf.key_col] || '').toLowerCase().trim();
-      if (isReactief(k)) continue;   // v1.1.0: 'Afname Reactief/Inductief/Capacitief' is geen actieve afname
+      if (isReactief(k)) { overgeslagen++; continue; }   // v1.1.0: 'Afname Reactief/Inductief/Capacitief' is geen actieve afname
       if (lfA.length && matches(k, lfA)) { add('afname', key0, k, Math.abs(v) * uf.f); ok = true; }
       else if (lfI.length && matches(k, lfI)) { add('injectie', key0, k, Math.abs(v) * uf.f); ok = true; }
-      else continue;
+      else { overgeslagen++; continue; }   // v1.1.2: register dat niet gevraagd is (bv. enkel afname)
     } else {
       if (colsA) {
         let s = 0, any = false;
@@ -604,7 +609,7 @@ function applySpec(rows, spec, rol) {
                van_ms: tMin, tot_ms: tMax, gemeten_maanden: maanden.size, maandpiek_kw_gemeten: Math.round(piekKwh * 4 * 10) / 10 },
     };
   }
-  return { afname: out.afname, injectie: out.injectie, R, rijen: rows.length - start, geparst, fout_rijen: fout, negatief_genegeerd: negatief, eenheid_onbekend: eenheidOnbekend, utc: utcSeen, waarschuwingen };
+  return { afname: out.afname, injectie: out.injectie, R, rijen: rows.length - start, overgeslagen, geparst, fout_rijen: fout, negatief_genegeerd: negatief, eenheid_onbekend: eenheidOnbekend, utc: utcSeen, waarschuwingen };
 }
 
 // ─── 5. AANVULLING + HERKOMST ───────────────────────────────────────────────────────────────
@@ -915,7 +920,8 @@ function reconstrueer(conv, slp, pvVorm, opts) {
 function sanity(conv) {
   const fout = [];
   if (conv.fout) return { ok: false, fout: [conv.fout] };
-  const parseRate = conv.rijen > 0 ? conv.geparst / conv.rijen : 0;
+  const _rel = Math.max(0, (conv.rijen || 0) - (conv.overgeslagen || 0));   // v1.1.2: bewust overgeslagen rijen niet meetellen
+  const parseRate = _rel > 0 ? conv.geparst / _rel : 0;
   if (parseRate < 0.6) fout.push(`slechts ${Math.round(parseRate * 100)}% van de rijen geparst`);
   if (!conv.afname && !conv.injectie) fout.push('geen afname of injectie herkend');
   for (const t of ['afname', 'injectie']) {
