@@ -216,4 +216,43 @@ async function getBody(msgId) {
   return { uniek: (j.uniqueBody && j.uniqueBody.content) || '', volledig: (j.body && j.body.content) || '' };
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail };
+// v15.298.0 (Johan 15-10): CONCEPT-MAIL (draft) in een opgegeven mailbox, met PDF-bijlage. Wordt NIET verstuurd —
+//   de gebruiker kijkt het concept na in Outlook en verstuurt zelf. Bijlage < 3 MB → gewone fileAttachment;
+//   groter (≤ 25 MB) → upload-sessie in stukken. Vereist Mail.ReadWrite (application) op die mailbox.
+async function createDraft(mailbox, to, subject, html, attachments) {
+  const mb = encodeURIComponent(String(mailbox || _env('GRAPH_MAILBOX')));
+  const lijst = (Array.isArray(to) ? to : (to ? [to] : [])).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
+  const msg = { subject: String(subject || ''), body: { contentType: 'HTML', content: String(html || '') }, toRecipients: lijst };
+  const r = await _g(`/users/${mb}/messages`, { method: 'POST', body: JSON.stringify(msg) });
+  if (!r.ok) throw new Error('Graph draft: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const m = await r.json();
+  const res = { id: m.id, webLink: m.webLink || null, mailbox: decodeURIComponent(mb), attached: 0, attach_error: null };
+  for (const a of (Array.isArray(attachments) ? attachments : [])) {
+    if (!a || !a.contentBytes) continue;
+    try {
+      const buf = Buffer.from(String(a.contentBytes), 'base64');
+      const name = String(a.name || 'bijlage.pdf'), ct = String(a.contentType || 'application/pdf');
+      if (buf.length < 2.9 * 1024 * 1024) {
+        const ra = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments`, { method: 'POST',
+          body: JSON.stringify({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: ct, contentBytes: buf.toString('base64') }) });
+        if (!ra.ok) throw new Error('HTTP ' + ra.status + ' ' + (await ra.text().catch(() => '')).slice(0, 200));
+      } else {
+        const rs = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments/createUploadSession`, { method: 'POST',
+          body: JSON.stringify({ AttachmentItem: { attachmentType: 'file', name, size: buf.length, contentType: ct } }) });
+        if (!rs.ok) throw new Error('uploadSession HTTP ' + rs.status + ' ' + (await rs.text().catch(() => '')).slice(0, 200));
+        const url = (await rs.json()).uploadUrl;
+        const STUK = 327680 * 9;   // veelvoud van 320 KiB
+        for (let off = 0; off < buf.length; off += STUK) {
+          const deel = buf.subarray(off, Math.min(buf.length, off + STUK));
+          const rp = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(deel.length),
+            'Content-Range': `bytes ${off}-${off + deel.length - 1}/${buf.length}` }, body: deel });
+          if (!rp.ok) throw new Error('upload HTTP ' + rp.status);
+        }
+      }
+      res.attached++;
+    } catch (e) { res.attach_error = String(e.message || e).slice(0, 240); }
+  }
+  return res;
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft };
