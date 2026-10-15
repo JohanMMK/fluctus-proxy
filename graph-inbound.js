@@ -15,14 +15,27 @@ function graphEnabled() {
   return !!(_env('GRAPH_TENANT_ID') && _env('GRAPH_CLIENT_ID') && _env('GRAPH_CLIENT_SECRET') && _env('GRAPH_MAILBOX'));
 }
 
-let _tok = { value: null, exp: 0 };
-async function getToken() {
+// v15.301.0 (Johan 15-10): tweede Graph-profiel 'fluctus' (app-registratie in de fluctus.net-tenant) om CONCEPTEN rechtstreeks
+//   in johan@fluctus.net te zetten (tijdlog-digest, concept-mail met rapport). ENV: TIJDLOG_GRAPH_TENANT_ID / _CLIENT_ID /
+//   _CLIENT_SECRET (alias FLUCTUS_GRAPH_*). Zonder die ENV blijft alles op het hoofdprofiel (GRAPH_*).
+function _creds(profiel) {
+  if (profiel === 'fluctus') {
+    const p = (k) => _env('TIJDLOG_GRAPH_' + k) || _env('FLUCTUS_GRAPH_' + k);
+    return { tenant: p('TENANT_ID'), clientId: p('CLIENT_ID'), secret: p('CLIENT_SECRET'), pre: 'TIJDLOG_GRAPH_' };
+  }
+  return { tenant: _env('GRAPH_TENANT_ID'), clientId: _env('GRAPH_CLIENT_ID'), secret: _env('GRAPH_CLIENT_SECRET'), pre: 'GRAPH_' };
+}
+function fluctusGraphEnabled() { const c = _creds('fluctus'); return !!(c.tenant && c.clientId && c.secret); }
+const _toks = {};
+async function getToken(profiel) {
+  const prof = profiel === 'fluctus' ? 'fluctus' : 'main';
+  const _tok = _toks[prof] || { value: null, exp: 0 };
   if (_tok.value && Date.now() < _tok.exp - 60000) return _tok.value;
-  const tenant = _env('GRAPH_TENANT_ID'), clientId = _env('GRAPH_CLIENT_ID'), secret = _env('GRAPH_CLIENT_SECRET');
+  const c = _creds(prof), tenant = c.tenant, clientId = c.clientId, secret = c.secret;
   const ontbreekt = [];
-  if (!tenant) ontbreekt.push('GRAPH_TENANT_ID');
-  if (!clientId) ontbreekt.push('GRAPH_CLIENT_ID');
-  if (!secret) ontbreekt.push('GRAPH_CLIENT_SECRET');
+  if (!tenant) ontbreekt.push(c.pre + 'TENANT_ID');
+  if (!clientId) ontbreekt.push(c.pre + 'CLIENT_ID');
+  if (!secret) ontbreekt.push(c.pre + 'CLIENT_SECRET');
   if (ontbreekt.length) throw new Error('Graph token faalde: ontbrekende/lege ENV: ' + ontbreekt.join(', '));
   const url = `https://login.microsoftonline.com/${encodeURIComponent(tenant)}/oauth2/v2.0/token`;
   const body = new URLSearchParams({
@@ -34,17 +47,18 @@ async function getToken() {
     const raw = await r.text().catch(() => '');
     let detail = raw.slice(0, 400);
     try { const j = JSON.parse(raw); detail = (j.error || '') + (j.error_description ? (': ' + String(j.error_description).split(/\r?\n/)[0]) : ''); } catch (e) {}
-    throw new Error('Graph token faalde: HTTP ' + r.status + (detail ? ' — ' + detail.slice(0, 300) : ' (leeg antwoord — controleer of GRAPH_TENANT_ID/CLIENT_ID geen spatie of extra teken bevat)'));
+    throw new Error('Graph token (' + prof + ') faalde: HTTP ' + r.status + (detail ? ' — ' + detail.slice(0, 300) : ' (leeg antwoord — controleer of ' + c.pre + 'TENANT_ID/CLIENT_ID geen spatie of extra teken bevat)'));
   }
   const j = await r.json();
-  _tok = { value: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
-  return _tok.value;
+  _toks[prof] = { value: j.access_token, exp: Date.now() + (Number(j.expires_in) || 3600) * 1000 };
+  return _toks[prof].value;
 }
 
-async function _g(path, opts) {
-  const tok = await getToken();
-  const headers = Object.assign({ Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, (opts && opts.headers) || {});
-  return fetch('https://graph.microsoft.com/v1.0' + path, Object.assign({}, opts || {}, { headers }));
+async function _g(path, opts, profiel) {
+  const tok = await getToken(profiel);
+  const o = Object.assign({}, opts || {});
+  const headers = Object.assign({ Authorization: 'Bearer ' + tok, 'Content-Type': 'application/json' }, o.headers || {});
+  return fetch('https://graph.microsoft.com/v1.0' + path, Object.assign(o, { headers }));
 }
 
 // Ongelezen mails MET bijlagen (max 25), oudste eerst.
@@ -219,11 +233,12 @@ async function getBody(msgId) {
 // v15.298.0 (Johan 15-10): CONCEPT-MAIL (draft) in een opgegeven mailbox, met PDF-bijlage. Wordt NIET verstuurd —
 //   de gebruiker kijkt het concept na in Outlook en verstuurt zelf. Bijlage < 3 MB → gewone fileAttachment;
 //   groter (≤ 25 MB) → upload-sessie in stukken. Vereist Mail.ReadWrite (application) op die mailbox.
-async function createDraft(mailbox, to, subject, html, attachments) {
+async function createDraft(mailbox, to, subject, html, attachments, opts) {
+  const prof = (opts && opts.profiel) === 'fluctus' ? 'fluctus' : undefined;   // v15.301.0
   const mb = encodeURIComponent(String(mailbox || _env('GRAPH_MAILBOX')));
   const lijst = (Array.isArray(to) ? to : (to ? [to] : [])).filter(Boolean).map(a => ({ emailAddress: { address: String(a) } }));
   const msg = { subject: String(subject || ''), body: { contentType: 'HTML', content: String(html || '') }, toRecipients: lijst };
-  const r = await _g(`/users/${mb}/messages`, { method: 'POST', body: JSON.stringify(msg) });
+  const r = await _g(`/users/${mb}/messages`, { method: 'POST', body: JSON.stringify(msg) }, prof);
   if (!r.ok) throw new Error('Graph draft: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const m = await r.json();
   const res = { id: m.id, webLink: m.webLink || null, mailbox: decodeURIComponent(mb), attached: 0, attach_error: null };
@@ -234,11 +249,11 @@ async function createDraft(mailbox, to, subject, html, attachments) {
       const name = String(a.name || 'bijlage.pdf'), ct = String(a.contentType || 'application/pdf');
       if (buf.length < 2.9 * 1024 * 1024) {
         const ra = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments`, { method: 'POST',
-          body: JSON.stringify({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: ct, contentBytes: buf.toString('base64') }) });
+          body: JSON.stringify({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: ct, contentBytes: buf.toString('base64') }) }, prof);
         if (!ra.ok) throw new Error('HTTP ' + ra.status + ' ' + (await ra.text().catch(() => '')).slice(0, 200));
       } else {
         const rs = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments/createUploadSession`, { method: 'POST',
-          body: JSON.stringify({ AttachmentItem: { attachmentType: 'file', name, size: buf.length, contentType: ct } }) });
+          body: JSON.stringify({ AttachmentItem: { attachmentType: 'file', name, size: buf.length, contentType: ct } }) }, prof);
         if (!rs.ok) throw new Error('uploadSession HTTP ' + rs.status + ' ' + (await rs.text().catch(() => '')).slice(0, 200));
         const url = (await rs.json()).uploadUrl;
         const STUK = 327680 * 9;   // veelvoud van 320 KiB
@@ -255,4 +270,4 @@ async function createDraft(mailbox, to, subject, html, attachments) {
   return res;
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft };
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, fluctusGraphEnabled };
