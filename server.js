@@ -11666,7 +11666,9 @@ function _tlSchoon(v, diepte) {   // enkel getallen, booleans en korte, niet-per
     return n ? o : undefined; }
   return undefined;
 }
-function _tlKort(data) { try { const s = _tlSchoon(data, 0); if (s === undefined) return ''; const j = JSON.stringify(s); return j.length > 140 ? j.slice(0, 137) + '…' : j; } catch (e) { return ''; } }
+function _tlKort(data) { try {
+  if (data && typeof data === 'object' && data.veld != null && /mail|tel|gsm|adres|straat|naam|klant|btw|contact|opmerk|info|bericht|iban/i.test(String(data.veld))) { data = Object.assign({}, data); delete data.waarde; }   // geen ingetypte klantgegevens
+  const s = _tlSchoon(data, 0); if (s === undefined) return ''; const j = JSON.stringify(s); return j.length > 140 ? j.slice(0, 137) + '…' : j; } catch (e) { return ''; } }
 function _tlVerzamel(datum) {
   const wie = _tlWie(), projecten = [];
   for (const [token, rec] of _LEADS) {
@@ -11757,7 +11759,7 @@ app.post('/api/tijdlog/digest', async (req, res) => {
     if (!(await _isManagerReq(req))) return res.status(401).json({ ok: false, error: 'Manager-login vereist' });
     const b = req.body || {};
     const datum = /^\d{4}-\d{2}-\d{2}$/.test(String(b.datum || '')) ? String(b.datum) : _tlDatum(Date.now());
-    if (b.droog) return res.json({ ok: true, droog: true, json: _tlVerzamel(datum) });
+    if (b.droog) { let st = null; try { st = await _tlStateLaden(); } catch (e) {} return res.json({ ok: true, droog: true, state: st, json: _tlVerzamel(datum) }); }
     const r = await _tlConcept(datum);
     return res.json(Object.assign({ datum }, r, { json: undefined }));
   } catch (e) { console.error('[tijdlog/digest]', e.message); res.status(500).json({ ok: false, error: e.message }); }
