@@ -103,11 +103,23 @@ async function getPdfAttachments(msgId) {
     if (/\.gif$/.test(n)) return 'image/gif';
     return null;
   };
-  return (j.value || [])
-    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes && !a.isInline)
+  // v15.310.0 (Johan 16-10): grote factuurscans zonder contentBytes in de lijst → inhoud apart via /attachments/{id}/$value (max 20 MB).
+  const kand = (j.value || [])
+    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && !a.isInline && (a.contentBytes || (a.id && !(+a.size > 20 * 1024 * 1024))))
     .map(a => ({ a, mt: _mtVan(a) }))
-    .filter(x => x.mt)
-    .map(x => ({ base64: x.a.contentBytes, mediaType: x.mt, fileName: x.a.name || 'factuur' }));
+    .filter(x => x.mt);
+  const uit = [];
+  for (const x of kand) {
+    let b64 = x.a.contentBytes || null;
+    if (!b64) {
+      try {
+        const rv = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments/${encodeURIComponent(x.a.id)}/$value`, { headers: { 'Content-Type': 'application/octet-stream' } });
+        if (rv.ok) b64 = Buffer.from(await rv.arrayBuffer()).toString('base64');
+      } catch (e) { console.warn('[graph] factuur-bijlage $value faalde: ' + e.message); }
+    }
+    if (b64) uit.push({ base64: b64, mediaType: x.mt, fileName: x.a.name || 'factuur' });
+  }
+  return uit;
 }
 
 // v15.142.4: recente mails MET bijlage, ONAFHANKELIJK van gelezen/ongelezen (robuuste intake met durabel watermerk
@@ -274,14 +286,30 @@ async function createDraft(mailbox, to, subject, html, attachments, opts) {
 //   csv/txt/tsv/xls/xlsx/xlsm/zip, geen inline-bijlagen, max. 12 MB per bestand. → [{ base64, fileName, size }]
 async function getProfielAttachments(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
-  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments`);
+  // v15.310.0: lijst ZONDER contentBytes ($select op de basis-velden) → geen reuzen-respons bij grote bijlagen; inhoud per bestand via $value.
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,size,isInline,contentType`);
   if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
-  return (j.value || [])
-    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes && !a.isInline)
+  // v15.310.0 (Johan 16-10): grote bijlagen (bv. een Fluvius-kwartierexport van ± 10 MB) komen in de lijst ZONDER contentBytes →
+  //   werden stil overgeslagen (profiel uit de factuurmail kwam niet aan). Nu: ontbreekt contentBytes → apart ophalen via
+  //   /attachments/{id}/$value. Limiet 20 MB per bestand.
+  const kand = (j.value || [])
+    .filter(a => (!a['@odata.type'] || String(a['@odata.type']).indexOf('fileAttachment') >= 0) && !a.isInline)
     .filter(a => /\.(csv|txt|tsv|xls|xlsx|xlsm|zip)$/i.test(String(a.name || '')))
-    .filter(a => !(+a.size > 12 * 1024 * 1024))
-    .map(a => ({ base64: a.contentBytes, fileName: a.name, size: +a.size || null }));
+    .filter(a => !(+a.size > 20 * 1024 * 1024));
+  const uit = [];
+  for (const a of kand) {
+    let b64 = a.contentBytes || null;
+    if (!b64 && a.id) {
+      try {
+        const rv = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments/${encodeURIComponent(a.id)}/$value`, { headers: { 'Content-Type': 'application/octet-stream' } });
+        if (rv.ok) b64 = Buffer.from(await rv.arrayBuffer()).toString('base64');
+        else console.warn('[graph] bijlage $value HTTP ' + rv.status + ' voor ' + a.name);
+      } catch (e) { console.warn('[graph] bijlage $value faalde voor ' + a.name + ': ' + e.message); }
+    }
+    if (b64) uit.push({ base64: b64, fileName: a.name, size: +a.size || null });
+  }
+  return uit;
 }
 
 module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, fluctusGraphEnabled };
