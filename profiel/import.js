@@ -41,7 +41,7 @@
 
 const crypto = require('crypto');
 
-const VERSIE = '1.7.0';   // v1.7.0 (16-10, Johan): injectiereeks die overal 0 is wordt genegeerd (afname-only) i.p.v. fout 'injectie: totaal volume = 0'. // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
+const VERSIE = '1.8.0';   // v1.8.0 (16-10, Johan): kolomkop 'vermogen/power/demand' zonder eenheid → kW (was kWh = 4× te veel bij kwartierdata); de server toetst de eenheid daarna aan factuurvolume en toegangsvermogen. // v1.7.0 (16-10, Johan): injectiereeks die overal 0 is wordt genegeerd (afname-only) i.p.v. fout 'injectie: totaal volume = 0'. // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
 // v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
 const N = 35040;
 const CUMDAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
@@ -247,7 +247,7 @@ function builtinSpec(sn) {
       naam: 'Fluctus kwartier-CSV (DD/MM/YYYY HH:MM;waarde)', delimiter: sn.delimiter || ';', decimal: sn.decimal,
       has_header: sn.has_header, skip_rows: sn.skip_rows,
       datetime: { col: 0, time_col: null, date_order: 'DMY', label: 'start' },
-      value_columns: { afname: [1], injectie: null }, unit: /\bkw\b(?!h)/.test(h1) ? 'kW' : 'kWh', resolution: 'auto', timezone: 'local',
+      value_columns: { afname: [1], injectie: null }, unit: (/\bkw\b(?!h)/.test(h1) || (/vermogen|power|demand|puissance/.test(h1) && !/kwh|energie|energy|volume/.test(h1))) ? 'kW' : 'kWh',   // v1.8.0: 'vermogen' zonder eenheid = kW resolution: 'auto', timezone: 'local',
     } };
   }
   // (c) Simulator-profiel breed: "date, demand.power (afname), pv.power_max (injectie)" — waarden in Watt
@@ -287,7 +287,7 @@ function heuristicSpec(sn) {
   let inj = pick(/injectie|teruglever|export|productie|inject|feed/);
   if (!afn.length && !inj.length) afn = [numCols[numCols.length - 1]];
   const unitTxt = hn.join(' ');
-  const unit = /\bkw\b(?!h)|\(kw\)/.test(unitTxt) && !/kwh/.test(unitTxt) ? 'kW' : 'kWh';
+  const unit = (/\bkw\b(?!h)|\(kw\)/.test(unitTxt) || /vermogen|power|demand|puissance/.test(unitTxt)) && !/kwh|energie|energy|volume/.test(unitTxt) ? 'kW' : 'kWh';   // v1.8.0: 'vermogen' zonder eenheid = kW
   const _iEenh = hn.findIndex(h => h.includes('eenheid') || h === 'unit');   // v1.1.2: eenheid per rij → kVArh-rijen overslaan
   return { bron: 'heuristiek', spec: {
     unit_col: _iEenh >= 0 ? _iEenh : null,
