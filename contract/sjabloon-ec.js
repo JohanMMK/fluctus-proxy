@@ -1,5 +1,10 @@
 'use strict';
-// contract/sjabloon-ec.js v1.0.0 — 2026-10-16 (Johan): sjabloon "Energie-Compas samenwerkingsovereenkomst" (No Cure No Pay
+// contract/sjabloon-ec.js v1.1.0 — 2026-10-16 (Johan): TOEGANG VIA E-MAILDOMEIN — veld `toegang_domein` (website/URL of
+//   e-maildomein van de partner, genormaliseerd naar bv. 'brelco.be'). Iedereen met een e-mailadres op dat domein krijgt
+//   toegang als adviseur zodra het contract bestaat (ook vóór ondertekening); de aan/uit-schakelaar zit BUITEN de velden
+//   (geen invloed op de hash). Leeg domein → tekst byte-identiek aan v1.0.0 (lopende teken-links blijven geldig).
+//   Generieke maildomeinen (gmail, outlook, telenet …) en eigen domeinen worden geweigerd.
+// v1.0.0 — 2026-10-16 (Johan): sjabloon "Energie-Compas samenwerkingsovereenkomst" (No Cure No Pay
 //   + optioneel business development), gebaseerd op de Brelco-afspraken van 9/14-10-2026. Eén bron van waarheid: de server
 //   rendert de tekst; de SHA-256 van de inhoud (zonder ondertekeningsblok) wordt bij verzending vastgelegd en bij het
 //   tekenen opnieuw berekend → bewijs dat de getekende tekst exact de verzonden tekst is.
@@ -13,7 +18,7 @@ const SJABLOON_NAAM = 'Energie-Compas samenwerking (No Cure No Pay)';
 
 const DEFAULTS = {
   partner_naam: '', partner_adres: '', partner_btw: '', partner_vert_naam: '', partner_vert_functie: '',
-  partner_mail: '', contactpersonen: '', gebruikers: '',
+  partner_mail: '', contactpersonen: '', gebruikers: '', toegang_domein: '',
   afspraken_ref: '',
   tarief_part: 400, tarief_ls: 900, tarief_ms: 1600,
   ncnp_maanden: 18, melding_dagen: 14, betaal_dagen: 15,
@@ -45,7 +50,34 @@ function normaliseer(v) {
     else o[k] = _tekst(v[k] == null ? d : v[k], TEKST_MAX[k] || 200);
   }
   o.partner_mail = o.partner_mail.toLowerCase();
+  o.toegang_domein = normDomein(o.toegang_domein);
   return o;
+}
+
+// v1.1.0: 'https://www.Brelco.be/contact' / '@brelco.be' / 'jan@brelco.be' → 'brelco.be'. Ongeldig of generiek → ''.
+const GENERIEKE_DOMEINEN = new Set(['gmail.com', 'googlemail.com', 'hotmail.com', 'hotmail.be', 'hotmail.nl', 'outlook.com', 'outlook.be', 'live.com', 'live.be',
+  'msn.com', 'yahoo.com', 'yahoo.fr', 'icloud.com', 'me.com', 'mac.com', 'telenet.be', 'skynet.be', 'proximus.be', 'scarlet.be', 'base.be', 'orange.be', 'voo.be',
+  'edpnet.be', 'pandora.be', 'gmx.com', 'gmx.de', 'proton.me', 'protonmail.com', 'aol.com', 'mail.com', 'yandex.com', 'zoho.com', 'free.fr', 'orange.fr', 'ziggo.nl',
+  'kpnmail.nl', 'fluctus.net', 'energie-compas.eu', 'energie-compas.be']);
+function normDomein(x) {
+  let d = String(x == null ? '' : x).trim().toLowerCase();
+  if (!d) return '';
+  if (d.indexOf('@') >= 0) d = d.slice(d.lastIndexOf('@') + 1);
+  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').split(/[\/?#:\s]/)[0].replace(/^www\./, '').replace(/\.+$/, '');
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(d) || d.length > 120) return '';
+  if (GENERIEKE_DOMEINEN.has(d)) return '';
+  return d;
+}
+function domeinFout(ruw) {   // uitleg waarom een ingevuld domein niet aanvaard wordt (of null)
+  if (!String(ruw || '').trim()) return null;
+  if (normDomein(ruw)) return null;
+  let d = String(ruw).trim().toLowerCase(); if (d.indexOf('@') >= 0) d = d.slice(d.lastIndexOf('@') + 1);
+  d = d.replace(/^[a-z][a-z0-9+.-]*:\/\//, '').split(/[\/?#:\s]/)[0].replace(/^www\./, '');
+  return GENERIEKE_DOMEINEN.has(d) ? `«${d}» is een algemeen of eigen maildomein — dat geeft te veel mensen toegang.` : 'Geen geldig domein (bv. brelco.be of https://www.brelco.be).';
+}
+function mailOpDomein(mail, domein) {
+  const m = String(mail || '').trim().toLowerCase(); const d = normDomein(domein); if (!m || !d) return false;
+  const md = m.slice(m.lastIndexOf('@') + 1); return md === d || md.endsWith('.' + d);
 }
 
 function ontbrekend(v) {
@@ -136,7 +168,9 @@ function inhoud(c) {
     + `<p>De vergoeding voor Energie-Compas betaalt het versnelde verkoopproces (studies + platform) en is enkel verschuldigd wanneer er een verkoop volgt.</p>`;
 
   h += H('Energie-Compas: toegang' + (v.whitelabel ? ' en white-label' : '')); art.toegang = n;
-  h += `<ul><li>${naam} krijgt toegang op uitnodiging.${gebr.length ? ' Bij de start worden uitgenodigd: ' + gebr.map(esc).join(', ') + '.' : ''} Bijkomende gebruikers op vraag van ${naam}.</li>`;
+  if (v.toegang_domein) h += `<ul><li>Alle medewerkers van ${naam} met een e-mailadres op <b>@${esc(v.toegang_domein)}</b> krijgen toegang tot Energie-Compas als adviseur, vanaf het opmaken van deze overeenkomst en ook vóór de ondertekening. Zij melden zich aan met hun e-mailadres en een eenmalige code.</li>`
+    + `<li>Fluctus kan deze toegang op elk moment in één keer opschorten of beëindigen, onder meer wanneer deze overeenkomst niet binnen de geldigheidstermijn wordt ondertekend of wanneer ze eindigt. ${naam} verwittigt Fluctus wanneer een medewerker het e-mailadres niet langer mag gebruiken voor Energie-Compas.</li>`;
+  else h += `<ul><li>${naam} krijgt toegang op uitnodiging.${gebr.length ? ' Bij de start worden uitgenodigd: ' + gebr.map(esc).join(', ') + '.' : ''} Bijkomende gebruikers op vraag van ${naam}.</li>`;
   if (v.whitelabel) h += `<li><b>White-label:</b> de rapporten verschijnen op naam van ${naam}, in de huisstijl en branding van ${naam}, en worden door ${naam} onder eigen naam aan haar klanten voorgesteld.</li>`;
   if (v.offerte_optie) h += `<li><b>Optie offerte (inbegrepen in dezelfde vergoeding per site):</b> vanuit het platform kan een offerte op naam van ${naam} worden opgemaakt, onder de opschortende voorwaarde van een technische inspectie ter plaatse.</li>`;
   h += `<li>Het platform, de rekenmethode, de modellen en de software blijven eigendom van Fluctus. ${naam} verkrijgt een gebruiksrecht voor de duur van deze overeenkomst; de opgemaakte rapporten mag ${naam} onbeperkt gebruiken voor haar klanten.</li></ul>`;
@@ -228,4 +262,4 @@ function document(c, opts) {
 
 function referentieSlug(naam) { return String(naam || 'PARTNER').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10) || 'PARTNER'; }
 
-module.exports = { SJABLOON_ID, SJABLOON_NAAM, DEFAULTS, normaliseer, ontbrekend, inhoud, hashInhoud, document, referentieSlug, VERSIE: '1.0.0' };
+module.exports = { SJABLOON_ID, SJABLOON_NAAM, DEFAULTS, normaliseer, ontbrekend, inhoud, hashInhoud, document, referentieSlug, normDomein, domeinFout, mailOpDomein, VERSIE: '1.1.0' };
