@@ -41,7 +41,7 @@
 
 const crypto = require('crypto');
 
-const VERSIE = '1.3.0';   // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
+const VERSIE = '1.7.0';   // v1.7.0 (16-10, Johan): injectiereeks die overal 0 is wordt genegeerd (afname-only) i.p.v. fout 'injectie: totaal volume = 0'. // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
 // v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
 const N = 35040;
 const CUMDAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
@@ -868,7 +868,15 @@ function reconstrueer(conv, slp, pvVorm, opts) {
   const slpN = _norm(slp && slp.length === N ? slp : new Array(N).fill(1));
   const pvN = (pvVorm && pvVorm.length === N) ? _norm(pvVorm) : synthPvVorm();
   const res = {};
-  const types = ['afname', 'injectie'].filter(t => conv[t]);
+  // v1.7.0 (Johan 16-10): een injectiereeks die volledig 0 is (geen PV — Fluvius-export levert dan toch 'Injectie Dag/Nacht' = 0,000)
+  //   wordt genegeerd i.p.v. de hele import te laten falen ('injectie: totaal volume = 0').
+  const _vooraf = [];
+  const _heeftVolume = c => { if (!c || !c.kwh) return false; for (let i = 0; i < c.kwh.length; i++) if (c.kwh[i] > 0) return true; return false; };
+  const types = ['afname', 'injectie'].filter(t => {
+    if (!conv[t]) return false;
+    if (t === 'injectie' && !_heeftVolume(conv[t])) { _vooraf.push('injectie overal 0 (geen productie) → genegeerd'); return false; }
+    return true;
+  });
   const masks = {};
   for (const t of types) {
     const c = conv[t];
@@ -881,7 +889,7 @@ function reconstrueer(conv, slp, pvVorm, opts) {
     masks[t] = mask;
   }
   let eb = null;
-  const flags = [];
+  const flags = _vooraf.slice();
   const heeftLang = t => res[t] && res[t].kwh.some(v => isNaN(v));
   if (res.injectie && (heeftLang('afname') || heeftLang('injectie'))) {
     // maskers voor kalibratie = gemeten + kort geïnterpoleerd
