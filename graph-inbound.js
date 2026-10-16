@@ -270,4 +270,18 @@ async function createDraft(mailbox, to, subject, html, attachments, opts) {
   return res;
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, fluctusGraphEnabled };
+// v15.305.0 (Johan 16-10): PROFIEL-bijlagen (verbruiksprofiel, bv. Fluvius-kwartierexport) uit dezelfde mail als de factuur:
+//   csv/txt/tsv/xls/xlsx/xlsm/zip, geen inline-bijlagen, max. 12 MB per bestand. → [{ base64, fileName, size }]
+async function getProfielAttachments(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments`);
+  if (!r.ok) throw new Error('Graph attachments: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return (j.value || [])
+    .filter(a => String(a['@odata.type'] || '').indexOf('fileAttachment') >= 0 && a.contentBytes && !a.isInline)
+    .filter(a => /\.(csv|txt|tsv|xls|xlsx|xlsm|zip)$/i.test(String(a.name || '')))
+    .filter(a => !(+a.size > 12 * 1024 * 1024))
+    .map(a => ({ base64: a.contentBytes, fileName: a.name, size: +a.size || null }));
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, fluctusGraphEnabled };
