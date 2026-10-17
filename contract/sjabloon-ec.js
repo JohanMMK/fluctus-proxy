@@ -1,4 +1,7 @@
 'use strict';
+// contract/sjabloon-ec.js v1.2.0 — 2026-10-17 (Johan): FIX ontbrekende getallen — een numeriek veld dat niet in de aanvraag zit
+//   (of leeg is) krijgt nu de sjabloon-default i.p.v. 0/het minimum (Number('') = 0 → bv. ncnp_maanden 1, tarieven 0).
+//   Ingevulde waarden en bestaande contracten: ongewijzigd (zelfde tekst, zelfde hash).
 // contract/sjabloon-ec.js v1.1.0 — 2026-10-16 (Johan): TOEGANG VIA E-MAILDOMEIN — veld `toegang_domein` (website/URL of
 //   e-maildomein van de partner, genormaliseerd naar bv. 'brelco.be'). Iedereen met een e-mailadres op dat domein krijgt
 //   toegang als adviseur zodra het contract bestaat (ook vóór ondertekening); de aan/uit-schakelaar zit BUITEN de velden
@@ -33,7 +36,7 @@ const DEFAULTS = {
 
 const TEKST_MAX = { extra_bepalingen: 4000, contactpersonen: 600, gebruikers: 600, afspraken_ref: 300, partner_adres: 300 };
 
-function _getal(x, def, min, max) { const n = Number(String(x == null ? '' : x).replace(',', '.')); if (!isFinite(n)) return def; return Math.min(max, Math.max(min, Math.round(n * 100) / 100)); }
+function _getal(x, def, min, max) { if (x === undefined || x === null || String(x).trim() === '') return def; const n = Number(String(x).trim().replace(',', '.')); if (!isFinite(n)) return def; return Math.min(max, Math.max(min, Math.round(n * 100) / 100)); }
 function _bool(x, def) { if (x === undefined || x === null || x === '') return def; return x === true || x === 1 || x === '1' || x === 'true' || x === 'ja' || x === 'on'; }
 function _tekst(x, max) { return String(x == null ? '' : x).replace(/\r/g, '').trim().slice(0, max || 200); }
 
@@ -262,4 +265,4 @@ function document(c, opts) {
 
 function referentieSlug(naam) { return String(naam || 'PARTNER').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9]+/g, '').slice(0, 10) || 'PARTNER'; }
 
-module.exports = { SJABLOON_ID, SJABLOON_NAAM, DEFAULTS, normaliseer, ontbrekend, inhoud, hashInhoud, document, referentieSlug, normDomein, domeinFout, mailOpDomein, VERSIE: '1.1.0' };
+module.exports = { SJABLOON_ID, SJABLOON_NAAM, DEFAULTS, normaliseer, ontbrekend, inhoud, hashInhoud, document, referentieSlug, normDomein, domeinFout, mailOpDomein, VERSIE: '1.2.0' };
