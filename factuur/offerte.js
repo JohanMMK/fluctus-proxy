@@ -4,7 +4,8 @@
  * Fluctus EnergieKompas — Offerte-upload & heranalyse
  * ===================================================
  * Module: factuur/offerte.js
- * Versie: 1.0.0 (2026-09-01, Fase 6)
+ * Versie: 1.2.0 (2026-10-17: + datum, referentie, prijs per onderdeel excl. btw — EK-offertes per offerte doorrekenen)
+ *         1.0.0 (2026-09-01, Fase 6)
  *
  * Doel: een klant (of een prospect) laadt een OFFERTE op — een eigen offerte van een
  * installateur, of een CONCURRENT-offerte — en wij geven er een eerlijke "second opinion"
@@ -33,6 +34,11 @@ verzin nooit een getal):
 
 {
   "installateur": string|null,            // naam van de aanbieder/installateur
+  "datum": string|null,                   // datum van de offerte (JJJJ-MM-DD)
+  "referentie": string|null,              // offertenummer / referentie
+  "prijs_pv_excl_btw": number|null,       // prijs van het PV-deel (panelen, omvormer, montage) excl. btw — enkel als uitgesplitst
+  "prijs_batterij_excl_btw": number|null, // prijs van het batterij-deel (incl. omvormer/ontkoppelbord van de batterij) excl. btw — enkel als uitgesplitst
+  "prijs_laadpalen_excl_btw": number|null,// prijs van de laadpalen (incl. installatie) excl. btw — enkel als uitgesplitst
   "is_concurrent": boolean,               // true als het duidelijk GEEN Fluctus/partner-offerte is
   "componenten": string[],                // subset van ["pv","batterij","laadpalen","laadpaal_thuis","omvormer","beheer","overig"]
   "investering_excl_btw": number|null,    // totale eenmalige investering excl. btw (EUR)
@@ -104,6 +110,11 @@ function _normaliseerOfferte(parsed) {
   const pos = v => { const n = _num(v); return (n != null && n >= 0) ? n : null; };
   return {
     installateur: parsed.installateur ? String(parsed.installateur).slice(0, 120) : null,
+    datum: parsed.datum ? String(parsed.datum).slice(0, 20) : null,
+    referentie: parsed.referentie ? String(parsed.referentie).slice(0, 60) : null,
+    prijs_pv_excl_btw: pos(parsed.prijs_pv_excl_btw),
+    prijs_batterij_excl_btw: pos(parsed.prijs_batterij_excl_btw),
+    prijs_laadpalen_excl_btw: pos(parsed.prijs_laadpalen_excl_btw),
     is_concurrent: !!parsed.is_concurrent,
     componenten: comp,
     investering_excl_btw: pos(parsed.investering_excl_btw),
@@ -141,7 +152,7 @@ async function extractOfferte({ files, apiKey, model, retries = 1 }) {
   }
   if (!parsed) throw new Error(`Offerte-extractie mislukt: ${lastError ? lastError.message : 'onbekende fout'}`);
   const offerte = _normaliseerOfferte(parsed);
-  return { ok: true, offerte, _meta: { model: usedModel, duration_ms: Date.now() - t0, input_tokens: raw && raw.usage.input_tokens, output_tokens: raw && raw.usage.output_tokens, version: '1.1.0' } };
+  return { ok: true, offerte, _meta: { model: usedModel, duration_ms: Date.now() - t0, input_tokens: raw && raw.usage.input_tokens, output_tokens: raw && raw.usage.output_tokens, version: '1.2.0' } };
 }
 
 // ─── Heranalyse (puur) — vergelijk de offerte met de EnergieKompas-studie ─────────────────────────
