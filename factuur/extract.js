@@ -1190,10 +1190,15 @@ function _pdfEanScan(files) {
       try { teksten.push(zlib.inflateSync(chunk).toString('latin1')); } catch (e) { try { teksten.push(zlib.inflateRawSync(chunk.subarray(2)).toString('latin1')); } catch (e2) {} }
       pos = e0 + 9; n++;
     }
-    for (const t of teksten) {
+    for (const t0 of teksten) {
+      // v1.6.1 (Johan 19-10): FIX valse EAN uit fontdefinities — een /Widths-array (bv. Tahoma: 546 546 546 546 546 546 …
+      //   = de breedte van de cijfers 0–9) gaf aaneengeschoven «546546546546546546», dat toevallig de GS1-controle haalt.
+      //   (a) /Widths- en /W-arrays (en andere niet-tekst-getallenreeksen in [ ]) eerst wissen; (b) enkel Belgische
+      //   aansluitings-EAN's (prefix 5414) aanvaarden.
+      const t = String(t0).replace(/\/(?:Widths|W|W2|DW|BBox|FontBBox|Matrix|MediaBox|CropBox|Rect|Domain|Range|Decode|Encode|Size|Index|ColorSpace)\s*\[[^\]]*\]/g, ' ');
       const lit = _pdfLiteralTekst(t);
       for (const bron of [lit, lit.replace(/[\s.]/g, '')]) {
-        const re = /5\s?4(?:[\s.]?\d){16}/g; let m;
+        const re = /5\s?4\s?1\s?4(?:[\s.]?\d){14}/g; let m;
         while ((m = re.exec(bron))) { const d = m[0].replace(/\D/g, ''); if (_gs1Ok(d)) gevonden.add(d); }
       }
     }
