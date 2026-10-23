@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.18.0 (2026-10-23, Johan): GELIJKTIJDIGE AFNAME + INJECTIE BINNEN HETZELFDE KWARTIER. Een digitale meter
+#                registreert per kwartier afname ÉN injectie apart (schommelingen binnen het kwartier). Het kwartiermodel ziet
+#                enkel het netto saldo → bij gemeten afname- + injectieprofielen lagen beide volumes te laag (bv. 187/218 i.p.v.
+#                gemeten 217/248 MWh). Nieuw: inp['gelijktijdig'] = {profiel_kwartier (35040, som=1), jaarvolume_mwh} = Σ min(afname,
+#                injectie) per kwartier (server). Dat volume telt in de FACTUUR bij afname én injectie in elk scenario (ook met
+#                batterij: conservatief — de besparing wijzigt niet, de factuur van vandaag klopt met de meting). LP ongewijzigd.
+#                KPI gelijktijdig_mwh.
 # Versie:        v1.17.0 (2026-10-13, Johan): BETALEND PLEIN LEVERT DE GEVRAAGDE KM. (1) paal_kw van de rij wint van het
 #                paaltype-default (11 kW opgegeven = 11 kW per wagen; vroeger AC22 → 22 kW, dubbele energie). (2) Plein-vlag
 #                'wachtrij': is er geen paal vrij, dan wacht de sessie tot er één vrijkomt (zelfde dag) i.p.v. te vervallen.
@@ -3785,9 +3792,28 @@ def run_simulation(inp: dict) -> dict:
         fysiek_grid_in  = [max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
         fysiek_grid_out = [max(0.0, pv_kw[i] - consumption_kw[i]) for i in range(N)]
 
+    # v1.18.0 (Johan 23-10): gelijktijdige afname + injectie binnen hetzelfde kwartier (enkel in de factuur, beide richtingen).
+    _gelijk_kw = [0.0] * N
+    _gl = inp.get('gelijktijdig') or {}
+    try:
+        _gprof = _gl.get('profiel_kwartier') or []
+        _gvol = float(_gl.get('jaarvolume_mwh', 0) or 0)
+        if _gprof and _gvol > 0 and len(_gprof) == 35040:
+            _gk = _gvol * 1000.0
+            for i, ts in enumerate(sim_timestamps):
+                _gelijk_kw[i] = max(0.0, float(_gprof[quarter_index_in_year_2025(ts)] or 0.0)) * _gk * 4.0
+    except Exception as _eg:
+        log.warning(f"gelijktijdig-profiel genegeerd: {_eg}")
+        _gelijk_kw = [0.0] * N
+    _gelijk_mwh = sum(_gelijk_kw) * 0.25 / 1000.0
+    if _gelijk_mwh > 0:
+        log.info(f"Gelijktijdige afname/injectie binnen het kwartier: {_gelijk_mwh:.1f} MWh (factuur: afname én injectie)")
+    _f_grid_in = [fysiek_grid_in[i] + _gelijk_kw[i] for i in range(N)] if _gelijk_mwh > 0 else fysiek_grid_in
+    _f_grid_out = [fysiek_grid_out[i] + _gelijk_kw[i] for i in range(N)] if _gelijk_mwh > 0 else fysiek_grid_out
+
     factuur = bereken_jaarfactuur(
-        fysiek_grid_in,
-        fysiek_grid_out,
+        _f_grid_in,
+        _f_grid_out,
         spot_actual,
         # IMB voor factuur: stacked gebruikt gefilterde IMB, BSP ook indien factor ingesteld
         imb_actual_stacked if (stacked_modus or bsp_actief) else imb_actual,
@@ -3800,7 +3826,7 @@ def run_simulation(inp: dict) -> dict:
         effectief_jaarverbruik_voor_pricing=effectief_jaarverbruik_mwh,
         aansluiting=inp.get('aansluiting'),  # v1.6 wijziging K
         # v1.15.0: realistische piekafvlakking (opt-in, enkel met batterij)
-        ref_grid_in_kw=([max(0.0, consumption_kw[i] - pv_kw[i]) for i in range(N)]
+        ref_grid_in_kw=([max(0.0, consumption_kw[i] - pv_kw[i]) + _gelijk_kw[i] for i in range(N)]
                         if (inp.get('piek_realisatie') is not None and (batt.get('kw', 0) or 0) > 0) else None),
         piek_realisatie=(inp.get('piek_realisatie') if (batt.get('kw', 0) or 0) > 0 else None),
     )
@@ -3894,6 +3920,7 @@ def run_simulation(inp: dict) -> dict:
         'max_overschr_hard_kw': max_overschr_hard_kw,
         'vereist_injectievermogen_kw': vereist_injectie_kw,
         'cycli_verbruikt': cycli_verbruikt,
+        'gelijktijdig_mwh': _gelijk_mwh,   # v1.18.0: afname én injectie binnen hetzelfde kwartier (in de factuur bijgeteld)
         'levensduur_jaren': levensduur_jaren,
         'totaal_afname_mwh': totaal_verbruik_mwh,
         'totaal_pv_mwh': totaal_pv_mwh,
