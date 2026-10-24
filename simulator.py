@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.19.0 (2026-10-24, Johan): ZELFCONSUMPTIE ZONDER STURING — inp['zelfconsumptie_dom'] (met geen_arbitrage + batterij):
+#                batterij laadt enkel met PV-overschot (ook bestaande PV uit het injectieprofiel) en ontlaadt bij afname (geen
+#                prijs, geen netladen). Enkel gebruikt door het klantrapport-scenario «zonder spotsturing». Zonder vlag: ongewijzigd (idle).
 # Versie:        v1.18.0 (2026-10-23, Johan): GELIJKTIJDIGE AFNAME + INJECTIE BINNEN HETZELFDE KWARTIER. Een digitale meter
 #                registreert per kwartier afname ÉN injectie apart (schommelingen binnen het kwartier). Het kwartiermodel ziet
 #                enkel het netto saldo → bij gemeten afname- + injectieprofielen lagen beide volumes te laag (bv. 187/218 i.p.v.
@@ -3448,10 +3451,45 @@ def run_simulation(inp: dict) -> dict:
         hard_afn = inp['aansluiting'].get('max_afname_kw_hard', float('inf'))
         zacht_inj = inp['aansluiting'].get('max_injectie_kw_zacht', float('inf'))
         hard_inj = inp['aansluiting'].get('max_injectie_kw_hard', float('inf'))
+        # v1.19.0 (Johan 24-10): optioneel ZELFCONSUMPTIE ZONDER STURING (inp['zelfconsumptie_dom'], enkel het klantrapport-
+        #   scenario «installatie zonder spotsturing»): de batterij laadt met het PV-overschot (ook bestaande PV uit het gemeten
+        #   injectieprofiel) en ontlaadt bij afname — geen prijs, geen netladen. Zo toont de factuur «geen» de echte
+        #   zelfconsumptiewinst i.p.v. een idle batterij (= niets doen).
+        _zc_dom = bool(inp.get('zelfconsumptie_dom', False)) and geen_arbitrage and (batt.get('kwh', 0) or 0) > 0 and (batt.get('kw', 0) or 0) > 0
+        if _zc_dom:
+            _dod = batt['dod_pct'] / 100.0 if batt.get('dod_pct', 90) > 1.5 else batt.get('dod_pct', 0.9)
+            _rte = batt['rte_pct'] / 100.0 if batt.get('rte_pct', 90) > 1.5 else batt.get('rte_pct', 0.9)
+            _eta = math.sqrt(_rte) if _rte > 0 else 1.0
+            _soc_max = batt['kwh'] * _dod
+            _soc = 0.0
+            _kwb = batt['kw']
+            log.info(f"Zelfconsumptie zonder sturing: batterij {batt['kw']} kW / {batt['kwh']} kWh laadt enkel met PV-overschot")
         for t in range(N):
             cons_kw = consumption_kw[t]
             pv_t = pv_kw[t]
             netto = cons_kw - pv_t  # > 0 = afname, < 0 = injectie
+            if _zc_dom:
+                _ch = 0.0; _dis = 0.0
+                if netto < 0:
+                    _ch = min(_kwb, -netto, max(0.0, (_soc_max - _soc) / (_eta * 0.25)))
+                    _soc += _eta * _ch * 0.25
+                    netto += _ch
+                elif netto > 0:
+                    _dis = min(_kwb, netto, max(0.0, _soc * _eta / 0.25))
+                    _soc -= (_dis / _eta) * 0.25
+                    netto -= _dis
+                _soc = min(max(_soc, 0.0), _soc_max)
+                if netto >= 0:
+                    grid_in_all.append(netto); grid_out_all.append(0.0)
+                    over_afn_zacht_all.append(max(0, netto - zacht_afn)); over_afn_hard_all.append(max(0, netto - hard_afn))
+                    over_inj_zacht_all.append(0.0); over_inj_hard_all.append(0.0)
+                else:
+                    injectie = -netto
+                    grid_in_all.append(0.0); grid_out_all.append(injectie)
+                    over_afn_zacht_all.append(0.0); over_afn_hard_all.append(0.0)
+                    over_inj_zacht_all.append(max(0, injectie - zacht_inj)); over_inj_hard_all.append(max(0, injectie - hard_inj))
+                p_dis_all.append(_dis); p_ch_all.append(_ch); soc_all.append(_soc)
+                continue
             if netto >= 0:
                 grid_in_all.append(netto)
                 grid_out_all.append(0.0)
