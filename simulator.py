@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.21.0 (2026-10-27, Johan): PIEK-REALISATIE BEGRENSD OP DE AANSLUITING — de 75 %-regel (voorspelfouten) werkt enkel
+#                onder de harde aansluitingsgrens; de gefactureerde maandpiek komt nooit boven max(LP-piek, max_afname_kw_hard).
 # Versie:        v1.20.1 (2026-10-27, Johan): jaarfactuur geeft ook maandpieken_afname_lp_kw door (fysieke LP-pieken vóór de piek-realisatie) — server gebruikt die voor de verzwaring-toets.
 # Versie:        v1.20.0 (2026-10-27, Johan): MAXIMUMTARIEF (VREG-tarieflijst 2026). bereken_jaarfactuur begrenst per maand de
 #                netkost toegangsvermogen + maandpiek + kWh-tarief + ODV + toeslagen op maximumtarief_eur_mwh × afname (MWh).
@@ -2589,6 +2591,16 @@ def bereken_jaarfactuur(
                 _nieuw.append(int(math.ceil(_r - _f * (_r - _p))))
             else:
                 _nieuw.append(_p)
+        # v1.21.0 (Johan 27-10): de AANSLUITING is een harde grens die het EMS afdwingt (max_afname_kw_hard, na een eventuele
+        #   auto-verhoging). De piek-realisatie (voorspelfouten) speelt enkel ONDER die grens: de gefactureerde maandpiek komt
+        #   nooit boven max(LP-piek, aansluiting). Zo toont het rapport dat een aansluiting die de sturing respecteert (bv.
+        #   55 kVA bij Jos Schreurs) effectief volstaat, i.p.v. een fictieve 67 kW.
+        try:
+            _hard = float((aansluiting or {}).get('max_afname_kw_hard') or 0.0)
+        except (TypeError, ValueError):
+            _hard = 0.0
+        if 0.0 < _hard < 1e8:
+            _nieuw = [min(_n, max(_lp, math.ceil(_hard))) for _n, _lp in zip(_nieuw, maandpieken_afname)]
         maandpieken_afname = _nieuw
         _piek_real_toegepast = True
 
