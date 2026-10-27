@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.20.1 (2026-10-27, Johan): jaarfactuur geeft ook maandpieken_afname_lp_kw door (fysieke LP-pieken vóór de piek-realisatie) — server gebruikt die voor de verzwaring-toets.
 # Versie:        v1.20.0 (2026-10-27, Johan): MAXIMUMTARIEF (VREG-tarieflijst 2026). bereken_jaarfactuur begrenst per maand de
 #                netkost toegangsvermogen + maandpiek + kWh-tarief + ODV + toeslagen op maximumtarief_eur_mwh × afname (MWh).
 #                Overschrijding, reactief en databeheer vallen erbuiten. Korting = B['maximumtarief'] (negatief) + B['_maximumtarief'].
@@ -4063,6 +4064,7 @@ def run_simulation(inp: dict) -> dict:
             'maandpieken_injectie_kw': factuur['maandpieken_injectie_kw'],
             'toegangsvermogen_kw': factuur['toegangsvermogen_kw'],
             'jaarpiek_afname_kw': factuur['jaarpiek_afname_kw'],
+            'maandpieken_afname_lp_kw': factuur.get('maandpieken_afname_lp_kw'),   # v1.20.1: fysieke LP-pieken (vóór piek-realisatie) → verzwaring-toets server
             # v1.6 wijziging L: nieuwe velden
             'jaarpiek_injectie_kw': factuur['jaarpiek_injectie_kw'],
             'winterpiek_afname_kw': factuur['winterpiek_afname_kw'],
