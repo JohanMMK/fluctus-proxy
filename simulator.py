@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.20.0 (2026-10-27, Johan): MAXIMUMTARIEF (VREG-tarieflijst 2026). bereken_jaarfactuur begrenst per maand de
+#                netkost toegangsvermogen + maandpiek + kWh-tarief + ODV + toeslagen op maximumtarief_eur_mwh × afname (MWh).
+#                Overschrijding, reactief en databeheer vallen erbuiten. Korting = B['maximumtarief'] (negatief) + B['_maximumtarief'].
+#                Bindend bij lage benuttingsgraad (zomermaanden met PV); geen waarde in de kaart → geen begrenzing.
 # Versie:        v1.19.0 (2026-10-24, Johan): ZELFCONSUMPTIE ZONDER STURING — inp['zelfconsumptie_dom'] (met geen_arbitrage + batterij):
 #                batterij laadt enkel met PV-overschot (ook bestaande PV uit het injectieprofiel) en ontlaadt bij afname (geen
 #                prijs, geen netladen). Enkel gebruikt door het klantrapport-scenario «zonder spotsturing». Zonder vlag: ongewijzigd (idle).
@@ -2719,7 +2723,34 @@ def bereken_jaarfactuur(
     B['reactief'] = 0.0
     # Databeheer (€/jaar) — v1.5: × prorata_factor (default 1.0 = identiek aan v1.4)
     B['databeheer'] = tar_databeheer * prorata_factor
+    # v1.20.0 — MAXIMUMTARIEF (VREG-tarieflijst 2026, opmerkingen): de netkost per afgenomen
+    #   kWh is begrensd. Onder de grens vallen: toegangsvermogen + maandpiek + kWh-tarief
+    #   (netgebruik) + ODV + toeslagen. NIET: overschrijding toegangsvermogen, reactief,
+    #   databeheer. Fluvius factureert MS/LS-piekmeting maandelijks → toets per maand.
+    #   Bindend bij lage benuttingsgraad (bv. zomermaanden met PV: weinig kWh, piek/toegang
+    #   blijven) — dan levert piekverlaging die maand niets op, minder afname wel.
+    #   Waarde ontbreekt (Wallonië/Brussel, oude kaart) → geen begrenzing.
+    tar_max = float(tarieven.get('maximumtarief_eur_mwh', 0.0) or 0.0)
+    _mt_korting = 0.0
+    _mt_maanden = []
+    if tar_max > 0:
+        _vol_mt = tar_prop + float(tarieven.get('odv_eur_mwh', 0.0) or 0.0) \
+                  + float(tarieven.get('surcharges_eur_mwh', 0.0) or 0.0)
+        _n_mnd = sum(1 for m in maand_kw_afname if m) or 1
+        _tv_mnd = B['toegangsvermogen'] / _n_mnd
+        for _m in range(12):
+            if not maand_kw_afname[_m]:
+                continue
+            _mwh = maand_mwh_afname[_m]
+            _kost = _tv_mnd + _mp(maandpieken_afname[_m]) * tar_maandpiek / 12.0 + _vol_mt * _mwh
+            _grens = tar_max * _mwh
+            if _kost > _grens:
+                _mt_korting += _kost - _grens
+                _mt_maanden.append(_m + 1)
+    B['maximumtarief'] = -_mt_korting if _mt_korting > 0 else 0.0
     B['_subtotaal'] = sum(v for k, v in B.items() if not k.startswith('_'))
+    B['_maximumtarief'] = {'eur_mwh': tar_max, 'korting_eur': round(_mt_korting, 2),
+                           'bindend_maanden': _mt_maanden}
 
     # ---- GROEP C: NETGEBRUIK INJECTIE ----
     C = {}
