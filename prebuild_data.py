@@ -83,7 +83,9 @@ laatste_imb   = laatste_volledige_dag(imb_ts)
 laatste_solar = laatste_volledige_dag(solar_ts)
 sys.stderr.write(f"Laatste volledige dag — spot: {laatste_spot}, imb: {laatste_imb}, solar: {laatste_solar}\n")
 
-beschikbare = [d for d in [laatste_spot, laatste_imb, laatste_solar] if d is not None]
+# v15.354.1 (Johan 27-10): zon bepaalt het marktvenster NIET meer — solar_norm komt uit het vaste kalenderjaar 2025.
+#   Een haperende zon-bron (Elia ods032, sinds 19/10) bevroor anders het hele spot/onbalans-venster.
+beschikbare = [d for d in [laatste_spot, laatste_imb] if d is not None]
 if not beschikbare:
     sys.stderr.write("WARN: geen cache gevonden — gebruik fallback\n")
     from datetime import date
