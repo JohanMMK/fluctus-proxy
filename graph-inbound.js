@@ -261,7 +261,8 @@ async function createDraft(mailbox, to, subject, html, attachments, opts) {
       const name = String(a.name || 'bijlage.pdf'), ct = String(a.contentType || 'application/pdf');
       if (buf.length < 2.9 * 1024 * 1024) {
         const ra = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments`, { method: 'POST',
-          body: JSON.stringify({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: ct, contentBytes: buf.toString('base64') }) }, prof);
+          body: JSON.stringify(Object.assign({ '@odata.type': '#microsoft.graph.fileAttachment', name, contentType: ct, contentBytes: buf.toString('base64') },
+            a.isInline && a.contentId ? { isInline: true, contentId: String(a.contentId) } : {})) }, prof);   // v15.355.0: inline-afbeelding (cid:)
         if (!ra.ok) throw new Error('HTTP ' + ra.status + ' ' + (await ra.text().catch(() => '')).slice(0, 200));
       } else {
         const rs = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments/createUploadSession`, { method: 'POST',
