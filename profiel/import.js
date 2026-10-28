@@ -41,7 +41,7 @@
 
 const crypto = require('crypto');
 
-const VERSIE = '1.8.0';   // v1.8.0 (16-10, Johan): kolomkop 'vermogen/power/demand' zonder eenheid → kW (was kWh = 4× te veel bij kwartierdata); de server toetst de eenheid daarna aan factuurvolume en toegangsvermogen. // v1.7.0 (16-10, Johan): injectiereeks die overal 0 is wordt genegeerd (afname-only) i.p.v. fout 'injectie: totaal volume = 0'. // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
+const VERSIE = '1.9.0';   // v1.9.0 (28-10, Johan): LAATSTE 365 DAGEN — loopt de meting langer dan een jaar, dan telt enkel het recentste jaar (zoals de klant zijn factuur kent; Voltmasters-vergelijking). Vroeger werden overlappende kalenderdagen van meerdere jaren gemiddeld (BV Twenty Three: 89,5 i.p.v. 83,4 MWh). opts.alle_jaren = true → oud gedrag. //   // v1.8.0 (16-10, Johan): kolomkop 'vermogen/power/demand' zonder eenheid → kW (was kWh = 4× te veel bij kwartierdata); de server toetst de eenheid daarna aan factuurvolume en toegangsvermogen. // v1.7.0 (16-10, Johan): injectiereeks die overal 0 is wordt genegeerd (afname-only) i.p.v. fout 'injectie: totaal volume = 0'. // v1.3.0 (28-09, Johan): EIGEN-WEEKVORM — ontbrekende afname-maanden aangevuld met een typische week uit de eigen gemeten data (dag×kwartier) i.p.v. generiek SLP; herkomst-code 6 + label "aangevuld met uw eigen gemeten profiel"; injectie blijft PV-vorm. Onvoldoende dekking → SLP-fallback. // v1.2.0 (26-09): builtin (c) simulator-profiel breed (date, demand.power=afname, pv.power_max=injectie — W) auto-herkend
 // v1.1.0 (22-09): compacte datum/tijd (YYYYMMDD, DDMMYYYY, YYYYMMDDHHMM, HHMM) in de engine; buildSampleText geëxporteerd (review)
 const N = 35040;
 const CUMDAY = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
@@ -565,6 +565,14 @@ function applySpec(rows, spec, rol) {
   if (R > 60) return { fout: `resolutie ${R} min (dag-/maandtotalen) — te grof voor een kwartierprofiel`, R };
   if (![5, 10, 15, 30, 60].includes(R)) return { fout: `onbekende resolutie (${R} min)`, R };
 
+  // v1.9.0: venster = laatste 365 dagen van de HELE meting (afname + injectie samen), tenzij spec.alle_jaren.
+  const _naiveVan = (key) => { let t = +key.slice(1); if (spec.datetime.label === 'end') t -= R * 60000; return key[0] === 'u' ? utcToBrusselsNaiveMs(t) : t; };
+  let _tMaxAll = -Infinity, _tMinAll = Infinity;
+  for (const type of ['afname', 'injectie']) for (const k of perType[type].keys()) { const nv = _naiveVan(k); if (nv > _tMaxAll) _tMaxAll = nv; if (nv < _tMinAll) _tMinAll = nv; }
+  const _JAAR_MS = 365 * 86400000;
+  const _venster = (!spec.alle_jaren && isFinite(_tMaxAll) && isFinite(_tMinAll) && (_tMaxAll - _tMinAll) > _JAAR_MS + 86400000);
+  const _cutoff = _venster ? (_tMaxAll + 15 * 60000 - _JAAR_MS) : -Infinity;
+  if (_venster) waarschuwingen.push(`Meting loopt over ${Math.round((_tMaxAll - _tMinAll) / 86400000)} dagen — enkel de laatste 365 dagen gebruikt (${fmtNaive(_cutoff)} – ${fmtNaive(_tMaxAll)}).`);
   const out = {};
   for (const type of ['afname', 'injectie']) {
     const m = perType[type];
@@ -581,6 +589,7 @@ function applySpec(rows, spec, rol) {
       let t = +key.slice(1);
       if (spec.datetime.label === 'end') t -= R * 60000;
       const naive = key[0] === 'u' ? utcToBrusselsNaiveMs(t) : t;
+      if (naive < _cutoff) continue;   // v1.9.0: buiten de laatste 365 dagen
       if (naive < tMin) tMin = naive; if (naive > tMax) tMax = naive;
       const nq = R > 15 ? R / 15 : 1;
       for (let k = 0; k < nq; k++) {
@@ -608,7 +617,8 @@ function applySpec(rows, spec, rol) {
     out[type] = {
       kwh, uur: uurFlag,
       stats: { unieke_tijdstippen: m.size, gemeten_kwartieren: nMeas, van: isFinite(tMin) ? fmtNaive(tMin) : null, tot: isFinite(tMax) ? fmtNaive(tMax) : null,
-               van_ms: tMin, tot_ms: tMax, gemeten_maanden: maanden.size, maandpiek_kw_gemeten: Math.round(piekKwh * 4 * 10) / 10 },
+               van_ms: tMin, tot_ms: tMax, gemeten_maanden: maanden.size, maandpiek_kw_gemeten: Math.round(piekKwh * 4 * 10) / 10,
+               venster: _venster ? 'laatste_365_dagen' : 'volledig', reeks_van: isFinite(_tMinAll) ? fmtNaive(_tMinAll) : null, reeks_tot: isFinite(_tMaxAll) ? fmtNaive(_tMaxAll) : null },
     };
   }
   return { afname: out.afname, injectie: out.injectie, R, rijen: rows.length - start, overgeslagen, geparst, fout_rijen: fout, negatief_genegeerd: negatief, eenheid_onbekend: eenheidOnbekend, utc: utcSeen, waarschuwingen };
@@ -851,6 +861,7 @@ function _summary(kwh, her, stats, extra) {
     pct_slp: pct(cnt[3]), pct_energiebalans: pct(cnt[5]), pct_eigen_weekvorm: pct(cnt[6]), pct_afgeleid: pctAfgeleid,
     gemeten_kwartieren: nMeas, gemeten_span: _spanTekst(nMeas), gemeten_maanden: stats.gemeten_maanden,
     van: stats.van, tot: stats.tot,
+    venster: stats.venster || 'volledig', reeks_van: stats.reeks_van || null, reeks_tot: stats.reeks_tot || null,   // v1.9.0
     maandpiek_kw: Math.round(piek * 10) / 10, maandpiek_kw_gemeten: stats.maandpiek_kw_gemeten,
     jaar_mwh: Math.round(som / 100) / 10, maand_mwh: maandMwh.map(v => Math.round(v / 10) / 100),
     maand_pct_gemeten: maandGemeten.map((v, m) => Math.round(v / maandN[m] * 100)),
