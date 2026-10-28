@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.22.0 (2026-10-28, Johan): VERGELIJKING MET VOLTMASTERS (8 KMO-dossiers) — drie expliciete keuzes:
+#                (1) pv_curtailment.trigger_netto: PV-overschot wordt (zonder LP-batterij) afgezet zodra de NETTO injectiewaarde
+#                    negatief is: spot < leveranciersfee injectie (markdown_dam, + markdown_imb in forfaitair) + injectie-nettarief,
+#                    i.p.v. enkel spot < 0.
+#                (2) batterij.cyclus_kost_eur_mwh: expliciete degradatiekost in de dispatch (overschrijft capex/(cycli×DoD×kWh)).
+#                    EK-modus «voorzichtig» = capex-gebaseerd (± € 48,6/MWh ontladen); «volledig» = 0 (zoals Voltmasters).
+#                (3) contract.markdown_dam_override: leveranciersfee injectie per dossier (factuur) i.p.v. de staffel.
+#                Zonder deze velden: identiek aan v1.21.1.
 # Versie:        v1.21.1 (2026-10-28, Johan): met gestuurde batterij duwt de gelijktijdige afname/injectie (v1.18.0) de gefactureerde
 #                afname nooit boven max(fysieke afname, max_afname_kw_hard) — het EMS bewaakt de aansluiting (Deca: fictieve 1.702 kW).
 # Versie:        v1.21.0 (2026-10-27, Johan): PIEK-REALISATIE BEGRENSD OP DE AANSLUITING — de 75 %-regel (voorspelfouten) werkt enkel
@@ -1237,6 +1245,19 @@ def resolve_contract_pricing(contract: dict, jaarverbruik_mwh: float) -> dict:
         out['schijf_code'] = ''
         out['schijf_label'] = '(legacy)'
 
+    # v1.22.0: leveranciersfee injectie per dossier (factuur) wint van de staffel.
+    #          In forfaitair-modus (geen nominatie) rekent de factuur de fee via markdown_imb op het fysieke volume → daar zetten.
+    _mdo = contract.get('markdown_dam_override', None)
+    if _mdo is not None:
+        try:
+            _fee = max(0.0, float(_mdo))
+            if contract.get('modus', 'passthrough') == 'forfaitair':
+                out['markdown_dam'] = 0.0
+                out['markdown_imb'] = _fee
+            else:
+                out['markdown_dam'] = _fee
+        except (TypeError, ValueError):
+            pass
     out['vergroening'] = float(contract.get('vergroening_eur_per_mwh', 0.0))
     out['vaste_kost_maand'] = float(contract.get('vaste_kost_eur_maand', 0.0))
     out['modus'] = contract.get('modus', 'passthrough')  # 'passthrough' | 'forfaitair'
@@ -3345,7 +3366,18 @@ def run_simulation(inp: dict) -> dict:
         log.info("PV-afremmen: met batterij beslist de LP (opslaan vóór afremmen) — geen cap vóór de LP")
     if pv_curt_cfg.get('actief', False) and max(pv_kw) > 0 and not _lp_curt:
         trigger = pv_curt_cfg.get('trigger_eur_mwh', 0.0)
-        log.info(f"PV-curtailment actief (cap op verbruik) — trigger: spot < {trigger} €/MWh")
+        # v1.22.0: trigger_netto → afzetten zodra de NETTO injectiewaarde negatief is (spot − fee − injectie-nettarief < 0).
+        if pv_curt_cfg.get('trigger_netto', False):
+            try:
+                _c = inp.get('contract', {}) or {}
+                _jvc = float(_c.get('jaarverbruik_mwh', 0.0) or 0.0) or (sum(consumption_kw) * 0.25 / 1000.0 * 35040.0 / max(1, N))
+                _pr = resolve_contract_pricing(_c, _jvc)
+                _, _vIc = _lp_volume_kosten(inp.get('netbeheer', {}).get('tarieven', {}), _jvc)
+                _fee = float(_pr.get('markdown_dam', 0.0)) + (float(_pr.get('markdown_imb', 0.0)) if _pr.get('modus') == 'forfaitair' else 0.0)
+                trigger = max(float(trigger or 0.0), _fee + float(_vIc))
+            except Exception as _e:
+                log.warning(f"trigger_netto niet bepaald ({_e}) — trigger blijft {trigger}")
+        log.info(f"PV-curtailment actief (cap op verbruik) — trigger: spot < {trigger:.2f} €/MWh")
         for i in range(N):
             if spot_actual[i] < trigger:
                 potentiele_injectie_kw = pv_kw[i] - consumption_kw[i]  # wat ZOU geïnjecteerd worden
@@ -3390,6 +3422,13 @@ def run_simulation(inp: dict) -> dict:
         cyclus_kost = batt['capex_eur'] / (max_cycli * dod * batt['kwh'])
     else:
         cyclus_kost = 0.0
+    # v1.22.0: expliciete degradatiekost (€/MWh ontladen) wint van de capex-afleiding (EK-modus voorzichtig/volledig).
+    _ckm = batt.get('cyclus_kost_eur_mwh', None)
+    if _ckm is not None:
+        try:
+            cyclus_kost = max(0.0, float(_ckm)) / 1000.0
+        except (TypeError, ValueError):
+            pass
     log.info(f"Cyclus-kost: €{cyclus_kost:.4f}/kWh ontladen")
     # v1.16.0: volledige marginale afname-/injectiekost in de LP (tarieven uit inp['netbeheer']).
     try:
@@ -4024,6 +4063,7 @@ def run_simulation(inp: dict) -> dict:
         # v1.3: curtailment KPIs
         'pv_curtailed_mwh': pv_curtailed_kwh / 1000.0,
         'pv_curtailed_kwartieren': pv_curtailed_kwartieren,
+        'cyclus_kost_eur_mwh': round(cyclus_kost * 1000.0, 2),   # v1.22.0: degradatiekost in de dispatch (€/MWh ontladen)
         'pv_potentiele_productie_mwh': sum(pv_kw_origineel) * 0.25 / 1000.0,
         'vermeden_injectie_kost_eur': vermeden_kost_eur,
         # v1.10.1: batterij-bewuste PV-energiebalans (per-kwartier-routing; somt exact op de productie).
