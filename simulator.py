@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
+#                onbalans-afslag (S1: 11 i.p.v. 15 + 11 €/MWh); ook de drempel voor PV afzetten volgt die ene fee.
 # Versie:        v1.22.0 (2026-10-28, Johan): VERGELIJKING MET VOLTMASTERS (8 KMO-dossiers) — drie expliciete keuzes:
 #                (1) pv_curtailment.trigger_netto: PV-overschot wordt (zonder LP-batterij) afgezet zodra de NETTO injectiewaarde
-#                    negatief is: spot < leveranciersfee injectie (markdown_dam, + markdown_imb in forfaitair) + injectie-nettarief,
+#                    negatief is: spot < leveranciersfee injectie (markdown_dam, of markdown_imb in forfaitair) + injectie-nettarief,
 #                    i.p.v. enkel spot < 0.
 #                (2) batterij.cyclus_kost_eur_mwh: expliciete degradatiekost in de dispatch (overschrijft capex/(cycli×DoD×kWh)).
 #                    EK-modus «voorzichtig» = capex-gebaseerd (± € 48,6/MWh ontladen); «volledig» = 0 (zoals Voltmasters).
@@ -2700,7 +2702,9 @@ def bereken_jaarfactuur(
         nom_inj_kwh_per_kwartier[i] * spot_eur_mwh[i] / 1000.0 for i in range(N)
     )
     # A9. Markdown injectie (positief, want minder inkomst) — op NOMINATIE-volume
-    A['markdown_injectie'] = totaal_nom_inj_mwh * pricing['markdown_dam']
+    # v1.22.1 (Johan 28-10): zonder nominatie (forfaitair) geldt ENKEL de onbalans-afslag (A10) — de DAM-afslag kwam er
+    #   dubbel bovenop (S1: 15 + 11 = 26 €/MWh i.p.v. 11). Contract: «imbalance is fallback wanneer geen nominatie gebeurt».
+    A['markdown_injectie'] = 0.0 if pricing['modus'] == 'forfaitair' else totaal_nom_inj_mwh * pricing['markdown_dam']
     # A10. Imbalance injectie — zelfde logica als A6
     if pricing['modus'] == 'forfaitair':
         A['imbalance_injectie'] = totaal_injectie_mwh * pricing['markdown_imb']
@@ -3373,7 +3377,7 @@ def run_simulation(inp: dict) -> dict:
                 _jvc = float(_c.get('jaarverbruik_mwh', 0.0) or 0.0) or (sum(consumption_kw) * 0.25 / 1000.0 * 35040.0 / max(1, N))
                 _pr = resolve_contract_pricing(_c, _jvc)
                 _, _vIc = _lp_volume_kosten(inp.get('netbeheer', {}).get('tarieven', {}), _jvc)
-                _fee = float(_pr.get('markdown_dam', 0.0)) + (float(_pr.get('markdown_imb', 0.0)) if _pr.get('modus') == 'forfaitair' else 0.0)
+                _fee = float(_pr.get('markdown_imb', 0.0)) if _pr.get('modus') == 'forfaitair' else float(_pr.get('markdown_dam', 0.0))   # v1.22.1: niet dubbel
                 trigger = max(float(trigger or 0.0), _fee + float(_vIc))
             except Exception as _e:
                 log.warning(f"trigger_netto niet bepaald ({_e}) — trigger blijft {trigger}")
