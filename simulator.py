@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.21.1 (2026-10-28, Johan): met gestuurde batterij duwt de gelijktijdige afname/injectie (v1.18.0) de gefactureerde
+#                afname nooit boven max(fysieke afname, max_afname_kw_hard) — het EMS bewaakt de aansluiting (Deca: fictieve 1.702 kW).
 # Versie:        v1.21.0 (2026-10-27, Johan): PIEK-REALISATIE BEGRENSD OP DE AANSLUITING — de 75 %-regel (voorspelfouten) werkt enkel
 #                onder de harde aansluitingsgrens; de gefactureerde maandpiek komt nooit boven max(LP-piek, max_afname_kw_hard).
 # Versie:        v1.20.1 (2026-10-27, Johan): jaarfactuur geeft ook maandpieken_afname_lp_kw door (fysieke LP-pieken vóór de piek-realisatie) — server gebruikt die voor de verzwaring-toets.
@@ -3891,6 +3893,16 @@ def run_simulation(inp: dict) -> dict:
     if _gelijk_mwh > 0:
         log.info(f"Gelijktijdige afname/injectie binnen het kwartier: {_gelijk_mwh:.1f} MWh (factuur: afname én injectie)")
     _f_grid_in = [fysiek_grid_in[i] + _gelijk_kw[i] for i in range(N)] if _gelijk_mwh > 0 else fysiek_grid_in
+    # v1.21.1 (Johan 28-10, Deca): met een gestuurde batterij bewaakt het EMS de AANSLUITING ook binnen het kwartier — de
+    #   gelijktijdige afname mag de afname niet boven max(fysieke afname, max_afname_kw_hard) duwen (de batterij laadt dan
+    #   wat minder). Zonder batterij/sturing ongewijzigd. (Deca: LP op 1.645 kW + gelijktijdig ± 57 kW → fictieve 1.702 kW.)
+    try:
+        _hard_g = float((inp.get('aansluiting') or {}).get('max_afname_kw_hard') or 0.0)
+    except (TypeError, ValueError):
+        _hard_g = 0.0
+    if (_gelijk_mwh > 0 and 0.0 < _hard_g < 1e8 and (batt.get('kw', 0) or 0) > 0
+            and not inp.get('geen_arbitrage', False)):
+        _f_grid_in = [min(_f_grid_in[i], max(fysiek_grid_in[i], _hard_g)) for i in range(N)]
     _f_grid_out = [fysiek_grid_out[i] + _gelijk_kw[i] for i in range(N)] if _gelijk_mwh > 0 else fysiek_grid_out
 
     factuur = bereken_jaarfactuur(
