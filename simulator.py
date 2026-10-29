@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.23.0 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) — laadt over de hele dag uit het net binnen de
-#                vrije aansluiting en levert enkel aan de voertuigen (wagenpark, slim laden); AC-batterij ongewijzigd.
+# Versie:        v1.23.1 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) met doorlopende SOC — levert eerst aan de voertuigen,
+#                laadt daarna (en op rustdagen) bij uit de vrije aansluiting op de goedkoopste kwartieren; AC-batterij ongewijzigd.
 # Versie (vorig): v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
 #                onbalans-afslag (S1: 11 i.p.v. 15 + 11 €/MWh); ook de drempel voor PV afzetten volgt die ene fee.
 # Versie:        v1.22.0 (2026-10-28, Johan): VERGELIJKING MET VOLTMASTERS (8 KMO-dossiers) — drie expliciete keuzes:
@@ -1016,7 +1016,30 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     _dcb = lp_prep.get('dc_buffer') if isinstance(lp_prep, dict) else None
     _dcb_kw = float(_dcb['kw']) if _dcb else 0.0
     _dcb_kwh = float(_dcb['kwh']) if _dcb else 0.0
-    _dcb_budget = {}
+    _dcb_soc = [_dcb_kwh]   # v1.23.1: buffer-SOC loopt door over de dagen (weekend vult de buffer voor maandag), start vol
+
+    def _dcb_bijladen(idxs_dag, pp=None):
+        # Buffer bijladen uit het net op de goedkoopste kwartieren (PV-overschot eerst) van deze dag, binnen de vrije aansluiting
+        # en het buffervermogen. Die netafname is laadenergie voor de voertuigen (komt later uit de buffer) → telt in ev[].
+        if _dcb_kwh <= 0 or modus == 'onmiddellijk' or _dcb_soc[0] >= _dcb_kwh - 1e-9:
+            return 0.0
+        def _p(j):
+            return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
+        tot = 0.0
+        for i in sorted(idxs_dag, key=lambda j: (0 if pv_kw[j] - base_cons_kw[j] > 0 else 1, _p(j))):
+            ruimte = _dcb_kwh - _dcb_soc[0]
+            if ruimte <= 1e-9:
+                break
+            vrij = min(_dcb_kw, _conn_vrij_kw(i))
+            if vrij <= 1e-9:
+                continue
+            take = min(vrij * dt_h, ruimte)
+            ev[i] += take / dt_h
+            if pp is not None:
+                pp['load_kw'][i] += take / dt_h   # telt als laadenergie van dit plein (km-rapportering)
+            _dcb_soc[0] += take
+            tot += take
+        return tot
 
     def _conn_vrij_kw(i):
         # Vrije ruimte onder de AANSLUITING (zonder batterij), na wat al toegewezen is.
@@ -1068,6 +1091,7 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
         wrap = rec.get('wrap', False)
         for dag, idxs in per_dag.items():
             if not _is_laaddag(sim_timestamps[idxs[0]], dpw):
+                _dcb_bijladen(idxs, _pp)   # v1.23.1: rustdag → buffer vullen
                 continue
             if not wrap:
                 # Gewoon dagvenster: vs <= uur < ve op dezelfde dag.
@@ -1096,31 +1120,13 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
                 volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
             resterend = [rec['dag_kwh']]   # in lijst zodat de nested _vul() 'm kan aanpassen
-            # v1.23.0: DC-LAADBUFFER — vóór het venster: de buffer laadt op ELK kwartier van de dag (PV-overschot eerst, dan
-            # goedkoopst) binnen de vrije aansluiting en buffervermogen; die energie gaat later naar de voertuigen in het venster.
-            # Enkel bij slim laden (shift_*), niet bij onmiddellijk/onbeheerst laden.
-            if _dcb_kwh > 0 and modus != 'onmiddellijk':
-                if dag not in _dcb_budget:
-                    _dcb_budget[dag] = _dcb_kwh
-                if _dcb_budget[dag] > 1e-9:
-                    _sur_d = dict((i, max(0.0, pv_kw[i] - base_cons_kw[i])) for i in idxs)
-                    def _prijs_d(j):
-                        return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
-                    _bijdcb = {}
-                    for i in sorted(idxs, key=lambda j: (0 if _sur_d[j] > 0 else 1, _prijs_d(j))):
-                        if resterend[0] <= 1e-9 or _dcb_budget[dag] <= 1e-9:
-                            break
-                        _vrij = min(_dcb_kw - _bijdcb.get(i, 0.0), _conn_vrij_kw(i))
-                        if _vrij <= 1e-9:
-                            continue
-                        take = min(_vrij * dt_h, resterend[0], _dcb_budget[dag])
-                        if take > 0:
-                            ev[i] += take / dt_h
-                            _bijdcb[i] = _bijdcb.get(i, 0.0) + take / dt_h
-                            if _pp is not None:
-                                _pp['load_kw'][i] += take / dt_h
-                            _dcb_budget[dag] -= take
-                            resterend[0] -= take
+            # v1.23.1: DC-LAADBUFFER — eerst levert de buffer (SOC) aan de voertuigen (aan de lader, niet via het net); de rest
+            # laadt zoals gewoonlijk in het venster. Na de dag laadt de buffer bij (zie _dcb_bijladen). Enkel bij slim laden.
+            _dcb_lev = 0.0
+            if _dcb_kwh > 0 and modus != 'onmiddellijk' and _dcb_soc[0] > 1e-9:
+                _dcb_lev = min(_dcb_soc[0], resterend[0])
+                _dcb_soc[0] -= _dcb_lev
+                resterend[0] -= _dcb_lev
             if not _batt_ongebonden and dag not in _batt_budget:
                 _batt_budget[dag] = max(0.0, battery_kwh)   # bruikbare batterij-energie voor deze sessie
             _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
@@ -1162,6 +1168,7 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 tekort_kwh += resterend[0]  # paste niet onder de aansluiting in dit venster
                 if _pp is not None:
                     _pp['tekort_kwh'] += resterend[0]
+            _dcb_bijladen(idxs, _pp)   # v1.23.1: na de laadsessie de buffer bijvullen (vrije aansluiting, goedkoopste kwartieren)
     return ev, tekort_kwh
 
 
