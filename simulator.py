@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
+# Versie:        v1.23.0 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) — laadt over de hele dag uit het net binnen de
+#                vrije aansluiting en levert enkel aan de voertuigen (wagenpark, slim laden); AC-batterij ongewijzigd.
+# Versie (vorig): v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
 #                onbalans-afslag (S1: 11 i.p.v. 15 + 11 €/MWh); ook de drempel voor PV afzetten volgt die ene fee.
 # Versie:        v1.22.0 (2026-10-28, Johan): VERGELIJKING MET VOLTMASTERS (8 KMO-dossiers) — drie expliciete keuzes:
 #                (1) pv_curtailment.trigger_netto: PV-overschot wordt (zonder LP-batterij) afgezet zodra de NETTO injectiewaarde
@@ -951,7 +953,16 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
             bestaand_periode_kwh += periode_kwh
         else:
             nieuw_periode_kwh += periode_kwh
+    # v1.23.0 (Johan 29-10): DC-laadbuffer (batterij op de DC-bus van de lader). Laadt over de HELE dag uit het net (binnen
+    # de vrije aansluiting, zonder de AC-batterij) en levert ENKEL aan de voertuigen van een eigen wagenpark. Niet voor
+    # arbitrage, onbalans of het gebouw — dat doet enkel de AC-batterij (batterijCustom).
+    _dcb = inp.get('dc_buffer') or {}
+    try:
+        _dcb_kwh = max(0.0, float(_dcb.get('kwh', 0) or 0)); _dcb_kw = max(0.0, float(_dcb.get('kw', 0) or 0)) or _dcb_kwh
+    except Exception:
+        _dcb_kwh, _dcb_kw = 0.0, 0.0
     return {
+        'dc_buffer': ({'kw': _dcb_kw, 'kwh': _dcb_kwh} if _dcb_kwh > 0 else None),
         'pleinen': out, 'tot_cap_kw': tot_cap_kw,
         'bestaand_periode_mwh': bestaand_periode_kwh / 1000.0,
         'nieuw_periode_mwh': nieuw_periode_kwh / 1000.0,
@@ -1001,6 +1012,11 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     # None ⇒ ongebonden (oud gedrag: batterij = oneindige energie voor de headroom).
     _batt_ongebonden = (battery_kwh is None)
     _batt_budget = {}
+    # v1.23.0: DC-laadbuffer — dagbudget (kWh) gedeeld over alle wagenpark-pleinen van die dag.
+    _dcb = lp_prep.get('dc_buffer') if isinstance(lp_prep, dict) else None
+    _dcb_kw = float(_dcb['kw']) if _dcb else 0.0
+    _dcb_kwh = float(_dcb['kwh']) if _dcb else 0.0
+    _dcb_budget = {}
 
     def _conn_vrij_kw(i):
         # Vrije ruimte onder de AANSLUITING (zonder batterij), na wat al toegewezen is.
@@ -1080,6 +1096,31 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
                 volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
             resterend = [rec['dag_kwh']]   # in lijst zodat de nested _vul() 'm kan aanpassen
+            # v1.23.0: DC-LAADBUFFER — vóór het venster: de buffer laadt op ELK kwartier van de dag (PV-overschot eerst, dan
+            # goedkoopst) binnen de vrije aansluiting en buffervermogen; die energie gaat later naar de voertuigen in het venster.
+            # Enkel bij slim laden (shift_*), niet bij onmiddellijk/onbeheerst laden.
+            if _dcb_kwh > 0 and modus != 'onmiddellijk':
+                if dag not in _dcb_budget:
+                    _dcb_budget[dag] = _dcb_kwh
+                if _dcb_budget[dag] > 1e-9:
+                    _sur_d = dict((i, max(0.0, pv_kw[i] - base_cons_kw[i])) for i in idxs)
+                    def _prijs_d(j):
+                        return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
+                    _bijdcb = {}
+                    for i in sorted(idxs, key=lambda j: (0 if _sur_d[j] > 0 else 1, _prijs_d(j))):
+                        if resterend[0] <= 1e-9 or _dcb_budget[dag] <= 1e-9:
+                            break
+                        _vrij = min(_dcb_kw - _bijdcb.get(i, 0.0), _conn_vrij_kw(i))
+                        if _vrij <= 1e-9:
+                            continue
+                        take = min(_vrij * dt_h, resterend[0], _dcb_budget[dag])
+                        if take > 0:
+                            ev[i] += take / dt_h
+                            _bijdcb[i] = _bijdcb.get(i, 0.0) + take / dt_h
+                            if _pp is not None:
+                                _pp['load_kw'][i] += take / dt_h
+                            _dcb_budget[dag] -= take
+                            resterend[0] -= take
             if not _batt_ongebonden and dag not in _batt_budget:
                 _batt_budget[dag] = max(0.0, battery_kwh)   # bruikbare batterij-energie voor deze sessie
             _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
