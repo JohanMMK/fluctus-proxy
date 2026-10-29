@@ -313,4 +313,30 @@ async function getProfielAttachments(msgId) {
   return uit;
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, fluctusGraphEnabled };
+// v15.360.0 (Johan 29-10): ANTWOORD-CONCEPT op een bestaande mail (allen beantwoorden), in dezelfde thread. Zoekt de recentste mail
+//   van «van» (sinds «sinds», onderwerp bevat «onderwerp»), maakt een createReplyAll-concept en zet «html» bovenaan (boven het citaat).
+//   Er wordt NIETS verstuurd.
+async function createReplyDraft(mailbox, zoek, html, opts) {
+  const prof = (opts && opts.profiel) === 'fluctus' ? 'fluctus' : undefined;
+  const mb = encodeURIComponent(String(mailbox || _env('GRAPH_MAILBOX')));
+  const van = String((zoek && zoek.van) || '').toLowerCase().replace(/'/g, '');
+  const sinds = String((zoek && zoek.sinds) || '').replace(/[^0-9TZ:.-]/g, '') || new Date(Date.now() - 14 * 864e5).toISOString();
+  const filt = `receivedDateTime ge ${sinds} and from/emailAddress/address eq '${van}'`;
+  const r = await _g(`/users/${mb}/messages?$filter=${encodeURIComponent(filt)}&$top=50&$select=id,subject,receivedDateTime,from`, {}, prof);   // geen $orderby samen met $filter (InefficientFilter) → sorteren in code
+  if (!r.ok) throw new Error('Graph zoeken: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const ond = String((zoek && zoek.onderwerp) || '').toLowerCase();
+  const m = ((await r.json()).value || []).sort((x, y) => String(y.receivedDateTime).localeCompare(String(x.receivedDateTime))).find(x => !ond || String(x.subject || '').toLowerCase().indexOf(ond) >= 0);
+  if (!m) throw new Error('geen mail gevonden van ' + van + (ond ? ' met «' + ond + '»' : ''));
+  const rc = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/createReplyAll`, { method: 'POST', body: '{}' }, prof);
+  if (!rc.ok) throw new Error('Graph createReplyAll: HTTP ' + rc.status + ' ' + (await rc.text().catch(() => '')).slice(0, 200));
+  const d = await rc.json();
+  const oud = (d.body && d.body.content) || '';
+  const nieuw = /<body[^>]*>/i.test(oud) ? oud.replace(/<body([^>]*)>/i, (x) => x + String(html || '')) : (String(html || '') + oud);
+  const rp = await _g(`/users/${mb}/messages/${encodeURIComponent(d.id)}`, { method: 'PATCH', body: JSON.stringify({ body: { contentType: 'HTML', content: nieuw } }) }, prof);
+  if (!rp.ok) throw new Error('Graph concept bijwerken: HTTP ' + rp.status + ' ' + (await rp.text().catch(() => '')).slice(0, 200));
+  const u = await rp.json();
+  return { id: u.id, webLink: u.webLink || null, onderwerp: u.subject || null, antwoord_op: { onderwerp: m.subject, ontvangen: m.receivedDateTime },
+    aan: (u.toRecipients || []).map(x => x.emailAddress && x.emailAddress.address), cc: (u.ccRecipients || []).map(x => x.emailAddress && x.emailAddress.address) };
+}
+
+module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, createReplyDraft, fluctusGraphEnabled };
