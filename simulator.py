@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.23.1 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) met doorlopende SOC — levert eerst aan de voertuigen,
+# Versie:        v1.24.0 (2026-10-30, Johan): emit_edu → profielen + onbalansprijs, benutte/afgezette PV en verbruik per kwartier (markt-edu).
+# Versie (vorig): v1.23.1 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) met doorlopende SOC — levert eerst aan de voertuigen,
 #                laadt daarna (en op rustdagen) bij uit de vrije aansluiting op de goedkoopste kwartieren; AC-batterij ongewijzigd.
 # Versie (vorig): v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
 #                onbalans-afslag (S1: 11 i.p.v. 15 + 11 €/MWh); ook de drempel voor PV afzetten volgt die ene fee.
@@ -4251,6 +4252,14 @@ def run_simulation(inp: dict) -> dict:
                 'batt_ontladen_kw': ([round(p_dis_all[i], 1) for i in range(N)] if len(p_dis_all) >= N else []),
                 'batt_laden_kw':    ([round(p_ch_all[i], 1)  for i in range(N)] if len(p_ch_all)  >= N else []),
             } if _eb else {}),
+            # v1.24.0 (Johan 30-10): MARKT-EDU — extra per-kwartier-reeksen ENKEL op verzoek (emit_edu): onbalansprijs, benutte PV,
+            #   afgezette PV (vóór − na afzetten) en verbruik. Voor de educatieve pagina «Uw profiel op de markt».
+            **({
+                'imb_prijs_eur_mwh': [round(imb_actual[i], 1) for i in range(N)] if len(imb_actual) >= N else [],
+                'pv_kw':             [round(pv_kw[i], 1) for i in range(N)] if len(pv_kw) >= N else [],
+                'pv_afgezet_kw':     [round(max(0.0, pv_kw_origineel[i] - pv_kw[i]), 1) for i in range(N)] if (len(pv_kw_origineel) >= N and len(pv_kw) >= N) else [],
+                'verbruik_kw':       [round(consumption_kw[i], 1) for i in range(N)] if len(consumption_kw) >= N else [],
+            } if inp.get('emit_edu') else {}),
         })(),
         'piekoverschrijdingen': {
             'aantal_zacht': aantal_overschr_zacht,
