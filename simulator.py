@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.24.0 (2026-10-30, Johan): emit_edu → profielen + onbalansprijs, benutte/afgezette PV en verbruik per kwartier (markt-edu).
+# Versie:        v1.25.0 (2026-10-30, Johan): LAADPLEIN-BATTERIJ MET DOORLOPENDE LAADTOESTAND. _bouw_ev_load gaf de batterij elke
+#                dag opnieuw haar volle bruikbare energie (dagbudget), zonder te toetsen of ze de dag ervoor wel kon bijladen.
+#                Gevolg (Sambreville, 8 kW + 10 MWh): de laadvraag paste «elke dag», geen tekort → geen verhoging van de
+#                aansluiting, terwijl 8 kW + winterzon de batterij nooit kunnen vullen (energiebalans sloot niet, ± 350 MWh).
+#                Nu: dagbudget = laadtoestand die doorloopt (start vol), − wat de sessies uit de batterij halen, + wat de vrije
+#                aansluiting + PV-overschot de dag ervoor kunnen bijladen (begrensd door batterijvermogen en -energie, η 0,95
+#                per richting). Vaste-punt-iteratie (max 6) tot de budgetten kloppen. Tekort → de bestaande verhoging van de
+#                aansluiting (wagenpark / bezoekers_leveren) of gemiste sessies. Zonder batterij-energie: ongewijzigd.
+# Versie (vorig): v1.24.0 (2026-10-30, Johan): emit_edu → profielen + onbalansprijs, benutte/afgezette PV en verbruik per kwartier (markt-edu).
 # Versie (vorig): v1.23.1 (2026-10-29, Johan): DC-laadbuffer (inp.dc_buffer {kw,kwh}) met doorlopende SOC — levert eerst aan de voertuigen,
 #                laadt daarna (en op rustdagen) bij uit de vrije aansluiting op de goedkoopste kwartieren; AC-batterij ongewijzigd.
 # Versie (vorig): v1.22.1 (2026-10-28, Johan): leveranciersfee injectie zonder nominatie (forfaitair) niet meer dubbel — enkel de
@@ -976,6 +984,64 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                   connection_kw: float = 1e12, battery_kw: float = 0.0,
                   per_plein_out: list = None, battery_kwh: float = None,
                   grid_first: bool = False):
+    """v1.25.0: wrapper — batterij-energie met DOORLOPENDE laadtoestand over de dagen (zie versieheader).
+    Zonder begrensde batterij (battery_kwh None/0 of battery_kw 0) → exact het oude gedrag."""
+    if battery_kwh is None or battery_kwh <= 0 or battery_kw <= 0:
+        return _bouw_ev_load_kern(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw, modus,
+                                  connection_kw=connection_kw, battery_kw=battery_kw, per_plein_out=per_plein_out,
+                                  battery_kwh=battery_kwh, grid_first=grid_first)
+    N = len(sim_timestamps)
+    dagen = []
+    dag_idx = {}
+    for i, ts in enumerate(sim_timestamps):
+        d = ts.date()
+        if d not in dag_idx:
+            dag_idx[d] = []
+            dagen.append(d)
+        dag_idx[d].append(i)
+    eta = 0.95
+    cap = float(battery_kwh)
+    budget = None   # eerste pass: vol op elke dag (oud gedrag) → toetsen
+    res = None
+    for _it in range(6):
+        uit = {}
+        res = _bouw_ev_load_kern(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw, modus,
+                                 connection_kw=connection_kw, battery_kw=battery_kw, per_plein_out=None,
+                                 battery_kwh=battery_kwh, grid_first=grid_first, _budget_in=budget, _batt_uit=uit)
+        ev = res[0]
+        # haalbare laadtoestand per dag (start vol): E(d+1) = min(cap, E(d) − uit(d)/η + bijladen(d)·η)
+        nieuw = {}
+        E = cap
+        ok = True
+        for d in dagen:
+            nieuw[d] = max(0.0, E)
+            u = uit.get(d, 0.0)
+            if u > nieuw[d] + 1e-3:
+                ok = False
+            E = E - u / eta
+            bij = 0.0
+            for i in dag_idx[d]:
+                vrij = connection_kw + max(0.0, pv_kw[i]) - base_cons_kw[i] - ev[i]
+                if vrij > 1e-9:
+                    bij += min(battery_kw, vrij) * 0.25
+            E = min(cap, max(0.0, E) + bij * eta)
+        if ok and budget is not None:
+            break
+        if ok and budget is None:
+            break
+        budget = nieuw
+    if per_plein_out is not None:
+        res = _bouw_ev_load_kern(lp_prep, sim_timestamps, spot, imb, pv_kw, base_cons_kw, modus,
+                                 connection_kw=connection_kw, battery_kw=battery_kw, per_plein_out=per_plein_out,
+                                 battery_kwh=battery_kwh, grid_first=grid_first, _budget_in=budget)
+    return res
+
+
+def _bouw_ev_load_kern(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
+                  pv_kw: list, base_cons_kw: list, modus: str,
+                  connection_kw: float = 1e12, battery_kw: float = 0.0,
+                  per_plein_out: list = None, battery_kwh: float = None,
+                  grid_first: bool = False, _budget_in: dict = None, _batt_uit: dict = None):
     """Bouw het EV-laadprofiel (kW/kwartier) voor alle laadpleinen samen, CONNECTION-AWARE:
     per kwartier laden we max = min(laadpunt-cap, vrije ruimte onder het toegangsvermogen
     (+ batterij-buffer)). We zetten dus nooit 'ineens alle vermogen' aan.
@@ -1013,6 +1079,11 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
     # None ⇒ ongebonden (oud gedrag: batterij = oneindige energie voor de headroom).
     _batt_ongebonden = (battery_kwh is None)
     _batt_budget = {}
+    def _budget_start(dag):
+        # v1.25.0: zonder _budget_in = oud gedrag (vol op elke dag); anders de doorlopende laadtoestand van de wrapper
+        if _budget_in is not None:
+            return max(0.0, min(float(battery_kwh), float(_budget_in.get(dag, battery_kwh))))
+        return max(0.0, battery_kwh)
     # v1.23.0: DC-laadbuffer — dagbudget (kWh) gedeeld over alle wagenpark-pleinen van die dag.
     _dcb = lp_prep.get('dc_buffer') if isinstance(lp_prep, dict) else None
     _dcb_kw = float(_dcb['kw']) if _dcb else 0.0
@@ -1065,7 +1136,7 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                     continue
                 dag = sim_timestamps[i].date()
                 if not _batt_ongebonden and dag not in _batt_budget:
-                    _batt_budget[dag] = max(0.0, battery_kwh)
+                    _batt_budget[dag] = _budget_start(dag)
                 conn = _conn_vrij_kw(i)
                 uit_grid = min(d, conn); rest = d - uit_grid
                 if _batt_ongebonden:
@@ -1080,6 +1151,8 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                         _pp['load_kw'][i] += served
                     if not _batt_ongebonden:
                         _batt_budget[dag] -= uit_batt * dt_h
+                        if _batt_uit is not None:
+                            _batt_uit[dag] = _batt_uit.get(dag, 0.0) + uit_batt * dt_h
                 gemist = d - served
                 if gemist > 1e-9:
                     tekort_kwh += gemist * dt_h
@@ -1129,7 +1202,7 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                 _dcb_soc[0] -= _dcb_lev
                 resterend[0] -= _dcb_lev
             if not _batt_ongebonden and dag not in _batt_budget:
-                _batt_budget[dag] = max(0.0, battery_kwh)   # bruikbare batterij-energie voor deze sessie
+                _batt_budget[dag] = _budget_start(dag)   # bruikbare batterij-energie voor deze sessie (v1.25.0: doorlopende laadtoestand)
             _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
             def _batt_vrij_kw():
                 if _batt_ongebonden:
@@ -1156,6 +1229,8 @@ def _bouw_ev_load(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
                             # energie boven de vrije aansluiting komt uit de batterij → budget aframen
                             _uit_batt = max(0.0, take - conn_kw * dt_h)
                             _batt_budget[dag] -= _uit_batt
+                            if _batt_uit is not None and _uit_batt > 0:
+                                _batt_uit[dag] = _batt_uit.get(dag, 0.0) + _uit_batt
                         resterend[0] -= take
             if grid_first:
                 # LADDER (Johan 16-08): 1) laad grid-first onder de aansluiting (transfo blijft heilig),
