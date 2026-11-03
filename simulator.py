@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.25.0 (2026-10-30, Johan): LAADPLEIN-BATTERIJ MET DOORLOPENDE LAADTOESTAND. _bouw_ev_load gaf de batterij elke
+# Versie:        v1.26.0 (2026-11-03, Johan): (1) MAXIMUMTARIEF IN DE STURING — bindt de VREG-grens in een maand al passief, dan stuurt de
+#                LP met de echte marginale kost (afname = maximumtarief/MWh, maandpiek-prikkel 0); de batterij drijft de netkost niet meer op.
+#                (2) TOEGANGSVERMOGEN ALS KEUZE (opt-in inp.tv_optimaliseer): laagste contract dat de batterij haalt (+ marge 1 − piek_realisatie),
+#                arbitrage daarbinnen, terug verhogen zolang arbitrage meer oplevert dan het toegangsvermogen kost → output.toegangsvermogen_opt.
+# Versie (vorig): v1.25.0 (2026-10-30, Johan): LAADPLEIN-BATTERIJ MET DOORLOPENDE LAADTOESTAND. _bouw_ev_load gaf de batterij elke
 #                dag opnieuw haar volle bruikbare energie (dagbudget), zonder te toetsen of ze de dag ervoor wel kon bijladen.
 #                Gevolg (Sambreville, 8 kW + 10 MWh): de laadvraag paste «elke dag», geen tekort → geen verhoging van de
 #                aansluiting, terwijl 8 kW + winterzon de batterij nooit kunnen vullen (energiebalans sloot niet, ± 350 MWh).
@@ -1447,6 +1451,98 @@ def _lp_volume_kosten(tarieven: dict, jaar_mwh: float):
     afn += marg
     inj = float(t.get('injectie_proportioneel_eur_mwh', 0.0) or 0.0)
     return max(0.0, afn), max(0.0, inj)
+
+
+# v1.26.0 (Johan 03-11): MAXIMUMTARIEF IN DE STURING. Bindt de VREG-grens (netkost toegangsvermogen + maandpiek + kWh + ODV
+#   + toeslagen ≤ maximumtarief × afgenomen MWh) in een maand al passief (zonder batterij), dan kost elke extra MWh afname die
+#   maand het volle maximumtarief en levert een lagere piek niets op. De LP krijgt dan precies die marginale kosten (volume-
+#   kost = maximumtarief i.p.v. kWh-tarief + ODV + toeslagen, maandpiek-prikkel 0). Zo arbitreert de batterij enkel nog als de
+#   spread het maximumtarief + verliezen dekt — nooit meer een batterij die de netkost opdrijft (GIAX: +€ 3.953).
+def _mt_maand_regime(tarieven: dict, contract_kw: float, cons_m: list, pv_m: list) -> bool:
+    t = tarieven or {}
+    tar_max = float(t.get('maximumtarief_eur_mwh', 0.0) or 0.0)
+    if tar_max <= 0 or not cons_m:
+        return False
+    vol_mt = float(t.get('proportioneel_eur_mwh', 0.0) or 0.0) + float(t.get('odv_eur_mwh', 0.0) or 0.0) \
+             + float(t.get('surcharges_eur_mwh', 0.0) or 0.0)
+    load = [max(0.0, cons_m[i] - (pv_m[i] if pv_m and i < len(pv_m) else 0.0)) for i in range(len(cons_m))]
+    mwh = sum(load) * 0.25 / 1000.0
+    if mwh <= 0:
+        return False
+    piek = max(load) if load else 0.0
+    piek = max(piek, 2.5) if piek > 0 else 0.0
+    kost = (float(contract_kw or 0.0) * float(t.get('toegangsvermogen_eur_kw_jaar', 0.0) or 0.0) / 12.0
+            + piek * float(t.get('maandpiek_eur_kw_jaar', 0.0) or 0.0) / 12.0 + vol_mt * mwh)
+    return kost > tar_max * mwh
+
+
+def _mt_lp_inputs(contract: dict, tarieven: dict, bindend: bool):
+    """(contract, tarieven) voor één maand-LP: ongewijzigd, of met de marginale kosten onder het maximumtarief."""
+    if not bindend:
+        return contract, tarieven
+    t = tarieven or {}
+    vol_mt = float(t.get('proportioneel_eur_mwh', 0.0) or 0.0) + float(t.get('odv_eur_mwh', 0.0) or 0.0) \
+             + float(t.get('surcharges_eur_mwh', 0.0) or 0.0)
+    tar_max = float(t.get('maximumtarief_eur_mwh', 0.0) or 0.0)
+    c2 = dict(contract or {})
+    c2['_lp_vol_afn'] = max(0.0, float(c2.get('_lp_vol_afn', 0.0) or 0.0) - vol_mt + tar_max)
+    t2 = dict(t)
+    t2['maandpiek_eur_kw_jaar'] = 0.0
+    return c2, t2
+
+
+def _contract_kw_van(aansluiting: dict) -> float:
+    a = aansluiting or {}
+    try:
+        v = float(a.get('toegangsvermogen_kw') or a.get('max_afname_kw_hard') or 0.0)
+    except (TypeError, ValueError):
+        v = 0.0
+    return math.ceil(v) if v > 0 else 0.0
+
+
+# v1.26.0 (Johan 03-11): LAAGSTE TOEGANGSVERMOGEN MET DEZE BATTERIJ. Gegeven de netto afname (verbruik − PV) per kwartier:
+#   het kleinste P waarbij de batterij elke afname boven P kan leveren (vermogen én energie), en ze daarna onder P (vrije
+#   ruimte onder P) weer bijlaadt. Start vol. Binair zoeken tussen max(last) − batterijvermogen en max(last).
+def _tv_pmin_kw(load: list, kw_b: float, kwh_b: float, dod: float, rte: float) -> float:
+    if not load:
+        return 0.0
+    p_nat = max(load)
+    if kw_b <= 0 or kwh_b <= 0 or p_nat <= 0:
+        return p_nat
+    usable = kwh_b * (dod if dod <= 1.5 else dod / 100.0)
+    r = rte if rte <= 1.5 else rte / 100.0
+    eta = math.sqrt(r) if r > 0 else 1.0
+
+    def ok(P):
+        soc = usable
+        for L in load:
+            if L > P:
+                need = L - P
+                if need > kw_b + 1e-6:
+                    return False
+                e = need * 0.25 / eta
+                if e > soc + 1e-6:
+                    return False
+                soc -= e
+            else:
+                room = min(kw_b, P - L)
+                if room > 0:
+                    soc = min(usable, soc + room * 0.25 * eta)
+        return True
+
+    lo = max(0.0, p_nat - kw_b)
+    hi = p_nat
+    if ok(lo):
+        return lo
+    for _ in range(30):
+        mid = (lo + hi) / 2.0
+        if ok(mid):
+            hi = mid
+        else:
+            lo = mid
+        if hi - lo < 0.5:
+            break
+    return hi
 
 
 def lp_dispatch_day(
@@ -3217,7 +3313,7 @@ def lp_dispatch_day_stacked(
     return result
 
 
-def run_simulation(inp: dict) -> dict:
+def _run_simulation_kern(inp: dict) -> dict:
     log.info("=== Fluctus Simulator v1.7 — start ===")
 
     rng = random.Random(inp.get('random_seed', 42))
@@ -3542,6 +3638,18 @@ def run_simulation(inp: dict) -> dict:
     consumption_forecast = add_relative_noise(consumption_kw, sf.get('sigma_volume_verbruik_pct', 0), rng)
     pv_forecast = add_relative_noise(pv_kw, sf.get('sigma_volume_pv_pct', 0), rng)
 
+    # v1.26.0: laagste haalbare toegangsvermogen met deze batterij (enkel op vraag van de wrapper run_simulation)
+    _tv_pmin_out = None
+    if inp.get('_tv_pmin_bereken'):
+        try:
+            _b0 = inp.get('batterij') or {}
+            _load0 = [max(0.0, consumption_kw[i] - (pv_kw[i] if i < len(pv_kw) else 0.0)) for i in range(N)]
+            _tv_pmin_out = {'p_min_kw': round(_tv_pmin_kw(_load0, float(_b0.get('kw', 0) or 0), float(_b0.get('kwh', 0) or 0),
+                                                          float(_b0.get('dod_pct', 90) or 90), float(_b0.get('rte_pct', 90) or 90)), 1),
+                            'p_nat_kw': round(max(_load0) if _load0 else 0.0, 1)}
+        except Exception as _e:
+            log.warning(f"tv-pmin niet bepaald: {_e}")
+
     # ---- Cyclus-kost ----
     batt = inp['batterij']
     max_cycli = batt.get('max_cycli', 8000)
@@ -3568,6 +3676,7 @@ def run_simulation(inp: dict) -> dict:
     inp['contract'] = dict(inp['contract'], _lp_vol_afn=_vA, _lp_vol_inj=_vI, _lp_pv_curt=_lp_curt)
     log.info(f"LP-volumekosten: afname +{_vA:.1f} €/MWh, injectie −{_vI:.1f} €/MWh (netkost kWh + heffingen + accijns) · afremmen in LP: {_lp_curt}")
     _pv_curt_arb_all = []   # v1.16.0
+    _mt_lp_maanden = 0      # v1.26.0: maanden waarin de LP met het maximumtarief stuurde
 
     # ---- LP per dag ----
     log.info("LP-dispatch starten (per dag, 96 kwartieren)…")
@@ -3768,6 +3877,10 @@ def run_simulation(inp: dict) -> dict:
                 if _H_maand <= 0:
                     continue
                 _n_dagen_maand = max(1, _H_maand // 96)
+                _mt_b = (not inp.get('_mt_lp_uit')) and _mt_maand_regime(_netbeheer_tarieven, _contract_kw_van(inp['aansluiting']), consumption_kw[i0:i1], pv_kw[i0:i1])   # v1.26.0
+                if _mt_b:
+                    _mt_lp_maanden += 1
+                _c_mb, _t_mb = _mt_lp_inputs(inp['contract'], _netbeheer_tarieven, _mt_b)
 
                 result = lp_dispatch_month_bsp(
                     consumption_kw=consumption_kw[i0:i1],
@@ -3777,11 +3890,11 @@ def run_simulation(inp: dict) -> dict:
                     soc_start_kwh=soc_kwh,
                     batterij=batt,
                     aansluiting=inp['aansluiting'],
-                    contract=inp['contract'],
+                    contract=_c_mb,
                     cyclus_kost_eur_per_kwh=cyclus_kost,
                     paper_capture_rate=paper_capture_rate,
                     pv_curtailment_allowed=pv_curt_allowed,
-                    netbeheer_tarieven=_netbeheer_tarieven,
+                    netbeheer_tarieven=_t_mb,
                     consumption_forecast_kw=consumption_forecast[i0:i1],
                     pv_forecast_kw=pv_forecast[i0:i1],
                     ev_load_kw=(_ev_load[i0:i1] if '_ev_load' in dir() and _ev_load else None),   # v1.11.3: tekort-slack
@@ -3912,6 +4025,10 @@ def run_simulation(inp: dict) -> dict:
                 if _Hm <= 0:
                     continue
                 _nd = max(1, _Hm // 96)
+                _mt_b = (not inp.get('_mt_lp_uit')) and _mt_maand_regime(_netbeheer_arb, _contract_kw_van(inp['aansluiting']), consumption_kw[i0:i1], pv_kw[i0:i1])   # v1.26.0
+                if _mt_b:
+                    _mt_lp_maanden += 1
+                _c_m, _t_m = _mt_lp_inputs(inp['contract'], _netbeheer_arb, _mt_b)
                 result = lp_dispatch_month_arb(
                     consumption_forecast[i0:i1],
                     pv_forecast[i0:i1],
@@ -3919,9 +4036,9 @@ def run_simulation(inp: dict) -> dict:
                     soc_kwh,
                     batt,
                     inp['aansluiting'],
-                    inp['contract'],
+                    _c_m,
                     cyclus_kost,
-                    _netbeheer_arb,
+                    _t_m,
                     imb_eur_mwh=None,
                     ev_load_kw=(_ev_load[i0:i1] if '_ev_load' in dir() and _ev_load else None),   # v1.11.2: tekort-slack op het EV-deel
                 )
@@ -4382,9 +4499,122 @@ def run_simulation(inp: dict) -> dict:
             'periode_volume_mwh': inp['jaarverbruik_mwh'] if is_specifiek else None,
         },
     }
+    output['maximumtarief_lp_maanden'] = _mt_lp_maanden   # v1.26.0
+    if _tv_pmin_out is not None:
+        output['_tv_pmin'] = _tv_pmin_out                  # v1.26.0
 
     log.info("=== Simulator klaar ===")
     return output
+
+
+# v1.26.0 (Johan 03-11): TOEGANGSVERMOGEN ALS KEUZE PER OPSTELLING (opt-in inp['tv_optimaliseer'], enkel met batterij, MS-tarief met
+#   toegangsvermogen > 0, zonder laadplein en met sturing). Volgorde van Johan:
+#   (1) laagste toegangsvermogen waarbij al het verbruik geleverd wordt — zelfconsumptie eerst, batterij voor de pieken (_tv_pmin_kw),
+#       met een veiligheidsmarge = (1 − piek_realisatie) × (natuurlijke piek − minimum) (EMS met voorspellingen, zelfde 75 %-regel);
+#   (2) arbitrage binnen dat contract;
+#   (3) het contract terug laten stijgen (midden, oorspronkelijk) zolang de extra arbitrage meer oplevert dan het toegangsvermogen kost.
+#   De goedkoopste jaarfactuur (excl. btw) wint. Output: toegangsvermogen_opt {contract_kw, gekozen_kw, voorstel_kw, p_min_kw,
+#   p_nat_kw, kandidaten[{kw, subtotaal}], besparing_eur}. Zonder vlag of buiten de voorwaarden: identiek aan v1.25.0.
+TV_MIN_BESPARING = 250.0   # €/jaar: kleiner voordeel → contract behouden
+
+
+def _tv_toepasbaar(inp: dict) -> bool:
+    try:
+        b = inp.get('batterij') or {}
+        t = ((inp.get('netbeheer') or {}).get('tarieven') or {})
+        return (bool(inp.get('tv_optimaliseer')) and float(b.get('kw', 0) or 0) > 0 and float(b.get('kwh', 0) or 0) > 0
+                and float(t.get('toegangsvermogen_eur_kw_jaar', 0) or 0) > 0
+                and not (inp.get('laadpleinen') or []) and not inp.get('geen_arbitrage') and not inp.get('zelfconsumptie_dom')
+                and _contract_kw_van(inp.get('aansluiting')) > 0)
+    except Exception:
+        return False
+
+
+def _met_contract(inp: dict, kw: float) -> dict:
+    import copy as _copy
+    a = _copy.deepcopy(inp)
+    a['tv_optimaliseer'] = False
+    a.pop('_tv_pmin_bereken', None)
+    aa = dict(a.get('aansluiting') or {})
+    aa['max_afname_kw_hard'] = kw
+    aa['toegangsvermogen_kw'] = kw
+    try:
+        if float(aa.get('max_afname_kw_zacht', 1e9) or 1e9) > kw:
+            aa['max_afname_kw_zacht'] = kw
+    except (TypeError, ValueError):
+        aa['max_afname_kw_zacht'] = kw
+    a['aansluiting'] = aa
+    return a
+
+
+def run_simulation(inp: dict) -> dict:
+    if not _tv_toepasbaar(inp):
+        return _run_simulation_kern(inp)
+    import copy as _copy
+    import time as _time
+    _t0 = _time.time()
+    _budget = float(inp.get('tv_budget_s') or 110.0)   # server-time-out is 150 s: extra kandidaten enkel als ze erin passen
+    contract = _contract_kw_van(inp.get('aansluiting'))
+    a0 = _copy.deepcopy(inp)
+    a0['tv_optimaliseer'] = False
+    a0['_tv_pmin_bereken'] = True
+    r0 = _run_simulation_kern(a0)
+    _t_r0 = _time.time() - _t0
+    info = r0.get('_tv_pmin') or {}
+    p_min = float(info.get('p_min_kw') or 0.0)
+    p_nat = float(info.get('p_nat_kw') or 0.0)
+    f = inp.get('piek_realisatie')
+    f = 0.75 if f is None else max(0.0, min(1.0, float(f)))
+    sub = lambda r: float(((r or {}).get('jaarfactuur') or {}).get('subtotaal_excl_btw') or 0.0)
+    kand = [{'kw': contract, 'subtotaal': round(sub(r0), 2)}]
+    out = {'contract_kw': contract, 'gekozen_kw': contract, 'p_min_kw': round(p_min, 1), 'p_nat_kw': round(p_nat, 1),
+           'voorstel_kw': None, 'kandidaten': kand, 'besparing_eur': 0.0, 'piek_realisatie': f}
+    beste, beste_kw = r0, contract
+    if p_min > 0 and p_nat > 0:
+        p_c = float(math.ceil((p_min + (1.0 - f) * max(0.0, p_nat - p_min)) / 5.0) * 5)
+        p_c = min(p_c, contract)
+        out['voorstel_kw'] = p_c
+        if p_c < 0.95 * contract:
+            def _energie(r):
+                try:
+                    return float((((r or {}).get('jaarfactuur') or {}).get('groepen') or {}).get('A_energiekost', {}).get('_subtotaal') or 0.0)
+                except Exception:
+                    return 0.0
+            def _probeer(kw):
+                _dur = max(1.0, _t_r0)
+                if (_time.time() - _t0) + 1.15 * _dur > _budget:
+                    log.warning(f"tv-kandidaat {kw} kW overgeslagen (tijdsbudget {_budget:.0f} s)")
+                    out['budget_overschreden'] = True
+                    return None
+                try:
+                    rk = _run_simulation_kern(_met_contract(inp, kw))
+                except Exception as e:
+                    log.warning(f"tv-kandidaat {kw} kW faalde: {e}")
+                    return None
+                kand.append({'kw': kw, 'subtotaal': round(sub(rk), 2)})
+                return rk
+            res = {}
+            rc = _probeer(p_c)
+            if rc is not None:
+                res[p_c] = rc
+                # (3) terug verhogen enkel als het lagere contract arbitrage kostte (energiekost hoger dan bij het oude contract)
+                p_mid = float(math.ceil(((p_c + contract) / 2.0) / 5.0) * 5)
+                if _energie(rc) > _energie(r0) + 1.0 and p_c + 5 <= p_mid <= contract - 5:
+                    rm = _probeer(p_mid)
+                    if rm is not None:
+                        res[p_mid] = rm
+            # een lager contract enkel als het minstens TV_MIN_BESPARING oplevert (anders geen overschrijdingsrisico voor niets)
+            for kw, rk in sorted(res.items()):
+                if sub(rk) < sub(beste) - (TV_MIN_BESPARING if beste is r0 else 0.5):
+                    beste, beste_kw = rk, kw
+    out['gekozen_kw'] = beste_kw
+    out['besparing_eur'] = round(sub(r0) - sub(beste), 2)
+    out['kandidaten'] = sorted(kand, key=lambda x: x['kw'])
+    beste['toegangsvermogen_opt'] = out
+    beste.pop('_tv_pmin', None)
+    log.info(f"tv-optimalisatie: contract {contract} kW → gekozen {beste_kw} kW (p_min {p_min:.0f}, voorstel {out['voorstel_kw']}) "
+             f"· besparing € {out['besparing_eur']:.0f}/jaar")
+    return beste
 
 
 # =============================================================================
