@@ -19251,7 +19251,8 @@ app.post('/api/ek/factuur-herstel', async (req, res) => {
       if (!ids.length) return res.status(400).json({ ok: false, error: 'mail_ids nodig' });
       const nieuw = []; const gezien = new Set(bestaand.map(f => (f.naam || '') + '|' + (f.bytes || 0)));
       for (const id of ids) {
-        const att = await graphInbound.getPdfAttachments(id);
+        const namen = (Array.isArray(b.namen) ? b.namen : []).map(x => String(x).trim().toLowerCase()).filter(Boolean);   // optioneel: enkel deze bijlagen
+        const att = (await graphInbound.getPdfAttachments(id)).filter(f => !namen.length || namen.includes(String(f.fileName || '').trim().toLowerCase()));
         for (const f of att.slice(0, 5)) {
           if (!f || !f.base64 || f.base64.length > 20 * 1024 * 1024) continue;
           const bytes = Math.floor(f.base64.length * 0.75), sl = (f.fileName || '') + '|' + bytes; if (gezien.has(sl)) continue; gezien.add(sl);
