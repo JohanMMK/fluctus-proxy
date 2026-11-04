@@ -339,4 +339,30 @@ async function createReplyDraft(mailbox, zoek, html, opts) {
     aan: (u.toRecipients || []).map(x => x.emailAddress && x.emailAddress.address), cc: (u.ccRecipients || []).map(x => x.emailAddress && x.emailAddress.address) };
 }
 
-module.exports = { graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, createReplyDraft, fluctusGraphEnabled };
+// v15.398.0 (Johan 04-11): FACTUUR-HERSTEL — zoeken in de dossier-mailbox (alle mappen) en bijlagen oplijsten, enkel lezen.
+async function zoekBerichten(term, top) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const t = String(term || '').replace(/["\\]/g, ' ').trim(); if (t.length < 3) return [];
+  const q = `/users/${mb}/messages?$search=${encodeURIComponent('"' + t + '"')}&$select=id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId&$top=${Math.min(50, top || 25)}`;
+  const r = await _g(q);
+  if (!r.ok) throw new Error('Graph zoek: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return (j.value || []).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
+    aan: (m.toRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(Boolean), ontvangen: m.receivedDateTime || '', bijlage: !!m.hasAttachments, conv: m.conversationId || '' }));
+}
+async function conversatieBerichten(convId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const c = String(convId || '').replace(/'/g, "''"); if (!c) return [];
+  const r = await _g(`/users/${mb}/messages?$filter=${encodeURIComponent("conversationId eq '" + c + "'")}&$select=id,subject,from,receivedDateTime,hasAttachments,conversationId&$top=50`);
+  if (!r.ok) throw new Error('Graph conversatie: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return (j.value || []).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '', ontvangen: m.receivedDateTime || '', bijlage: !!m.hasAttachments, conv: m.conversationId || '' }));
+}
+async function bijlagenInfo(msgId) {
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,size,isInline`);
+  if (!r.ok) throw new Error('Graph bijlagen: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const j = await r.json();
+  return (j.value || []).filter(a => !a.isInline).map(a => ({ naam: a.name || '', type: a.contentType || '', kb: Math.round((+a.size || 0) / 1024) }));
+}
+module.exports = { zoekBerichten, conversatieBerichten, bijlagenInfo, graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, createReplyDraft, fluctusGraphEnabled };
