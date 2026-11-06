@@ -343,20 +343,22 @@ async function createReplyDraft(mailbox, zoek, html, opts) {
 async function zoekBerichten(term, top) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const t = String(term || '').replace(/["\\]/g, ' ').trim(); if (t.length < 3) return [];
-  const q = `/users/${mb}/messages?$search=${encodeURIComponent('"' + t + '"')}&$select=id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId&$top=${Math.min(50, top || 25)}`;
+  const q = `/users/${mb}/messages?$search=${encodeURIComponent('"' + t + '"')}&$select=id,subject,from,toRecipients,receivedDateTime,hasAttachments,conversationId,parentFolderId&$top=${Math.min(50, top || 25)}`;
   const r = await _g(q);
   if (!r.ok) throw new Error('Graph zoek: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
-  return (j.value || []).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
+  let _ax = null; try { _ax = await archiefMapId(false); } catch (e) {}   // v15.407.0: archiefkopieën nooit als factuur-kandidaat
+  return (j.value || []).filter(m => !_ax || m.parentFolderId !== _ax).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
     aan: (m.toRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(Boolean), ontvangen: m.receivedDateTime || '', bijlage: !!m.hasAttachments, conv: m.conversationId || '' }));
 }
 async function conversatieBerichten(convId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   const c = String(convId || '').replace(/'/g, "''"); if (!c) return [];
-  const r = await _g(`/users/${mb}/messages?$filter=${encodeURIComponent("conversationId eq '" + c + "'")}&$select=id,subject,from,receivedDateTime,hasAttachments,conversationId&$top=50`);
+  const r = await _g(`/users/${mb}/messages?$filter=${encodeURIComponent("conversationId eq '" + c + "'")}&$select=id,subject,from,receivedDateTime,hasAttachments,conversationId,parentFolderId&$top=50`);
   if (!r.ok) throw new Error('Graph conversatie: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
-  return (j.value || []).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '', ontvangen: m.receivedDateTime || '', bijlage: !!m.hasAttachments, conv: m.conversationId || '' }));
+  let _ax = null; try { _ax = await archiefMapId(false); } catch (e) {}
+  return (j.value || []).filter(m => !_ax || m.parentFolderId !== _ax).map(m => ({ id: m.id, subject: m.subject || '', from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '', ontvangen: m.receivedDateTime || '', bijlage: !!m.hasAttachments, conv: m.conversationId || '' }));
 }
 async function bijlagenInfo(msgId) {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
@@ -365,4 +367,67 @@ async function bijlagenInfo(msgId) {
   const j = await r.json();
   return (j.value || []).filter(a => !a.isInline).map(a => ({ naam: a.name || '', type: a.contentType || '', kb: Math.round((+a.size || 0) / 1024) }));
 }
-module.exports = { zoekBerichten, conversatieBerichten, bijlagenInfo, graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, createReplyDraft, fluctusGraphEnabled };
+
+// v15.407.0 (Johan 06-11): ARCHIEFKOPIE van een platformmail (Brevo) in de map «Verzonden dossiers» van de dossier-mailbox
+//   (GRAPH_MAILBOX = dossier@). Brevo-mails komen in geen enkele Verzonden items; dit is het spoor in Outlook.
+//   - Map op het hoogste niveau (NIET onder Inbox) → de inbound-poller (enkel Inbox) ziet ze nooit.
+//   - Aangemaakt als VERZONDEN bericht (PR_MESSAGE_FLAGS 0x0E07 = 1, gelezen) → geen concept, kan niet per ongeluk vertrekken.
+//   - Bijlagen: zoveel mogelijk in de aanmaak-call (samen < 2,8 MB base64), de rest erna (POST of upload-sessie).
+//   - Factuur-herstel (zoekBerichten/conversatieBerichten) slaat deze map over.
+const ARCHIEF_MAP = 'Verzonden dossiers';
+let _archiefId = null;
+async function archiefMapId(maak) {
+  if (_archiefId) return _archiefId;
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const r = await _g(`/users/${mb}/mailFolders?$filter=${encodeURIComponent("displayName eq '" + ARCHIEF_MAP + "'")}&$select=id,displayName`);
+  if (r.ok) { const f = ((await r.json()).value || [])[0]; if (f) { _archiefId = f.id; return f.id; } }
+  if (!maak) return null;
+  const c = await _g(`/users/${mb}/mailFolders`, { method: 'POST', body: JSON.stringify({ displayName: ARCHIEF_MAP }) });
+  if (!c.ok) throw new Error('Graph archiefmap: HTTP ' + c.status + ' ' + (await c.text().catch(() => '')).slice(0, 200));
+  _archiefId = (await c.json()).id; return _archiefId;
+}
+async function archiveerVerzonden(o) {
+  o = o || {};
+  const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
+  const fid = await archiefMapId(true);
+  const adr = (x) => ({ emailAddress: { address: String((x && x.mail) || x || ''), ...(x && x.naam ? { name: String(x.naam) } : {}) } });
+  const nu = new Date().toISOString();
+  const att = (Array.isArray(o.bijlagen) ? o.bijlagen : []).filter(a => a && a.contentBytes).slice().sort((a, b) => String(a.contentBytes).length - String(b.contentBytes).length);
+  const mee = [], later = []; let som = 0;
+  for (const a of att) { const n = String(a.contentBytes).length; if (som + n < 2.8 * 1024 * 1024) { mee.push(a); som += n; } else later.push(a); }
+  const fa = (a) => ({ '@odata.type': '#microsoft.graph.fileAttachment', name: String(a.name || 'bijlage.pdf'), contentType: String(a.contentType || 'application/pdf'), contentBytes: String(a.contentBytes) });
+  const msg = {
+    subject: String(o.onderwerp || ''), body: { contentType: 'HTML', content: String(o.html || '') },
+    from: adr(o.van), sender: adr(o.van),
+    toRecipients: (o.aan || []).filter(Boolean).map(adr), bccRecipients: (o.bcc || []).filter(Boolean).map(adr),
+    isRead: true,
+    singleValueExtendedProperties: [{ id: 'Integer 0x0E07', value: '1' }, { id: 'SystemTime 0x0039', value: nu }, { id: 'SystemTime 0x0E06', value: nu }],
+    attachments: mee.map(fa)
+  };
+  const r = await _g(`/users/${mb}/mailFolders/${encodeURIComponent(fid)}/messages`, { method: 'POST', body: JSON.stringify(msg) });
+  if (!r.ok) throw new Error('Graph archief: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
+  const m = await r.json();
+  const res = { id: m.id, map: ARCHIEF_MAP, mailbox: decodeURIComponent(mb), bijlagen: mee.length, ontbreekt: [], fout: null };
+  for (const a of later) {
+    try {
+      const buf = Buffer.from(String(a.contentBytes), 'base64');
+      if (buf.length < 2.9 * 1024 * 1024) {
+        const ra = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments`, { method: 'POST', body: JSON.stringify(fa(a)) });
+        if (!ra.ok) throw new Error('HTTP ' + ra.status + ' ' + (await ra.text().catch(() => '')).slice(0, 200));
+      } else {
+        const rs = await _g(`/users/${mb}/messages/${encodeURIComponent(m.id)}/attachments/createUploadSession`, { method: 'POST',
+          body: JSON.stringify({ AttachmentItem: { attachmentType: 'file', name: String(a.name || 'bijlage.pdf'), size: buf.length, contentType: String(a.contentType || 'application/pdf') } }) });
+        if (!rs.ok) throw new Error('uploadSession HTTP ' + rs.status + ' ' + (await rs.text().catch(() => '')).slice(0, 200));
+        const url = (await rs.json()).uploadUrl, STUK = 327680 * 9;
+        for (let off = 0; off < buf.length; off += STUK) {
+          const deel = buf.subarray(off, Math.min(buf.length, off + STUK));
+          const rp = await fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream', 'Content-Length': String(deel.length), 'Content-Range': `bytes ${off}-${off + deel.length - 1}/${buf.length}` }, body: deel });
+          if (!rp.ok) throw new Error('upload HTTP ' + rp.status);
+        }
+      }
+      res.bijlagen++;
+    } catch (e) { res.ontbreekt.push(String(a.name || '')); res.fout = String(e.message || e).slice(0, 240); }
+  }
+  return res;
+}
+module.exports = { zoekBerichten, conversatieBerichten, bijlagenInfo, graphEnabled, getToken, fetchUnread, fetchRecent, getPdfAttachments, getProfielAttachments, getBody, markRead, moveToFolder, ensureFolder, moveToVerwerkt, sendMail, createDraft, createReplyDraft, fluctusGraphEnabled, archiveerVerzonden, archiefMapId };
