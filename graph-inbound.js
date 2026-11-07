@@ -130,7 +130,7 @@ async function fetchRecent() {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   // v15.184: enkel de INBOX (niet de hele mailbox) → een naar 'Verwerkt' verplaatste mail valt uit de fetch en
   //   kan dus fysiek niet meer opnieuw verwerkt worden (belt-and-suspenders bovenop de verwerkt-lijst + in-proces dedup).
-  const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments&$top=50`;
+  const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments,ccRecipients&$top=50`;   // v15.408.0: + cc (factuurcheck)
   const r = await _g(q);
   if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
@@ -141,6 +141,7 @@ async function fetchRecent() {
       from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
       ontvangen: m.receivedDateTime || '',
       heeftBijlage: !!m.hasAttachments,
+      cc: (m.ccRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(a => a && a.toLowerCase() !== String(_env('GRAPH_MAILBOX')).toLowerCase()),
     }))
     .sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));
 }
@@ -399,7 +400,7 @@ async function archiveerVerzonden(o) {
   const msg = {
     subject: String(o.onderwerp || ''), body: { contentType: 'HTML', content: String(o.html || '') },
     from: adr(o.van), sender: adr(o.van),
-    toRecipients: (o.aan || []).filter(Boolean).map(adr), bccRecipients: (o.bcc || []).filter(Boolean).map(adr),
+    toRecipients: (o.aan || []).filter(Boolean).map(adr), ccRecipients: (o.cc || []).filter(Boolean).map(adr), bccRecipients: (o.bcc || []).filter(Boolean).map(adr),
     isRead: true,
     singleValueExtendedProperties: [{ id: 'Integer 0x0E07', value: '1' }, { id: 'SystemTime 0x0039', value: nu }, { id: 'SystemTime 0x0E06', value: nu }],
     attachments: mee.map(fa)
