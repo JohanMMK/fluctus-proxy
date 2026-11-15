@@ -20,6 +20,15 @@ const txt = (x) => (x == null ? '' : (typeof x === 'object' ? String(x.name || x
 const slug = (s) => String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 const sleutel = (r) => [r.type, slug(r.merk), slug(r.model), slug(r.variant)].join('|');
 const r3 = (x) => Math.round(x * 1000) / 1000;
+// v15.420.1 (Johan 15-11): PRAKTIJKFACTOR. WLTP-verbruik ligt lager dan de praktijk (laadverliezen, snelweg, winter).
+// Voor personen- en bestelwagens, waarvan het verbruik uit WLTP of de constructeur komt, rekenen we met WLTP × 1,2
+// (ENV VOERTUIG_PRAKTIJKFACTOR). Reëel gemeten waarden en vrachtwagens (constructeursverbruik) blijven ongewijzigd.
+// Toegepast bij het serveren, zodat ook al opgeslagen versies meteen de praktijkwaarde geven.
+const PRAKTIJK = Math.max(1, Math.min(2, +process.env.VOERTUIG_PRAKTIJKFACTOR || 1.2));
+function praktijk(r) {
+  const toepassen = (r.type === 'personenwagen' || r.type === 'bestelwagen') && r.kwh_km_bron !== 'reeel_berekend' && r.kwh_km != null;
+  return toepassen ? { kwh_km: r3(r.kwh_km * PRAKTIJK), kwh_km_wltp: r.kwh_km, factor: PRAKTIJK } : { kwh_km: r.kwh_km, kwh_km_wltp: null, factor: 1 };
+}
 
 function typeVanOpenEV(t) {
   t = String(t || '').toLowerCase();
@@ -272,8 +281,9 @@ function createVoertuigen(deps) {
     const per = new Map();
     for (const r of recs) {
       if (!per.has(r.merk)) per.set(r.merk, []);
+      const pk = praktijk(r);
       per.get(r.merk).push({ id: r.id, model: r.model, variant: r.variant || '', label: [r.model, r.variant].filter(Boolean).join(' · '),
-        batt_kwh: r.batt_kwh, batt_soort: r.batt_soort || null, range_km: r.range_km, kwh_km: r.kwh_km, kwh_km_bron: r.kwh_km_bron || null,
+        batt_kwh: r.batt_kwh, batt_soort: r.batt_soort || null, range_km: r.range_km, kwh_km: pk.kwh_km, kwh_km_wltp: pk.kwh_km_wltp, praktijkfactor: pk.factor, kwh_km_bron: r.kwh_km_bron || null,
         ac_kw: r.ac_kw, dc_kw: r.dc_kw, bron: r.bron, bron_url: r.bron_url || null, controle: r.controle || null, opmerking: r.opmerking || null });
     }
     const merken = [...per.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([merk, modellen]) => ({ merk, modellen }));
@@ -284,4 +294,4 @@ function createVoertuigen(deps) {
     huidig: () => { const h = huidig(); return { versie: h.versie, datum: h.datum || null, aantal: h.records.length, openev_tag: h.openev_tag || null }; } };
 }
 
-module.exports = { createVoertuigen, valideerRelease, normOpenEV, merge, plausibel, werkdagNr, laadAanvullend, TYPES };
+module.exports = { praktijk, createVoertuigen, valideerRelease, normOpenEV, merge, plausibel, werkdagNr, laadAanvullend, TYPES };
