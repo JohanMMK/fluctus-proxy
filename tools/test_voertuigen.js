@@ -62,6 +62,10 @@ function mockFetch(mode) {
   assert.strictEqual(vt.huidig().versie, '2026.12-1');
   const es = vt.lijst('bestelwagen').merken.find(m => m.merk === 'Mercedes-Benz').modellen.find(x => x.model === 'eSprinter');
   assert.strictEqual(es.batt_kwh, 113, 'onze tabel wint bij een conflict');
+  assert.strictEqual(es.kwh_km, Math.round(0.258 * 1.2 * 1000) / 1000, 'praktijkfactor 1,2 op WLTP'); assert.strictEqual(es.kwh_km_wltp, 0.258);
+  const tr = vt.lijst('vrachtwagen').merken.find(m => m.merk === 'Mercedes-Benz').modellen.find(x => x.model === 'eActros 600');
+  assert.strictEqual(tr.kwh_km, 1.0, 'vrachtwagens zonder praktijkfactor');
+  console.log('✔ 2b praktijkfactor: eSprinter', es.kwh_km_wltp, '→', es.kwh_km, 'kWh/km; eActros 600 blijft', tr.kwh_km);
   console.log('✔ 2 update geslaagd → actief', vt.huidig().versie, '| eSprinter uit onze tabel:', es.batt_kwh, 'kWh');
   assert.strictEqual(mails.length, 0);
   r = await vt.tick(); assert.strictEqual(r.reden, 'al geslaagd deze maand');
