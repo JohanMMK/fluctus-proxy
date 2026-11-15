@@ -372,7 +372,7 @@
    "kwh_km_bron": "reeel_berekend",
    "ac_kw": 7.4,
    "dc_kw": 47,
-   "opmerking": "Geen WLTP-cijfer (enkel NEDC 190 km). Verbruik = netto batterij ÷ reële actieradius ± 130 km. Range Extender (REx) niet opgenomen.",
+   "opmerking": "Vorige generatie (compacte hatchback, 2013–2022). Geen WLTP-cijfer (enkel NEDC 190 km). Verbruik = netto batterij ÷ reële actieradius ± 130 km. Range Extender (REx) niet opgenomen.",
    "bron": "AEVA, EV fact sheet BMW i3 (sept. 2022): 18,8 kWh bruikbaar, AC 7,4 kW, DC 47 kW, reëel ± 130 km",
    "bron_url": "https://aeva.asn.au/files/122",
    "controle": "te_verifieren"
@@ -389,7 +389,7 @@
    "kwh_km_bron": "wltp_berekend",
    "ac_kw": 11,
    "dc_kw": 50,
-   "opmerking": "Wagens van vóór 2017 hebben deels een AC-lader van 7,4 kW. Range Extender (REx) niet opgenomen.",
+   "opmerking": "Vorige generatie (compacte hatchback, 2013–2022). Wagens van vóór 2017 hebben deels een AC-lader van 7,4 kW. Range Extender (REx) niet opgenomen.",
    "bron": "EVKX, BMW i3 94 Ah (WLTP 235 km, 27,2 kWh netto, DC 50 kW); AC 11 kW volgens AEVA fact sheet",
    "bron_url": "https://evkx.net/models/bmw/i3/i3_94_ah/",
    "controle": "bron"
@@ -408,7 +408,8 @@
    "dc_kw": 50,
    "bron": "BMW Group persmap i3 120 Ah (42,2 / 37,9 kWh, 11 kW AC, 50 kW DC); EVKX (WLTP 310 km)",
    "bron_url": "https://evkx.net/models/bmw/i3/i3_120_ah/",
-   "controle": "bron"
+   "controle": "bron",
+   "opmerking": "Vorige generatie (compacte hatchback, 2013–2022)."
   },
   {
    "type": "personenwagen",
@@ -424,7 +425,42 @@
    "dc_kw": 50,
    "bron": "EVKX, BMW i3s 120 Ah (WLTP 285 km, 37,9 kWh netto, 11 kW AC, 50 kW DC)",
    "bron_url": "https://evkx.net/nl/models/bmw/i3/i3s_120_ah/",
+   "controle": "bron",
+   "opmerking": "Vorige generatie (compacte hatchback, 2013–2022)."
+  },
+  {
+   "type": "personenwagen",
+   "merk": "BMW",
+   "model": "i3",
+   "variant": "50 xDrive (Neue Klasse, 2026)",
+   "batt_kwh": 108.7,
+   "batt_soort": "netto",
+   "range_km": 912,
+   "kwh_km": 0.119,
+   "kwh_km_bron": "wltp_berekend",
+   "ac_kw": 11,
+   "dc_kw": 400,
+   "opmerking": "Elektrische 3 Reeks (sedan), productie vanaf augustus 2026. AC 22 kW als optie. WLTP 814–912 km volgens uitrusting.",
+   "bron": "BMW Group media-informatie 06/2026 (technische gegevens i3 50 xDrive First Edition: 11 kW AC, optie 22 kW, 400 kW DC); EVKX (108,7 kWh netto, WLTP 912 km)",
+   "bron_url": "https://evkx.net/models/bmw/i3/i3_50_xdrive/",
    "controle": "bron"
+  },
+  {
+   "type": "personenwagen",
+   "merk": "BMW",
+   "model": "i3",
+   "variant": "40 xDrive (Neue Klasse, 2026)",
+   "batt_kwh": 82.8,
+   "batt_soort": "netto",
+   "range_km": 710,
+   "kwh_km": 0.117,
+   "kwh_km_bron": "wltp_berekend",
+   "ac_kw": 11,
+   "dc_kw": 300,
+   "opmerking": "Elektrische 3 Reeks (sedan). AC 22 kW als optie. WLTP 631–710 km volgens uitrusting.",
+   "bron": "Electra newsroom op basis van BMW-persberichten juni en september 2026 (82,8 kWh netto, 300 kW DC, 631–710 km WLTP)",
+   "bron_url": "https://www.go-electra.com/en/newsroom/bmw-i3-electric-price-range-and-400-kw-charging/",
+   "controle": "te_verifieren"
   }
  ]
 }
