@@ -19,7 +19,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const VENA_VERSIE = '1.0.0';
+const VENA_VERSIE = '1.0.1';   // 1.0.1: kompasje in de witte chip (logo voor donkere achtergrond was onzichtbaar), eindbeeld zonder adviseur = Energie-Compas, sneller (fonts.ready i.p.v. networkidle)
 const W = 1920, H = 1080, FPS = 30;
 const LOGO = (process.env.EWB_ASSET_BASE || 'https://app.energie-compas.eu') + '/apps/ec-logo-dark.png';
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -28,11 +28,11 @@ async function duur(p) { const o = await run('ffprobe', ['-v', 'error', '-show_e
 
 const TXT = {
   nl: { eb: 'Vraag en antwoord', kop: 'Je vragen, onze antwoorden', vraag: (i) => `Vraag ${i} van 4`, ai: 'Stem gegenereerd met AI', bron: 'Cijfers uit je energierapport · Energie-Compas',
-        eind: 'Bespreek de volgende stap met je adviseur', slot: 'Kort samengevat', advFallback: 'Je adviseur' },
+        eind: 'Bespreek de volgende stap met je adviseur', slot: 'Kort samengevat', advFallback: 'Energie-Compas' },
   fr: { eb: 'Questions et réponses', kop: 'Tes questions, nos réponses', vraag: (i) => `Question ${i} sur 4`, ai: 'Voix générée par IA', bron: 'Chiffres de ton rapport énergétique · Energie-Compas',
-        eind: 'Discute de l’étape suivante avec ton conseiller', slot: 'En bref', advFallback: 'Ton conseiller' },
+        eind: 'Discute de l’étape suivante avec ton conseiller', slot: 'En bref', advFallback: 'Energie-Compas' },
   en: { eb: 'Questions and answers', kop: 'Your questions, our answers', vraag: (i) => `Question ${i} of 4`, ai: 'Voice generated with AI', bron: 'Figures from your energy report · Energie-Compas',
-        eind: 'Discuss the next step with your adviser', slot: 'In short', advFallback: 'Your adviser' }
+        eind: 'Discuss the next step with your adviser', slot: 'In short', advFallback: 'Energie-Compas' }
 };
 const INSTR = {
   nl: 'Je bent een Vlaamse energie-adviseur die een klant persoonlijk de antwoorden uit zijn dossier toelicht. Warm, zelfzeker en helder, rustig tempo met korte natuurlijke pauzes, nadruk op het belangrijkste getal. Nederlands met een Vlaamse tongval. Getallen voluit.',
@@ -93,7 +93,7 @@ const CSS = `*{margin:0;padding:0;box-sizing:border-box}body{width:${W}px;height
 const FONT = '<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;800&display=swap" rel="stylesheet">';
 function kader(inhoud, D, T, cap) {
   return `<!doctype html><html><head><meta charset="utf-8">${FONT}<style>${CSS}</style></head><body>
-<div class="chip"><img src="${LOGO}" style="height:34px">${esc(T.eb)}</div>${inhoud}
+<div class="chip"><svg viewBox="0 0 40 40" width="36" height="36"><circle cx="20" cy="20" r="15" fill="none" stroke="#14203a" stroke-width="3.5"/><polygon points="20,7 23,20 17,20" fill="#05B050"/><polygon points="20,33 23,20 17,20" fill="#14203a"/><circle cx="20" cy="20" r="2.6" fill="#fff" stroke="#14203a" stroke-width="1.5"/></svg>${esc(T.eb)}</div>${inhoud}
 ${cap ? `<div class="cap">${esc(cap)}</div>` : ''}
 <div class="voet"><b>${esc(D.klant || '')}</b>${D.dossier ? ' · ' + esc(D.dossier) : ''} · ${esc(T.bron)}${D.__ai ? ' · ' + esc(T.ai) : ''}</div><div class="band"></div></body></html>`;
 }
@@ -175,7 +175,8 @@ async function _maak(D, o) {
         const lens = zs.map(z => Math.max(8, z.length)), som = lens.reduce((a, x) => a + x, 0);
         for (let z = 0; z < zs.length; z++) {
           const dur = blokDur * lens[z] / som, png = path.join(dir, `s${String(n).padStart(3, '0')}.png`);
-          await page.setContent(b.html(b.tekst ? zs[z] : ''), { waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {});
+          await page.setContent(b.html(b.tekst ? zs[z] : ''), { waitUntil: 'load', timeout: 15000 }).catch(() => {});
+          await page.evaluate(() => document.fonts && document.fonts.ready).catch(() => {});
           await page.screenshot({ path: png, type: 'png' });
           if (!poster && b.id === 'v1') { poster = path.join(dir, 'poster.jpg'); await page.screenshot({ path: poster, type: 'jpeg', quality: 86 }); }
           segs.push({ png, dur, fadeIn: z === 0 }); n++;
