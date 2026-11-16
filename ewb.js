@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.11'; // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.12'; // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -270,15 +270,16 @@ module.exports = function mountEwb(app, opt = {}) {
     // 1. weer in energietermen
     const z = [];
     if (A.weerV) z.push(`Vandaag ${nl0(A.weerV.tmin)} tot ${nl0(A.weerV.tmax)} graden${A.weerV.regen >= 1 ? `, ${nl0(A.weerV.regen)} millimeter regen` : ''}${A.weerV.zonuren >= 1 ? ` en ${nl0(A.weerV.zonuren)} uur zon` : ''}.`);
-    if (A.zonV && A.windV) z.push(`Zon levert ongeveer ${nl0(A.zonV.som / 1000)} gigawattuur, wind gemiddeld ${nl1(A.windV.gem / 1000)} gigawatt.`);
+    // v1.0.12: zon/wind-cijfers staan in de tegels, niet meer uitgesproken
+    if (false && A.zonV && A.windV) z.push(`Zon levert ongeveer ${nl0(A.zonV.som / 1000)} gigawattuur, wind gemiddeld ${nl1(A.windV.gem / 1000)} gigawatt.`);
     if (A.weerV && (A.weerV.tmin + A.weerV.tmax) / 2 < 3) z.push(`Het is koud: reken op meer verbruik voor verwarming.`);
     sc.push({ id: 'weer', titel: 'Weer in energietermen', zinnen: z.length ? z : ['Het weerbericht is vandaag niet beschikbaar.'] });
     // 2. prijzen
     const p = [];
     if (A.gemV != null) {
       p.push(`Stroom kost vandaag gemiddeld ${nl0(A.gemV)} euro per megawattuur${A.gemG != null ? (Math.abs(A.gemV - A.gemG) < 5 ? ', zoals gisteren' : `, ${A.gemV < A.gemG ? 'minder' : 'meer'} dan gisteren`) : ''}.`);
-      if (A.nacht && A.goedkoop) p.push(`Goedkoopst ${tb(A.nacht)}, overdag ${tb(A.goedkoop)}.`);
-      else if (A.goedkoop) p.push(`Het goedkoopst ${tb(A.goedkoop)}, rond ${nl0(A.goedkoop.g)} euro.`);
+      // v1.0.12: goedkope uren enkel in de actie (staan wel in beeld)
+      if (A.goedkoop && !(A.duur)) p.push(`Het goedkoopst ${tb(A.goedkoop)}, rond ${nl0(A.goedkoop.g)} euro.`);
       if (A.duur) p.push(`Het duurst ${tb(A.duur)}, rond ${nl0(A.duur.g)} euro.`);
       if (A.negatief.length) p.push(`Let op: ${A.negatief.length} ${A.negatief.length === 1 ? 'uur' : 'uren'} met een negatieve prijs, vanaf ${dagPre(A.negatief[0])}${uu(A.negatief[0])}.`);
     } else p.push('De day-aheadprijzen van vandaag zijn nog niet beschikbaar.');
@@ -289,7 +290,7 @@ module.exports = function mountEwb(app, opt = {}) {
       n.push(`Het voorbije etmaal: ${nl0(A.mix.nucleair / A.mix.tot * 100)} procent kernenergie, ${nl0(A.mix.gas / A.mix.tot * 100)} procent gas en ${nl0((A.mix.wind + A.mix.zon) / A.mix.tot * 100)} procent wind en zon.`);
       if (A.netImport != null) {
         const grootste = Object.entries(A.grens || {}).sort((a, b) => a[1] - b[1])[0];
-        n.push(A.netImport > 100 ? `België importeerde netto ${nl1(A.netImport / 1000)} gigawatt${grootste && grootste[1] < -100 ? `, vooral uit ${GRENS[grootste[0]] || grootste[0]}` : ''}.` : A.netImport < -100 ? `België exporteerde netto ${nl1(-A.netImport / 1000)} gigawatt.` : 'Import en export hielden elkaar in evenwicht.');
+        if (Math.abs(A.netImport) >= 1500) n.push(A.netImport > 0 ? `België importeerde netto ${nl1(A.netImport / 1000)} gigawatt${grootste && grootste[1] < -100 ? `, vooral uit ${GRENS[grootste[0]] || grootste[0]}` : ''}.` : `België exporteerde netto ${nl1(-A.netImport / 1000)} gigawatt.`);
       }
     }
     if (A.gas && A.gas.ttf) {
@@ -297,9 +298,9 @@ module.exports = function mountEwb(app, opt = {}) {
       const f = A.gasBasis ? A.gas.ttf.prijs / A.gasBasis : null;
       const vgl = f == null ? '' : f >= 1.3 ? `, ${nl1(f)} keer zoveel als begin 2024` : f <= 0.77 ? `, ${nl0((1 - f) * 100)} procent goedkoper dan begin 2024` : ', ongeveer zoals begin 2024';
       n.push(`Gas kost ${nl0(A.gas.ttf.prijs)} euro per megawattuur${vgl}.`);
-      if (o && o.vol_pct != null) n.push(`De Europese gasopslag is voor ${nl0(o.vol_pct)} procent vol${o.vorig_jaar_pct != null ? `, vorig jaar ${nl0(o.vorig_jaar_pct)}` : ''}.`);
+      if (o && o.vol_pct != null && (o.vol_pct < 50 || (o.vorig_jaar_pct != null && Math.abs(o.vol_pct - o.vorig_jaar_pct) >= 15))) n.push(`De Europese gasopslag is voor ${nl0(o.vol_pct)} procent vol${o.vorig_jaar_pct != null ? `, vorig jaar ${nl0(o.vorig_jaar_pct)}` : ''}.`);
     }
-    if (A.check && !A.check.juist) n.push(`Gisteren verwachtten we een ${({ gelijk: 'gelijkaardige', goedkoper: 'goedkopere', duurder: 'duurdere' })[A.check.voorspeld] || 'andere'} dag; het werd ${A.check.werd === 'gelijk' ? 'ongeveer even duur' : A.check.werd}.`);
+    if (A.check && !A.check.juist && A.check.voorspeld !== 'gelijk' && A.check.werd !== 'gelijk') n.push(`Eerlijk is eerlijk: gisteren verwachtten we een ${({ gelijk: 'gelijkaardige', goedkoper: 'goedkopere', duurder: 'duurdere' })[A.check.voorspeld] || 'andere'} dag; het werd ${A.check.werd === 'gelijk' ? 'ongeveer even duur' : A.check.werd}.`);
     sc.push({ id: 'net', titel: 'Net en markt', zinnen: n.length ? n : ['De netgegevens van Elia zijn vandaag niet beschikbaar.'] });
     // 4. actie van de dag — v1.0.8: natuurlijke inleiding + besparing per 100 km (enkel energieprijs, 0,16 kWh/km,
     //   t.o.v. laden op een gemiddeld komend uur; per wagen per jaar bij 15.000 km als je dat elke dag doet)
@@ -307,7 +308,7 @@ module.exports = function mountEwb(app, opt = {}) {
     // v1.0.10: besparing als % op de energiekost per km: gemiddelde van de 4 goedkoopste komende uren t.o.v. de 4 duurste
     { const kom = A.reeks.slice(A.start).filter(x => x != null).sort((x, y) => x - y);
       if (kom.length >= 8) { const lo = gem(kom.slice(0, 4)), hi = gem(kom.slice(-4)); if (hi > 0 && hi - lo > 5) A.besparing = { lo, hi, pct: Math.min(100, (hi - lo) / hi * 100) }; } }
-    const bsp = A.besparing ? (A.besparing.pct >= 100 ? `Wie in de vier goedkoopste uren laadt in plaats van de vier duurste, betaalt zelfs niets voor de energie.` : `Wie in de vier goedkoopste uren laadt in plaats van de vier duurste, bespaart tot ${nl0(A.besparing.pct)} procent op de energiekost per kilometer.`) : null;
+    const bsp = A.besparing ? (A.besparing.pct >= 100 ? `Zo betaal je zelfs niets voor de energie.` : `Zo bespaar je tot ${nl0(A.besparing.pct)} procent op de energiekost per kilometer.`) : null;
     if (A.negatief.length) { a.push(`Wat raden we vandaag aan? Verschuif verbruik en het laden van je vloot naar ${dagPre(A.negatief[0])}${uu(A.negatief[0])} tot ${uu(A.negatief[A.negatief.length - 1] + 1)}, en zet zonnepanelen zonder vaste vergoeding af bij een negatieve prijs.`); if (bsp) a.push(bsp); }
     else if (A.goedkoop && A.duur) {
       a.push(A.nacht ? `Wat raden we vandaag aan? Laad je vloot ${tb(A.nacht)}, of overdag ${tb(A.goedkoop)}.` : `Wat raden we vandaag aan? Laad je elektrische vloot bij voorkeur ${tb(A.goedkoop)}.`);
@@ -318,14 +319,14 @@ module.exports = function mountEwb(app, opt = {}) {
     // 5. morgen + week
     const wk = [];
     const m = A.week[0];
-    if (m) wk.push(`Morgen ${m.tmin != null ? nl0(m.tmin) + ' tot ' + nl0(m.tmax) + ' graden' : ''}${m.windGw != null ? ` en ${nl1(m.windGw)} gigawatt wind` : ''}: we verwachten ${m.richting === 'goedkoper' ? 'een goedkopere' : m.richting === 'duurder' ? 'een duurdere' : 'een gelijkaardige'} stroomdag.`);
+    if (m) wk.push(`Morgen ${m.tmin != null ? nl0(m.tmin) + ' tot ' + nl0(m.tmax) + ' graden' : ''}${m.windGw != null ? ` en ${nl1(m.windGw)} gigawatt wind` : ''}: ${m.richting === 'goedkoper' ? 'een goedkopere' : m.richting === 'duurder' ? 'een duurdere' : 'een gelijkaardige'} stroomdag.`);
     const duur = A.week.slice(1).filter(x => x.richting === 'duurder').map(x => dagNaam(x.datum));
     const goed = A.week.slice(1).filter(x => x.richting === 'goedkoper').map(x => dagNaam(x.datum));
-    if (duur.length) wk.push(`Later deze week ${duur.length === 1 ? 'is vooral ' + duur[0] : 'zijn ' + duur.slice(0, -1).join(', ') + ' en ' + duur[duur.length - 1]} duurder: weinig wind of zon${A.week.some(x => x.tmin != null && x.tmin < 1) ? ' en vrieskou' : ''}.`);
-    else if (goed.length) wk.push(`Later deze week wordt ${goed.join(' en ')} goedkoper dankzij meer wind of zon.`);
+    if (duur.length) wk.push(`Opgelet voor ${duur.length === 1 ? duur[0] : duur.slice(0, -1).join(', ') + ' en ' + duur[duur.length - 1]}: weinig wind of zon${A.week.some(x => x.tmin != null && x.tmin < 1) ? ' en vrieskou' : ''}.`); // v1.0.12: goedkopere dagen later enkel in beeld
+    void goed;
     sc.push({ id: 'week', titel: 'Morgen en de komende dagen', zinnen: wk.length ? wk : ['Het vooruitzicht voor de komende dagen volgt morgen.'] });
     // 6. CTA (vast)
-    sc.push({ id: 'cta', geenCaption: true, naloop: 4, zinnen: ['Wat betekent dit voor jouw bedrijf? Scan de code, voeg je energiefactuur toe en je krijgt een analyse op maat.'] });
+    sc.push({ id: 'cta', geenCaption: true, naloop: 5, zinnen: ['Wat betekent dit voor jouw bedrijf? Scan de code, voeg je energiefactuur toe en je krijgt een analyse op maat.'] });
     return sc;
   }
 
@@ -538,11 +539,66 @@ ${chip}<div class="band"></div>
 </body></html>`;
   }
 
+  // ── v1.0.12: openingsanimatie (kompas uit het logo) + jingle ───────────────────────────────
+  //   Eigen jingle (variant A, zelf gesynthetiseerd, geen samples) in assets/. Begintune onder de animatie,
+  //   daarna zachter onder de stem; eindtune onder het stilstaande eindbeeld.
+  const STING_S = 2.8;
+  const JINGLE_BEGIN = path.join(__dirname, 'assets', 'ewb-begin.mp3');
+  const JINGLE_EINDE = path.join(__dirname, 'assets', 'ewb-einde.mp3');
+  function stingHtml(A) {
+    const LICHT = '#e6edf3', GROEN = '#6bae40';
+    const arc = (a0, a1, r = 172, cx = 240, cy = 245) => { const p = a => [cx + r * Math.cos(a * Math.PI / 180), cy + r * Math.sin(a * Math.PI / 180)]; const [x0, y0] = p(a0), [x1, y1] = p(a1); return `M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 ${((a1 - a0 + 360) % 360) > 180 ? 1 : 0} 1 ${x1.toFixed(1)},${y1.toFixed(1)}`; };
+    return `<!doctype html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;800&display=swap" rel="stylesheet">
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:${W}px;height:${H}px;overflow:hidden;position:relative;font-family:Poppins,'DejaVu Sans',Arial,sans-serif;background:radial-gradient(ellipse at 50% 38%,#22345c 0%,#14203a 62%)}
+#sym{position:absolute;left:${(W - 500) / 2}px;top:250px;width:500px;height:480px;overflow:visible}
+#wm{position:absolute;left:${(W - 738) / 2}px;top:760px;width:738px;height:204px;background:url('${process.env.EWB_ASSET_BASE || 'https://app.energie-compas.eu'}/apps/ec-logo-dark.png') -217.6px 0/955.4px 204px no-repeat;opacity:0}
+#brow{position:absolute;left:0;right:0;top:1010px;text-align:center;opacity:0}
+#brow .a{font-size:34px;font-weight:600;letter-spacing:7px;color:#05B050;text-transform:uppercase}
+#brow .b{font-size:40px;font-weight:800;color:#fff;margin-top:12px}
+.band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050}</style></head><body>
+<svg id="sym" viewBox="0 0 500 480" xmlns="http://www.w3.org/2000/svg">
+<defs><filter id="gl" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter></defs>
+<path class="ring" d="${arc(154, 258)}" stroke="${LICHT}" stroke-width="15" fill="none" stroke-linecap="round" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
+<path class="ring" d="${arc(290, 70)}" stroke="${GROEN}" stroke-width="15" fill="none" stroke-linecap="round" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
+<g fill="${LICHT}"><polygon class="mk" data-o="252,30" points="252,4 228,52 276,52"/><polygon class="mk" data-o="466,242" points="492,242 446,218 446,266"/><polygon class="mk" data-o="252,452" points="252,478 228,430 276,430"/><polygon class="mk" data-o="30,242" points="4,242 50,218 50,266"/></g>
+<g id="nd" opacity="0"><polygon points="0,-158 27,0 -27,0" fill="${GROEN}"/><polygon points="0,164 27,0 -27,0" fill="${LICHT}"/>
+<circle id="glow" r="22" fill="${GROEN}" opacity="0" filter="url(#gl)"/><circle id="hart" r="19" fill="#14203a" stroke="${LICHT}" stroke-width="5"/></g>
+</svg>
+<div id="wm"></div>
+<div id="brow"><div class="a">Energieweerbericht</div><div class="b">${esc(datumLang(A.datum))} · 7u30</div></div>
+<div class="band"></div>
+<script>
+const cl=(x)=>Math.max(0,Math.min(1,x)), eo=(x)=>1-Math.pow(1-cl(x),3), bo=(x)=>{x=cl(x);const c=1.9;return 1+(c+1)*Math.pow(x-1,3)+c*Math.pow(x-1,2);};
+window.setT=function(t){
+  document.querySelectorAll('.ring').forEach((r,i)=>r.setAttribute('stroke-dashoffset',String(1-eo((t-0.05-i*0.08)/0.7))));
+  document.querySelectorAll('.mk').forEach((m,i)=>{const s=bo((t-0.25-i*0.09)/0.3);const [ox,oy]=m.dataset.o.split(',');m.setAttribute('transform','translate('+ox+' '+oy+') scale('+Math.max(0,s)+') translate('+(-ox)+' '+(-oy)+')');});
+  const tau=Math.max(0,t-0.05), hoek=37+560*Math.exp(-2.8*tau)*Math.cos(5.5*tau);
+  const nd=document.getElementById('nd'); nd.setAttribute('opacity',String(cl((t-0.05)/0.2))); nd.setAttribute('transform','translate(240 248) rotate('+hoek.toFixed(2)+')');
+  const p=t>=2.07?Math.exp(-(t-2.07)*5):0; document.getElementById('hart').setAttribute('r',String(19*(1+0.35*p))); document.getElementById('glow').setAttribute('opacity',String(0.9*p)); document.getElementById('glow').setAttribute('r',String(22+40*(1-p)));
+  const w=eo((t-1.15)/0.5), wm=document.getElementById('wm'); wm.style.opacity=w; wm.style.transform='translateY('+(30*(1-w))+'px)';
+  const b=eo((t-1.85)/0.45), br=document.getElementById('brow'); br.style.opacity=b; br.style.transform='translateY('+(24*(1-b))+'px)';
+};window.setT(0);
+</script></body></html>`;
+  }
+  async function renderSting(page, A, dir) {
+    const sd = path.join(dir, 'sting'); fs.mkdirSync(sd, { recursive: true });
+    await page.setContent(stingHtml(A), { waitUntil: 'load', timeout: 10000 }).catch(() => {});
+    const n = Math.round(STING_S * FPS);
+    for (let f = 0; f < n; f++) {
+      await page.evaluate(t => window.setT && window.setT(t), f / FPS);
+      await page.screenshot({ path: path.join(sd, 'f' + String(f).padStart(3, '0') + '.jpg'), type: 'jpeg', quality: 92 });
+    }
+    const out = path.join(dir, 'sting.mp4'), tmp = path.join(dir, 'sting.tmp.mp4');
+    await run('ffmpeg', ['-y', '-framerate', String(FPS), '-i', path.join(sd, 'f%03d.jpg'), '-vf', `format=yuv420p,fade=t=out:st=${(STING_S - 0.3).toFixed(2)}:d=0.3`, '-r', String(FPS), '-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', tmp]);
+    fs.renameSync(tmp, out); return out;
+  }
+
   // ── render ─────────────────────────────────────────────────────────────────────────────────
   async function render(d, A, script, dir) {
     const puppeteer = require('puppeteer-core');
     const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', args: ['--no-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'] });
-    const segs = [], audios = []; let metStem = null, ttsFout = null;
+    const segs = [], audios = []; let metStem = null, ttsFout = null, stingMp4 = null;
     try {
       const page = await browser.newPage(); await page.setViewport({ width: W, height: H });
       let i = 0;
@@ -580,9 +636,11 @@ ${chip}<div class="band"></div>
           i++;
         }
       }
+      try { stingMp4 = await renderSting(page, A, dir); } catch (e) { log('sting fout → zonder:', e.message); stingMp4 = null; }
     } finally { await browser.close().catch(() => {}); }
     // segmenten (zelfde encoder-instellingen), concat, audio
-    const lijst = [];
+    const lijst = []; const S = stingMp4 ? STING_S : 0;
+    if (stingMp4) lijst.push(`file '${stingMp4}'`);
     for (const s of segs) {
       const out = path.join(dir, s.nm + '.mp4'), tmp = path.join(dir, s.nm + '.tmp.mp4');
       const vf = `format=yuv420p,loop=-1:1,trim=duration=${s.dur.toFixed(3)}${s.fadeIn ? ',fade=t=in:st=0:d=0.35' : ''},setpts=PTS-STARTPTS`;
@@ -593,17 +651,35 @@ ${chip}<div class="band"></div>
     const stil = path.join(dir, 'video_stil.mp4');
     await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', lf, '-c', 'copy', stil]);
     const eind = path.join(dir, 'video.mp4');
-    if (metStem && audios.length === script.length) {
+    const T = S + segs.reduce((a, s) => a + s.dur, 0);
+    const stemOk = metStem && audios.length === script.length;
+    let wav = null;
+    if (stemOk) {
       // audio per blok, opgevuld tot de blokduur (incl. naloop)
       const al = [];
       for (const a of audios) { const o = a.ap.replace('.mp3', '.wav'); await run('ffmpeg', ['-y', '-i', a.ap, '-af', `apad,atrim=0:${a.dur.toFixed(3)}`, '-ar', '44100', '-ac', '2', o]); al.push(`file '${o}'`); }
       const af = path.join(dir, 'alijst.txt'); fs.writeFileSync(af, al.join('\n'));
-      const wav = path.join(dir, 'stem.wav'); await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', af, '-c', 'copy', wav]);
-      await run('ffmpeg', ['-y', '-i', stil, '-i', wav, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '128k', '-shortest', '-movflags', '+faststart', eind]);
+      wav = path.join(dir, 'stem.wav'); await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', af, '-c', 'copy', wav]);
+    }
+    const muziek = fs.existsSync(JINGLE_BEGIN) && fs.existsSync(JINGLE_EINDE) && process.env.EWB_JINGLE !== 'uit';
+    if (wav || muziek) {
+      const inp = ['-y', '-i', stil];
+      inp.push(...(wav ? ['-i', wav] : ['-f', 'lavfi', '-t', T.toFixed(3), '-i', 'anullsrc=r=44100:cl=stereo']));
+      let fc = `[1:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay=${Math.round(S * 1000)}|${Math.round(S * 1000)},apad,atrim=0:${T.toFixed(3)}[v]`, mix = '[v]', k = 1;
+      if (muziek) {
+        const naloop = (script[script.length - 1].naloop || 0), eStart = Math.max(0, T - 5.5), stemEind = T - naloop;
+        inp.push('-i', JINGLE_BEGIN, '-i', JINGLE_EINDE);
+        const s0 = Math.max(0.5, S - 0.3);
+        fc += `;[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=eval=frame:volume='if(lt(t,${s0.toFixed(2)}),1,max(0.18,1-(t-${s0.toFixed(2)})/0.6*0.82))'[b]`;
+        fc += `;[3:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay=${Math.round(eStart * 1000)}|${Math.round(eStart * 1000)},volume=eval=frame:volume='if(lt(t,${stemEind.toFixed(2)}),0.3,min(1,0.3+(t-${stemEind.toFixed(2)})/0.4*0.7))'[e]`;
+        mix += '[b][e]'; k = 3;
+      }
+      fc += k > 1 ? `;${mix}amix=inputs=${k}:duration=first:normalize=0,alimiter=limit=0.95[a]` : `;[v]anull[a]`;
+      await run('ffmpeg', [...inp, '-filter_complex', fc, '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', T.toFixed(3), '-movflags', '+faststart', eind]);
     } else {
       await run('ffmpeg', ['-y', '-i', stil, '-c', 'copy', '-movflags', '+faststart', eind]);
     }
-    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: segs.reduce((a, s) => a + s.dur, 0), metStem: !!(metStem && audios.length === script.length), ttsFout };
+    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: T, metStem: !!stemOk, ttsFout, jingle: muziek, sting: !!stingMp4 };
   }
 
   // ── mail (Brevo) ───────────────────────────────────────────────────────────────────────────
