@@ -19,7 +19,8 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const VENA_VERSIE = '1.0.1';   // 1.0.1: kompasje in de witte chip (logo voor donkere achtergrond was onzichtbaar), eindbeeld zonder adviseur = Energie-Compas, sneller (fonts.ready i.p.v. networkidle)
+const VENA_VERSIE = '1.0.2';   // 1.0.2: ondertitels knippen niet meer in getallen met een punt (3.842, € 117.200)
+//// 1.0.1: kompasje in de witte chip (logo voor donkere achtergrond was onzichtbaar), eindbeeld zonder adviseur = Energie-Compas, sneller (fonts.ready i.p.v. networkidle)
 const W = 1920, H = 1080, FPS = 30;
 const LOGO = (process.env.EWB_ASSET_BASE || 'https://app.energie-compas.eu') + '/apps/ec-logo-dark.png';
 const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -62,7 +63,7 @@ function spreek(t, lang) {
   s = s.replace(/’s nachts/g, 's nachts');
   return s.trim();
 }
-function zinnen(t) { return String(t || '').match(/[^.!?;]+[.!?;]?/g)?.map(x => x.trim()).filter(Boolean) || []; }
+function zinnen(t) { return String(t || '').split(/(?<=[.!?;])\s+/).map(x => x.trim()).filter(Boolean); }   // 1.0.2: niet knippen in 3.842 / 117.200
 
 // ── iconen (eigen tekeningen, lijnstijl) ───────────────────────────────────────────────────────
 function icoon(k) {
