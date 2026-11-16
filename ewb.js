@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.0';
+const EWB_VERSIE = '1.0.1'; // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -214,16 +214,16 @@ module.exports = function mountEwb(app, opt = {}) {
     // 1. weer in energietermen
     const z = [];
     if (A.weerV) z.push(`Vandaag ${nl0(A.weerV.tmin)} tot ${nl0(A.weerV.tmax)} graden${A.weerV.regen >= 1 ? `, ${nl0(A.weerV.regen)} millimeter regen` : ''}${A.weerV.zonuren >= 1 ? ` en ${nl0(A.weerV.zonuren)} uur zon` : ''}.`);
-    if (A.zonV && A.windV) z.push(`Zonnepanelen leveren in België ongeveer ${nl0(A.zonV.som / 1000)} gigawattuur, de wind gemiddeld ${nl1(A.windV.gem / 1000)} gigawatt.`);
+    if (A.zonV && A.windV) z.push(`Zon levert ongeveer ${nl0(A.zonV.som / 1000)} gigawattuur, wind gemiddeld ${nl1(A.windV.gem / 1000)} gigawatt.`);
     if (A.weerV && (A.weerV.tmin + A.weerV.tmax) / 2 < 3) z.push(`Het is koud: reken op meer verbruik voor verwarming.`);
     sc.push({ id: 'weer', titel: 'Weer in energietermen', zinnen: z.length ? z : ['Het weerbericht is vandaag niet beschikbaar.'] });
     // 2. prijzen
     const p = [];
     if (A.gemV != null) {
       p.push(`Stroom kost vandaag gemiddeld ${nl0(A.gemV)} euro per megawattuur${A.gemG != null ? (Math.abs(A.gemV - A.gemG) < 5 ? ', zoals gisteren' : `, ${A.gemV < A.gemG ? 'minder' : 'meer'} dan gisteren`) : ''}.`);
-      if (A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15) p.push(`Het goedkoopst is het 's nachts, tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}, rond ${nl0(A.nacht.g)} euro; overdag tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}, rond ${nl0(A.goedkoop.g)} euro.`);
+      if (A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15) p.push(`Goedkoopst 's nachts tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}, overdag tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
       else if (A.goedkoop) p.push(`Overdag is het goedkoopst tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}, rond ${nl0(A.goedkoop.g)} euro.`);
-      if (A.duur) p.push(`Het duurste blok valt tussen ${uu(A.duur.van)} en ${uu(A.duur.tot)}, rond ${nl0(A.duur.g)} euro.`);
+      if (A.duur) p.push(`Het duurst tussen ${uu(A.duur.van)} en ${uu(A.duur.tot)}, rond ${nl0(A.duur.g)} euro.`);
       if (A.negatief.length) p.push(`Let op: ${A.negatief.length} ${A.negatief.length === 1 ? 'uur' : 'uren'} met een negatieve prijs, vanaf ${uu(A.negatief[0])}.`);
     } else p.push('De day-aheadprijzen van vandaag zijn nog niet beschikbaar.');
     sc.push({ id: 'prijs', titel: 'Stroomprijs vandaag', zinnen: p });
@@ -246,15 +246,15 @@ module.exports = function mountEwb(app, opt = {}) {
     const a = [];
     if (A.negatief.length) a.push(`Actie van de dag: verschuif verbruik en het laden van je vloot naar ${uu(A.negatief[0])} tot ${uu(A.negatief[A.negatief.length - 1] + 1)}, en zet zonnepanelen zonder vaste vergoeding af bij een negatieve prijs.`);
     else if (A.goedkoop && A.duur) {
-      if (A.nacht && A.nacht.g < A.goedkoop.g - 15) a.push(`Actie van de dag: laad wagens die 's nachts op de site staan tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}; wie overdag laadt, doet dat best tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
+      if (A.nacht && A.nacht.g < A.goedkoop.g - 15) a.push(`Actie van de dag: laad 's nachts tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}, overdag tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
       else a.push(`Actie van de dag: laad je elektrische vloot bij voorkeur tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
-      a.push(`Heb je een batterij? Zorg dat ze vol is vóór ${uu(A.duur.van)} en ontlaad tijdens het duurste blok.`);
+      a.push(`Batterij vol vóór ${uu(A.duur.van)}, ontladen tijdens het duurste blok.`);
     } else a.push('Actie van de dag: vandaag geen uitgesproken goedkope of dure uren; houd je normale planning aan.');
     sc.push({ id: 'actie', titel: 'Actie van de dag', zinnen: a });
     // 5. morgen + week
     const wk = [];
     const m = A.week[0];
-    if (m) wk.push(`Morgen: ${m.tmin != null ? nl0(m.tmin) + ' tot ' + nl0(m.tmax) + ' graden' : ''}${m.windGw != null ? `, wind gemiddeld ${nl1(m.windGw)} gigawatt` : ''}. We verwachten ${m.richting === 'goedkoper' ? 'een goedkopere' : m.richting === 'duurder' ? 'een duurdere' : 'een gelijkaardige'} stroomdag.`);
+    if (m) wk.push(`Morgen ${m.tmin != null ? nl0(m.tmin) + ' tot ' + nl0(m.tmax) + ' graden' : ''}${m.windGw != null ? ` en ${nl1(m.windGw)} gigawatt wind` : ''}: we verwachten ${m.richting === 'goedkoper' ? 'een goedkopere' : m.richting === 'duurder' ? 'een duurdere' : 'een gelijkaardige'} stroomdag.`);
     const duur = A.week.slice(1).filter(x => x.richting === 'duurder').map(x => dagNaam(x.datum));
     const goed = A.week.slice(1).filter(x => x.richting === 'goedkoper').map(x => dagNaam(x.datum));
     if (duur.length) wk.push(`Later deze week ${duur.length === 1 ? 'is vooral ' + duur[0] : 'zijn ' + duur.slice(0, -1).join(', ') + ' en ' + duur[duur.length - 1]} duurder: weinig wind of zon${A.week.some(x => x.tmin != null && x.tmin < 1) ? ' en vrieskou' : ''}.`);
@@ -270,7 +270,7 @@ module.exports = function mountEwb(app, opt = {}) {
     const prov = (process.env.TTS_PROVIDER || '').toLowerCase();
     if (prov === 'openai' && process.env.OPENAI_API_KEY) {
       const r = await fetch('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: process.env.OPENAI_TTS_VOICE || 'cedar', input: tekst, response_format: 'mp3', instructions: 'Spreek Nederlands zoals een Vlaamse nieuwslezer: rustig, helder, zakelijk, niet te snel. Getallen voluit.' }) });
+        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: process.env.OPENAI_TTS_VOICE || 'cedar', input: tekst, response_format: 'mp3', instructions: 'Spreek Nederlands zoals een Vlaamse radionieuwslezer: helder, zakelijk en in een vlot tempo, zonder lange pauzes. Getallen voluit.' }) });
       if (!r.ok) throw new Error('openai tts ' + r.status + ' ' + (await r.text()).slice(0, 200));
       fs.writeFileSync(uitPad, Buffer.from(await r.arrayBuffer())); return true;
     }
@@ -394,14 +394,20 @@ ${chip}<div class="band"></div>
       let i = 0;
       for (const sc of script) {
         for (let z = 0; z < sc.zinnen.length; z++) {
-          const spreek = sc.zinnen[z], toon = (sc.tekst && sc.tekst[z]) || spreek;
+          const toon = (sc.tekst && sc.tekst[z]) || sc.zinnen[z];
+          const spreek = sc.zinnen[z].replace(/\b(\d{1,2})u\b/g, '$1 uur').replace(/\b(\d{1,2}) uur en (\d{1,2}) uur\b/g, '$1 en $2 uur');
           const nm = String(i).padStart(3, '0');
           // stem
           let dur = Math.max(2.4, spreek.split(/\s+/).length / 2.8 + 0.5); // leestempo zonder stem
           if (metStem !== false) {
             try {
               const ap = path.join(dir, nm + '.mp3');
-              if (await tts(spreek, ap)) { metStem = true; dur = (await duur(ap)) + 0.35; audios.push({ ap, dur }); } else metStem = false;
+              if (await tts(spreek, ap)) {
+                metStem = true;
+                const tempo = Math.min(1.35, Math.max(1, +process.env.EWB_TEMPO || 1.15)); // iets vlotter, zelfde toonhoogte
+                if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
+                dur = (await duur(ap)) + 0.2; audios.push({ ap, dur });
+              } else metStem = false;
             } catch (e) { ttsFout = e.message; metStem = false; log('tts fout → zonder stem:', e.message); }
           }
           if (metStem === false && audios.length) { audios.length = 0; } // consistent: geen half-stem
