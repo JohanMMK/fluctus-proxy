@@ -4,7 +4,7 @@ FROM node:22-bookworm
 # Install Python 3 + pip + Chromium (server-side PDF-render van het klantrapport, v15.200) via apt
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip \
-      chromium fonts-liberation fonts-dejavu-core ca-certificates && \
+      chromium fonts-liberation fonts-dejavu-core fonts-noto-color-emoji ffmpeg ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Puppeteer-core gebruikt de systeem-Chromium (geen eigen download)
@@ -24,7 +24,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages -r requirement
 # ── CACHE-BUST (2026-09-23): verhoog APP_CACHEBUST om een VERSE COPY van de app-bestanden
 # te forceren. Railway hergebruikte de 'COPY . .'-laag met verouderde graph-inbound.js;
 # deze RUN met wisselende waarde invalideert die laag zodat de nieuwste bestanden mee gaan.
-ARG APP_CACHEBUST=2026-10-07-onderhandelnota-energiepost-v152531
+ARG APP_CACHEBUST=2026-11-16-ewb-ffmpeg
 RUN echo "app cache-bust ${APP_CACHEBUST}"
 
 # Copy rest of app (server.js, graph-inbound.js, simulator.py, data/)
