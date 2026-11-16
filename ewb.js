@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.2'; // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.3'; // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -240,7 +240,7 @@ module.exports = function mountEwb(app, opt = {}) {
       const o = A.gas.opslag && A.gas.opslag.eu;
       n.push(`Gas kost ${nl0(A.gas.ttf.prijs)} euro per megawattuur${o && o.vol_pct != null ? `, de Europese gasopslag is voor ${nl0(o.vol_pct)} procent vol${o.vorig_jaar_pct != null ? ` (vorig jaar ${nl0(o.vorig_jaar_pct)})` : ''}` : ''}.`);
     }
-    if (A.check) n.push(A.check.juist ? `Onze verwachting van gisteren klopte.` : `Gisteren verwachtten we een ${A.check.voorspeld === 'gelijk' ? 'gelijkaardige' : A.check.voorspeld} dag; het werd ${A.check.werd === 'gelijk' ? 'ongeveer even duur' : A.check.werd}.`);
+    if (A.check && !A.check.juist) n.push(`Gisteren verwachtten we een ${A.check.voorspeld === 'gelijk' ? 'gelijkaardige' : A.check.voorspeld} dag; het werd ${A.check.werd === 'gelijk' ? 'ongeveer even duur' : A.check.werd}.`);
     sc.push({ id: 'net', titel: 'Net en markt', zinnen: n.length ? n : ['De netgegevens van Elia zijn vandaag niet beschikbaar.'] });
     // 4. actie van de dag
     const a = [];
@@ -466,7 +466,7 @@ ${chip}<div class="band"></div>
             const ap = path.join(dir, 'blok' + String(i).padStart(3, '0') + '.mp3');
             if (await tts(spreek.join(' '), ap)) {
               metStem = true;
-              const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.06));
+              const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.15));
               if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
               blokDur = (await duur(ap)) + 0.35; audio = ap;
             } else metStem = false;
