@@ -286,7 +286,7 @@ module.exports = function mountEwb(app, opt = {}) {
   async function duur(p) { const o = await run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', p]); return parseFloat(o) || 0; }
 
   // ── beelden (SVG/HTML) ─────────────────────────────────────────────────────────────────────
-  const C = { bg: '#0f1d33', kaart: '#16294a', tekst: '#e9eef5', grijs: '#93a3b8', groen: '#05B050', blauw: '#4ea1ff', oranje: '#f0a500', rood: '#f85149', paars: '#a371f7', windG: '#39d353', water: '#388bfd', cyan: '#56d4dd' };
+  const C = { bg: '#14203a', kaart: '#1c2b4d', tekst: '#ffffff', grijs: '#b9c4d6', groen: '#05B050', blauw: '#4ea1ff', oranje: '#f0a500', rood: '#f85149', paars: '#a371f7', windG: '#39d353', water: '#388bfd', cyan: '#56d4dd' };
   function prijsSvg(A, w, h) {
     const reeks = A.pVandaag.concat(A.morgenBekend ? A.pMorgen : []);
     const vals = reeks.filter(x => x != null); if (!vals.length) return '';
@@ -329,7 +329,7 @@ module.exports = function mountEwb(app, opt = {}) {
   const ICOON = { goedkoper: '▼', duurder: '▲', gelijk: '■' };
   const KLEUR = { goedkoper: C.groen, duurder: C.rood, gelijk: C.grijs };
   function scenePaneel(id, A, d) {
-    if (id === 'intro') return `<div class="groot">Energie&shy;weerbericht</div><div class="sub">${esc(datumLang(A.datum))}</div><div class="sub2">Elke werkdag om 7u30 · stroom, weer en markt voor je bedrijf</div>`;
+    if (id === 'intro') return `<div class="groot">Wat doet de stroom${A.gemV != null ? ' vandaag' : ''}?</div><div class="sub2">Elke werkdag om 7u30.<br>Stroomprijs, weer en markt in 90 seconden.<br>En wat je er vandaag mee doet.</div>`;
     if (id === 'weer') {
       const w = A.weerV || {}; const kv = [['Temperatuur', w.tmin != null ? `${nl0(w.tmin)}–${nl0(w.tmax)} °C` : '—'], ['Zon (PV België)', A.zonV ? `${nl0(A.zonV.som / 1000)} GWh` : '—'], ['Wind gemiddeld', A.windV ? `${nl1(A.windV.gem / 1000)} GW` : '—'], ['Neerslag', w.regen != null ? `${nl0(w.regen)} mm` : '—']];
       return `<div class="grid">${kv.map(([k, v]) => `<div class="tegel"><div class="tl">${k}</div><div class="tv">${v}</div></div>`).join('')}</div>`;
@@ -339,31 +339,48 @@ module.exports = function mountEwb(app, opt = {}) {
       const g = A.gas && A.gas.ttf, o = A.gas && A.gas.opslag && A.gas.opslag.eu;
       return `${mixSvg(d, 960, 470)}<div class="leg">${[['kern', C.paars], ['gas', C.rood], ['wind', C.windG], ['zon', C.oranje], ['water', C.water], ['opslag', C.cyan]].map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join('')}</div><div class="kpi">${g ? `<span>TTF gas <b>${nl0(g.prijs)} €/MWh</b></span>` : ''}${o && o.vol_pct != null ? `<span>EU-gasopslag <b>${nl0(o.vol_pct)}%</b>${o.vorig_jaar_pct != null ? ` (vorig jaar ${nl0(o.vorig_jaar_pct)}%)` : ''}</span>` : ''}</div>`;
     }
-    if (id === 'actie') return `<div class="actie">${A.negatief.length ? `⚡ ${uu(A.negatief[0])}–${uu(A.negatief[A.negatief.length - 1] + 1)}` : A.goedkoop ? `🔌 ${uu(A.goedkoop.van)}–${uu(A.goedkoop.tot)}` : '—'}</div><div class="sub2">${A.duur && !A.negatief.length ? `🔋 vol vóór ${uu(A.duur.van)}` : ''}</div>`;
+    if (id === 'actie') return `${!A.negatief.length && A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? `<div class="actie">🌙 ${uu(A.nacht.van)}–${uu(A.nacht.tot)}</div>` : ''}<div class="actie">${A.negatief.length ? `⚡ ${uu(A.negatief[0])}–${uu(A.negatief[A.negatief.length - 1] + 1)}` : A.goedkoop ? `🔌 ${uu(A.goedkoop.van)}–${uu(A.goedkoop.tot)}` : '—'}</div><div class="sub2">${A.duur && !A.negatief.length ? `🔋 vol vóór ${uu(A.duur.van)}` : ''}</div>`;
     if (id === 'week') return `<div class="week">${A.week.map(x => `<div class="wd"><div class="wn">${x.dag}</div><div class="wt">${x.tmin != null ? nl0(x.tmin) + '/' + nl0(x.tmax) + '°' : '—'}</div><div class="wv">💨 ${x.windGw != null ? nl1(x.windGw) : '—'}</div><div class="wv">☀️ ${x.zonGwh != null ? nl0(x.zonGwh) : '—'}</div><div class="wr" style="color:${KLEUR[x.richting]}">${ICOON[x.richting]}</div></div>`).join('')}</div><div class="sub2">💨 wind GW · ☀️ zon GWh · ▼ goedkoper ▲ duurder dan vandaag (verwachting)</div>`;
-    if (id === 'cta') return `<div class="cta">Wil je weten wat dit voor jouw bedrijf betekent?</div><div class="sub">Mail je energiefactuur naar<br><b style="color:${C.groen}">${CTA_MAIL}</b></div><div class="sub2">en je krijgt een persoonlijke voorspelling</div>`;
+    if (id === 'cta') return `<div class="cta">Wat betekent dit voor jouw bedrijf?</div><div class="sub2">Mail je energiefactuur naar <b style="color:#4be08a">${CTA_MAIL}</b>.<br>Persoonlijke voorspelling terug.</div>`;
     return '';
   }
+  // Look-and-feel = LinkedIn-campagne factuurcheck (navy #14203a, Poppins, groene eyebrow met streep,
+  // witte koppen, groene band onderaan, witte chip met kompas-symbool + groene badge «ACTIE»).
+  const FOTO = datum => { const d = new Date(datum + 'T12:00:00Z'); const n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5); return `https://app.energie-compas.eu/ec-img/factuurcheck/fc-${String((n % 24) + 1).padStart(2, '0')}.jpg`; };
   function sceneHtml(sc, A, d, caption, metStem) {
-    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-*{box-sizing:border-box;margin:0;padding:0}body{width:${W}px;height:${H}px;background:${C.bg};color:${C.tekst};font-family:'DejaVu Sans','Liberation Sans',Arial,sans-serif;overflow:hidden;position:relative}
-.kop{position:absolute;top:40px;left:60px;right:60px;display:flex;justify-content:space-between;align-items:center}.kop img{height:54px}.kop .d{color:${C.grijs};font-size:28px}
-.titel{position:absolute;top:140px;left:60px;right:60px;font-size:54px;font-weight:bold;color:${C.groen}}
-.paneel{position:absolute;top:240px;left:60px;right:60px;height:700px;display:flex;flex-direction:column;justify-content:center;gap:24px}
-.groot{font-size:96px;font-weight:bold;line-height:1.05}.sub{font-size:46px;color:${C.tekst}}.sub2{font-size:32px;color:${C.grijs}}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:28px}.tegel{background:${C.kaart};border-radius:18px;padding:34px}.tl{font-size:30px;color:${C.grijs}}.tv{font-size:62px;font-weight:bold;margin-top:8px}
-.kpi{display:flex;gap:34px;flex-wrap:wrap;font-size:32px;color:${C.grijs}}.kpi b{color:${C.tekst}}
-.leg{display:flex;gap:22px;font-size:26px;color:${C.grijs}}.leg i{display:inline-block;width:20px;height:20px;border-radius:4px;margin-right:8px;vertical-align:-2px}
-.actie{font-size:120px;font-weight:bold;color:${C.groen}}.cta{font-size:70px;font-weight:bold;line-height:1.1}
-.week{display:flex;gap:16px}.wd{flex:1;background:${C.kaart};border-radius:16px;padding:22px 8px;text-align:center}.wn{font-size:40px;font-weight:bold;text-transform:capitalize}.wt{font-size:34px;margin:12px 0}.wv{font-size:28px;color:${C.grijs};margin:6px 0}.wr{font-size:48px;margin-top:10px}
-.cap{position:absolute;left:50px;right:50px;bottom:120px;min-height:220px;background:rgba(0,0,0,0.55);border-radius:20px;padding:26px 34px;font-size:40px;line-height:1.3;display:flex;align-items:center}
-.voet{position:absolute;left:60px;right:60px;bottom:36px;font-size:20px;color:#6b7c93;display:flex;justify-content:space-between}
+    const fotoScene = sc.id === 'intro' || sc.id === 'cta';
+    const chip = `<div class="chip"><div class="kompas"><img src="https://app.energie-compas.eu/apps/ec-logo.png" onerror="this.style.display='none'"></div>${sc.id === 'actie' || sc.id === 'cta' ? '<div class="badge">ACTIE</div>' : '<div class="badge stil">7u30</div>'}</div>`;
+    return `<!DOCTYPE html><html><head><meta charset="utf-8">
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}body{width:${W}px;height:${H}px;background:#14203a;color:#fff;font-family:Poppins,'DejaVu Sans',Arial,sans-serif;overflow:hidden;position:relative}
+.foto{position:absolute;left:0;right:0;top:0;height:760px;background:url('${FOTO(A.datum)}') center/cover}
+.foto:after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(20,32,58,.85) 0%,rgba(20,32,58,.1) 22%,rgba(20,32,58,.55) 60%,#14203a 100%)}
+.brow{position:absolute;top:56px;left:72px;right:72px;display:flex;align-items:center;gap:16px;font-size:26px;font-weight:600;letter-spacing:4px;color:#05B050;text-transform:uppercase;z-index:2}
+.brow:before{content:'';width:7px;height:34px;background:#05B050;border-radius:2px}
+.titel{position:absolute;top:122px;left:72px;right:72px;font-size:66px;font-weight:800;line-height:1.08;z-index:2}
+.paneel{position:absolute;top:260px;left:72px;right:72px;height:660px;display:flex;flex-direction:column;justify-content:center;gap:26px;z-index:2}
+.paneel.onder{top:auto;bottom:420px;height:auto;justify-content:flex-end}
+.groot{font-size:88px;font-weight:800;line-height:1.05}.sub{font-size:40px;font-weight:600;line-height:1.3;color:#e8edf5}.sub2{font-size:31px;color:#b9c4d6;line-height:1.35}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:26px}.tegel{background:#1c2b4d;border-radius:20px;padding:34px}.tl{font-size:28px;color:#b9c4d6}.tv{font-size:60px;font-weight:800;margin-top:6px}
+.kpi{display:flex;gap:30px;flex-wrap:wrap;font-size:31px;color:#b9c4d6}.kpi b{color:#fff}
+.leg{display:flex;gap:22px;font-size:25px;color:#b9c4d6}.leg i{display:inline-block;width:20px;height:20px;border-radius:4px;margin-right:8px;vertical-align:-2px}
+.actie{font-size:128px;font-weight:800;color:#05B050;line-height:1}.cta{font-size:72px;font-weight:800;line-height:1.08}
+.week{display:flex;gap:14px}.wd{flex:1;background:#1c2b4d;border-radius:18px;padding:22px 6px;text-align:center}.wn{font-size:38px;font-weight:800;text-transform:capitalize}.wt{font-size:32px;font-weight:600;margin:10px 0}.wv{font-size:27px;color:#b9c4d6;margin:6px 0}.wr{font-size:46px;margin-top:10px}
+.cap{position:absolute;left:56px;right:56px;bottom:150px;min-height:210px;background:rgba(8,14,28,.72);border-left:7px solid #05B050;border-radius:18px;padding:24px 34px;font-size:38px;font-weight:500;line-height:1.32;display:flex;align-items:center;z-index:3}
+.voet{position:absolute;left:72px;bottom:46px;right:420px;font-size:19px;color:#7f8ca3;line-height:1.35;z-index:3}
+.chip{position:absolute;right:56px;bottom:40px;background:#fff;border-radius:16px;padding:12px 16px;display:flex;align-items:center;gap:14px;z-index:3}
+.kompas{width:62px;height:62px;overflow:hidden}.kompas img{height:62px;display:block}
+.badge{background:#05B050;color:#fff;font-weight:800;font-size:30px;letter-spacing:3px;padding:8px 20px;border-radius:10px}.badge.stil{background:#14203a}
+.band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050;z-index:3}
 </style></head><body>
-<div class="kop"><img src="${LOGO}" onerror="this.style.display='none'"><div class="d">${esc(datumLang(A.datum))}</div></div>
+${fotoScene ? '<div class="foto"></div>' : ''}
+<div class="brow">Energieweerbericht · ${esc(datumLang(A.datum))}</div>
 ${sc.titel ? `<div class="titel">${esc(sc.titel)}</div>` : ''}
-<div class="paneel">${scenePaneel(sc.id, A, d)}</div>
+<div class="paneel${fotoScene ? ' onder' : ''}">${scenePaneel(sc.id, A, d)}</div>
 <div class="cap">${esc(caption)}</div>
-<div class="voet"><span>Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance</span><span>${metStem ? 'Stem gegenereerd met AI' : ''}</span></div>
+<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
+${chip}<div class="band"></div>
 </body></html>`;
   }
 
