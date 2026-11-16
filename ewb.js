@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.3'; // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.4'; // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -198,6 +198,19 @@ module.exports = function mountEwb(app, opt = {}) {
       A.mixTot = d.mix.laatste;
     }
     A.gas = d.gas || null;
+    // v1.0.4: «verhaal van de dag» → keuze van het thematische sfeerbeeld (Unsplash, enkel met sleutel)
+    A.verhaal = (() => {
+      const m = A.mix, tot = m && m.tot || 0, g = A.gas || {}, t = g.ttf, o = g.opslag && g.opslag.eu;
+      if (A.negatief.length) return 'zon';
+      if (m && tot && (m.nucleair < 1500 || m.nucleair / tot < 0.2)) return 'kern';
+      if ((A.windV && A.windV.gem >= 3500) || (A.weerV && A.weerV.windmax >= 55)) return 'wind';
+      const ttfSprong = t && t.vorige_slot ? Math.abs(t.prijs / t.vorige_slot - 1) >= 0.05 : false;
+      const opslagLaag = o && o.vol_pct != null && o.vorig_jaar_pct != null && o.vol_pct - o.vorig_jaar_pct <= -10;
+      if ((m && tot && m.gas / tot >= 0.3) || ttfSprong || opslagLaag) return 'gas';
+      if (A.netImport != null && A.netImport >= 2500) return 'import';
+      if (A.weerV && (A.weerV.tmin + A.weerV.tmax) / 2 <= 2) return 'koude';
+      return 'weer';
+    })();
     // check gisteren
     if (vorige && vorige.richtingMorgen && A.gemV != null && vorige.gemV != null) {
       const werd = A.gemV < vorige.gemV - 5 ? 'goedkoper' : A.gemV > vorige.gemV + 5 ? 'duurder' : 'gelijk';
@@ -392,15 +405,16 @@ module.exports = function mountEwb(app, opt = {}) {
     if (type === 'mist') g += `<rect width="1080" height="760" fill="#e9edf0" opacity=".35"/>`;
     return 'data:image/svg+xml;base64,' + Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760">${g}</svg>`).toString('base64');
   }
-  async function weerFoto(type, datum) {
+  const THEMA = { kern: 'nuclear power plant cooling tower', gas: 'gas pipeline industry', wind: 'offshore wind farm', zon: 'solar panels sunlight', import: 'high voltage power lines', koude: 'frost winter morning landscape' };
+  async function weerFoto(type, datum, thema) {
     const key = process.env.UNSPLASH_ACCESS_KEY; if (!key) return null;
-    const q = { helder: 'sunny countryside Belgium', halfbewolkt: 'clouds fields Flanders', bewolkt: 'overcast sky landscape Belgium', regen: 'rain city Belgium', mist: 'foggy morning Flanders', sneeuw: 'snow landscape Belgium', onweer: 'storm clouds landscape' }[type];
+    const q = thema && THEMA[thema] ? THEMA[thema] : { helder: 'sunny countryside Belgium', halfbewolkt: 'clouds fields Flanders', bewolkt: 'overcast sky landscape Belgium', regen: 'rain city Belgium', mist: 'foggy morning Flanders', sneeuw: 'snow landscape Belgium', onweer: 'storm clouds landscape' }[type];
     try {
       const j = await jget(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&orientation=landscape&per_page=20&content_filter=high&client_id=${encodeURIComponent(key)}`);
       const lijst = (j.results || []).filter(x => x.urls); if (!lijst.length) return null;
       const f = lijst[(Date.parse(datum) / 864e5 | 0) % lijst.length];
       fetch(`${f.links.download_location}${f.links.download_location.includes('?') ? '&' : '?'}client_id=${encodeURIComponent(key)}`).catch(() => {}); // Unsplash-richtlijn: download melden
-      return { url: f.urls.regular, credit: `Foto: ${f.user && f.user.name || 'Unsplash'} / Unsplash` };
+      return { url: f.urls.regular, credit: `${thema ? 'Sfeerbeeld · ' : ''}Foto: ${f.user && f.user.name || 'Unsplash'} / Unsplash`, thema: thema || null };
     } catch (e) { log('unsplash:', e.message); return null; }
   }
 
@@ -435,12 +449,12 @@ module.exports = function mountEwb(app, opt = {}) {
 .badge{background:#05B050;color:#fff;font-weight:800;font-size:30px;letter-spacing:3px;padding:8px 20px;border-radius:10px}.badge.stil{background:#14203a}
 .band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050;z-index:3}
 </style></head><body>
-${fotoScene ? '<div class="foto"></div>' : sc.id === 'weer' ? '<div class="foto zacht"></div>' : ''}
+${fotoScene ? '<div class="foto"></div>' : sc.id === 'weer' ? '<div class="foto zacht"></div>' : sc.id === 'net' && A.themaFoto ? `<div class="foto zacht" style="background-image:url('${A.themaFoto.url}')"></div>` : ''}
 <div class="brow">Energieweerbericht · ${esc(datumLang(A.datum))}</div>
 ${sc.titel ? `<div class="titel">${esc(sc.titel)}</div>` : ''}
 <div class="paneel${fotoScene ? ' onder' : ''}${sc.id === 'cta' ? ' eind' : ''}">${scenePaneel(sc.id, A, d)}</div>
 ${caption ? `<div class="cap">${esc(caption)}</div>` : ''}
-<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance${A.weerFoto && A.weerFoto.credit ? ' · ' + esc(A.weerFoto.credit) : ''}${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
+<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance${sc.id === 'net' && A.themaFoto ? ' · ' + esc(A.themaFoto.credit) : A.weerFoto && A.weerFoto.credit ? ' · ' + esc(A.weerFoto.credit) : ''}${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
 ${chip}<div class="band"></div>
 </body></html>`;
   }
@@ -610,6 +624,7 @@ ${metStop || ''}
       const vorigeDatum = Object.keys(st.dagen).filter(k => k < datum).sort().pop();
       const A = analyse(d, vorigeDatum ? st.dagen[vorigeDatum].kern : null);
       A.weerFoto = await weerFoto(weerType(A.weerV && A.weerV.code), datum);
+      A.themaFoto = A.verhaal && A.verhaal !== 'weer' ? await weerFoto(null, datum, A.verhaal) : null;
       _stemVanDag = stemVoor(datum);
       const script = maakScript(A);
       const r = await render(d, A, script, dir);
@@ -618,7 +633,7 @@ ${metStop || ''}
       await sbPut('ewb', po, fs.readFileSync(r.poster), 'image/jpeg');
       const dag = { datum, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemVanDag : null, ttsFout: r.ttsFout || undefined,
         video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten,
-        kern: { gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, pVandaag: A.pVandaag, weerV: A.weerV },
+        kern: { gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, verhaal: A.verhaal, pVandaag: A.pVandaag, weerV: A.weerV },
         status: (st.dagen[datum] && st.dagen[datum].status) || 'klaar' };
       if (force && dag.status === 'tegengehouden') dag.status = 'klaar';
       st.dagen[datum] = dag; await bewaarState();
