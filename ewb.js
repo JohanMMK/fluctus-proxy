@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.12'; // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.13'; // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -659,7 +659,9 @@ window.setT=function(t){
       const al = [];
       for (const a of audios) { const o = a.ap.replace('.mp3', '.wav'); await run('ffmpeg', ['-y', '-i', a.ap, '-af', `apad,atrim=0:${a.dur.toFixed(3)}`, '-ar', '44100', '-ac', '2', o]); al.push(`file '${o}'`); }
       const af = path.join(dir, 'alijst.txt'); fs.writeFileSync(af, al.join('\n'));
-      wav = path.join(dir, 'stem.wav'); await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', af, '-c', 'copy', wav]);
+      const ruw = path.join(dir, 'stem_ruw.wav'); await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', af, '-c', 'copy', ruw]);
+      // v1.0.13: stem op vaste luidheid (-16 LUFS, broadcast/social-standaard), zodat de jingle er steeds onder blijft
+      wav = path.join(dir, 'stem.wav'); await run('ffmpeg', ['-y', '-i', ruw, '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11', '-ar', '44100', '-ac', '2', wav]);
     }
     const muziek = fs.existsSync(JINGLE_BEGIN) && fs.existsSync(JINGLE_EINDE) && process.env.EWB_JINGLE !== 'uit';
     if (wav || muziek) {
@@ -670,8 +672,9 @@ window.setT=function(t){
         const naloop = (script[script.length - 1].naloop || 0), eStart = Math.max(0, T - 5.5), stemEind = T - naloop;
         inp.push('-i', JINGLE_BEGIN, '-i', JINGLE_EINDE);
         const s0 = Math.max(0.5, S - 0.3);
-        fc += `;[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=eval=frame:volume='if(lt(t,${s0.toFixed(2)}),1,max(0.18,1-(t-${s0.toFixed(2)})/0.6*0.82))'[b]`;
-        fc += `;[3:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay=${Math.round(eStart * 1000)}|${Math.round(eStart * 1000)},volume=eval=frame:volume='if(lt(t,${stemEind.toFixed(2)}),0.3,min(1,0.3+(t-${stemEind.toFixed(2)})/0.4*0.7))'[e]`;
+        const JV = Math.min(1, Math.max(0.05, +process.env.EWB_JINGLE_VOLUME || 0.45)); // v1.0.13: jingle duidelijk zachter dan de stem
+        fc += `;[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=eval=frame:volume='${JV}*if(lt(t,${s0.toFixed(2)}),1,max(0.18,1-(t-${s0.toFixed(2)})/0.6*0.82))'[b]`;
+        fc += `;[3:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay=${Math.round(eStart * 1000)}|${Math.round(eStart * 1000)},volume=eval=frame:volume='${JV}*if(lt(t,${stemEind.toFixed(2)}),0.3,min(1,0.3+(t-${stemEind.toFixed(2)})/0.4*0.7))'[e]`;
         mix += '[b][e]'; k = 3;
       }
       fc += k > 1 ? `;${mix}amix=inputs=${k}:duration=first:normalize=0,alimiter=limit=0.95[a]` : `;[v]anull[a]`;
