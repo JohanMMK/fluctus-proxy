@@ -32,7 +32,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.2.2'; // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.3.0'; // 1.3.0: automatische stemcontrole (ASR): elke stemopname uitgeschreven en woord voor woord vergeleken met de tekst; resultaat in de vetomail, in /run en bij uitlegvideo's (mail «uitlegvideo klaar») // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -628,11 +628,71 @@ window.setT=function(t){
     fs.renameSync(tmp, out); return out;
   }
 
+  // ── v1.3.0: AUTOMATISCHE STEMCONTROLE (ASR) ───────────────────────────────────────────────
+  //   Elke stemopname wordt uitgeschreven (OpenAI-transcriptie, Nederlands) en woord voor woord vergeleken met de
+  //   bedoelde spreektekst. Score = gedeelde woorden (LCS) / max(lengte). Blokken onder EWB_ASR_DREMPEL (0,92)
+  //   komen met de verschillen in de vetomail. Uit te schakelen met EWB_ASR=uit. Model: EWB_ASR_MODEL.
+  const ASR_DREMPEL = () => Math.min(1, Math.max(0.5, +process.env.EWB_ASR_DREMPEL || 0.92));
+  const CIJFER = { nul: '0', een: '1', één: '1', twee: '2', drie: '3', vier: '4', vijf: '5', zes: '6', zeven: '7', acht: '8', negen: '9', tien: '10', elf: '11', twaalf: '12', dertien: '13', veertien: '14', vijftien: '15', twintig: '20', dertig: '30', veertig: '40', vijftig: '50', zestig: '60', zeventig: '70', tachtig: '80', negentig: '90', honderd: '100' };
+  function asrWoorden(t) {
+    return String(t || '').toLowerCase()
+      .replace(/(\d)[.,](\d)/g, '$1komma$2').replace(/(\d)\s*%/g, '$1 procent').replace(/€/g, ' euro ')
+      .replace(/[«»"“”„'’`()\[\]:;!?.,–—\-\/]/g, ' ').split(/\s+/).filter(Boolean)
+      .map(w => CIJFER[w] || w);
+  }
+  function asrSamen(x, ref) { // samenstellingen die de transcriptie splitst («megawatt uur») terug samenvoegen
+    const set = new Set(ref), out = [];
+    for (let i = 0; i < x.length; i++) {
+      if (i + 2 < x.length && set.has(x[i] + x[i + 1] + x[i + 2]) && !set.has(x[i])) { out.push(x[i] + x[i + 1] + x[i + 2]); i += 2; continue; }
+      if (i + 1 < x.length && set.has(x[i] + x[i + 1]) && !set.has(x[i])) { out.push(x[i] + x[i + 1]); i += 1; continue; }
+      out.push(x[i]);
+    }
+    return out;
+  }
+  function asrVergelijk(verwacht, gehoord) {
+    let a = asrWoorden(verwacht), b = asrWoorden(gehoord);
+    b = asrSamen(b, a); a = asrSamen(a, b);
+    const n = a.length, m = b.length, L = Array.from({ length: n + 1 }, () => new Uint16Array(m + 1));
+    for (let i = n - 1; i >= 0; i--) for (let j = m - 1; j >= 0; j--) L[i][j] = a[i] === b[j] ? L[i + 1][j + 1] + 1 : Math.max(L[i + 1][j], L[i][j + 1]);
+    const weg = [], extra = []; let i = 0, j = 0;
+    while (i < n && j < m) { if (a[i] === b[j]) { i++; j++; } else if (L[i + 1][j] >= L[i][j + 1]) weg.push(a[i++]); else extra.push(b[j++]); }
+    while (i < n) weg.push(a[i++]); while (j < m) extra.push(b[j++]);
+    return { score: Math.round(L[0][0] / Math.max(1, n, m) * 1000) / 1000, weg, extra };
+  }
+  async function asrTranscribeer(pad) {
+    const fd = new FormData();
+    fd.append('file', new Blob([fs.readFileSync(pad)], { type: 'audio/mpeg' }), path.basename(pad));
+    fd.append('model', process.env.EWB_ASR_MODEL || 'gpt-4o-transcribe'); fd.append('language', 'nl'); fd.append('response_format', 'json');
+    const r = await fetch('https://api.openai.com/v1/audio/transcriptions', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` }, body: fd });
+    if (!r.ok) throw new Error('asr ' + r.status + ' ' + (await r.text()).slice(0, 200));
+    return ((await r.json()).text || '').trim();
+  }
+  // items: [{ blok, verwacht, pad }] → { score, drempel, blokken: [{ blok, score, verwacht, gehoord, weg, extra, ok }], fout? }
+  async function asrControle(items) {
+    if (process.env.EWB_ASR === 'uit' || !process.env.OPENAI_API_KEY || !items.length) return null;
+    try {
+      const drempel = ASR_DREMPEL();
+      const blokken = await Promise.all(items.map(async it => {
+        try { const gehoord = await asrTranscribeer(it.pad); const v = asrVergelijk(it.verwacht, gehoord); return { blok: it.blok, score: v.score, verwacht: it.verwacht, gehoord, weg: v.weg, extra: v.extra, ok: v.score >= drempel }; }
+        catch (e) { return { blok: it.blok, score: null, verwacht: it.verwacht, gehoord: null, fout: e.message, ok: false }; }
+      }));
+      const sc = blokken.filter(b => b.score != null), som = sc.reduce((a, b) => a + b.score * asrWoorden(b.verwacht).length, 0), w = sc.reduce((a, b) => a + asrWoorden(b.verwacht).length, 0);
+      return { score: w ? Math.round(som / w * 1000) / 1000 : null, drempel, blokken, afwijkend: blokken.filter(b => !b.ok).length };
+    } catch (e) { log('asr fout:', e.message); return { fout: e.message }; }
+  }
+  function asrHtml(asr) {
+    if (!asr) return '';
+    if (asr.fout) return `<div style="background:#fdecea;border:1px solid #f5c2c0;border-radius:8px;padding:12px 16px;margin:14px 0;font-size:13px"><b>Stemcontrole niet gelukt</b> — ${esc(asr.fout)}. Beluister de video volledig.</div>`;
+    const ok = !asr.afwijkend, kleur = ok ? '#e6f6ec' : '#fff4e5', rand = ok ? '#9ad7b0' : '#f0a500';
+    const rij = b => `<li style="margin:6px 0"><b>${esc(b.blok)}</b> — ${b.score != null ? Math.round(b.score * 100) + ' %' : 'fout'}${b.fout ? ` (${esc(b.fout)})` : ''}<br><span style="color:#54617a">bedoeld:</span> ${esc(b.verwacht)}<br><span style="color:#54617a">gehoord:</span> ${esc(b.gehoord || '—')}${b.weg && b.weg.length ? `<br><span style="color:#b42318">niet gehoord:</span> ${esc(b.weg.join(' '))}` : ''}${b.extra && b.extra.length ? `<br><span style="color:#b42318">extra/anders:</span> ${esc(b.extra.join(' '))}` : ''}</li>`;
+    return `<div style="background:${kleur};border:1px solid ${rand};border-radius:8px;padding:12px 16px;margin:14px 0;font-size:13px;line-height:1.45"><b>Automatische stemcontrole</b> — ${Math.round((asr.score || 0) * 100)} % overeenkomst met de tekst${ok ? ', geen afwijkende blokken.' : `, <b>${asr.afwijkend} blok(ken) onder ${Math.round(asr.drempel * 100)} %</b>: herbeluister die zeker.`}${ok ? '' : `<ul style="padding-left:18px;margin:8px 0 0">${asr.blokken.filter(b => !b.ok).map(rij).join('')}</ul>`}<div style="color:#7b8794;font-size:11px;margin-top:6px">Machinale controle: vangt overgeslagen of verkeerd uitgesproken woorden, niet de klank of intonatie. Herbeluisteren blijft nodig, vooral titels en overgangen.</div></div>`;
+  }
+
   // ── render ─────────────────────────────────────────────────────────────────────────────────
   async function render(d, A, script, dir) {
     const puppeteer = require('puppeteer-core');
     const browser = await puppeteer.launch({ executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium', args: ['--no-sandbox', '--disable-dev-shm-usage', '--font-render-hinting=none'] });
-    const segs = [], audios = []; let metStem = null, ttsFout = null, stingMp4 = null;
+    const segs = [], audios = [], asrItems = []; let metStem = null, ttsFout = null, stingMp4 = null;
     try {
       const page = await browser.newPage(); await page.setViewport({ width: W, height: H });
       let i = 0;
@@ -651,7 +711,7 @@ window.setT=function(t){
               metStem = true;
               const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.22));
               if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
-              blokDur = (await duur(ap)) + 0.35; audio = ap;
+              blokDur = (await duur(ap)) + 0.35; audio = ap; asrItems.push({ blok: sc.titel || sc.id, verwacht: spreek.join(' '), pad: ap });
             } else metStem = false;
           } catch (e) { ttsFout = e.message; metStem = false; log('tts fout → zonder stem:', e.message); }
         }
@@ -716,7 +776,8 @@ window.setT=function(t){
     } else {
       await run('ffmpeg', ['-y', '-i', stil, '-c', 'copy', '-movflags', '+faststart', eind]);
     }
-    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: T, metStem: !!stemOk, ttsFout, jingle: muziek, sting: !!stingMp4 };
+    const asr = stemOk ? await asrControle(asrItems) : null;
+    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: T, metStem: !!stemOk, ttsFout, jingle: muziek, sting: !!stingMp4, asr };
   }
 
   // ── mail (Brevo) ───────────────────────────────────────────────────────────────────────────
@@ -743,7 +804,7 @@ ${metStop || ''}
     const stop = `${API_BASE}/api/ewb/stop?d=${dag.datum}&s=${sign('stop|' + dag.datum)}`;
     const mode = MODE();
     const knop = `<div style="background:#fff4e5;border:1px solid #f0a500;border-radius:8px;padding:14px 16px;margin:18px 0"><b>Controle vóór publicatie</b> — ${mode === 'aan' ? 'gaat om 18u50 automatisch uit naar de website en de mailinglijst, en morgen om 7u30 naar LinkedIn' : 'PROEFMODUS (EWB_MODE=' + esc(mode) + '): niets wordt publiek gezet'}.<br>${dag.fouten && dag.fouten.length ? `<span style="color:#b42318">Ontbrekende bronnen: ${esc(dag.fouten.join('; '))}</span><br>` : ''}<a href="${esc(dag.video_url)}">Video openen</a> · <a href="${esc(stop)}" style="color:#b42318;font-weight:bold">⛔ Tegenhouden</a></div>`;
-    await brevo('/smtp/email', 'POST', { sender: afzender(), to: to.map(email => ({ email })), subject: `Controle energieweerbericht voor ${datumLang(dag.doel || plusDag(dag.datum, 1))}${mode === 'aan' ? ' — publicatie 18u50' : ' (proef)'}`, htmlContent: mailHtml(dag, null, knop) });
+    await brevo('/smtp/email', 'POST', { sender: afzender(), to: to.map(email => ({ email })), subject: `Controle energieweerbericht voor ${datumLang(dag.doel || plusDag(dag.datum, 1))}${mode === 'aan' ? ' — publicatie 18u50' : ' (proef)'}`, htmlContent: mailHtml(dag, null, asrHtml(dag.asr) + knop) });
     return true;
   }
   async function lijstId() {
@@ -831,7 +892,7 @@ ${metStop || ''}
       const v = `${datum}/video.mp4`, po = `${datum}/poster.jpg`;
       await sbPut('ewb', v, fs.readFileSync(r.video), 'video/mp4');
       await sbPut('ewb', po, fs.readFileSync(r.poster), 'image/jpeg');
-      const dag = { datum, doel: A.doel, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemmen : null, ttsFout: r.ttsFout || undefined,
+      const dag = { datum, doel: A.doel, asr: r.asr || null, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemmen : null, ttsFout: r.ttsFout || undefined,
         video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten,
         kern: { editie: A.editie, doel: A.doel, gemM: A.gemM, gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, verhaal: A.verhaal, pVandaag: A.pVandaag, weerV: A.weerV },
         status: (st.dagen[datum] && st.dagen[datum].status) || 'klaar' };
@@ -954,7 +1015,7 @@ ${metStop || ''}
       const datum = (req.body && req.body.datum) || brussel().datum;
       const dag = await genereer(datum, { force: true });
       let pub = null; if (req.body && req.body.publiceer && MODE() === 'aan') pub = await publiceer(datum);
-      res.json({ ok: true, datum, video: dag.video_url, duur: dag.duur, metStem: dag.metStem, stem: dag.stem, ttsFout: dag.ttsFout, fouten: dag.fouten, vetomail: !!dag.vetomail, preview: `${PUBLIC_BASE}?preview=1&s=${sign('preview')}`, publicatie: pub });
+      res.json({ ok: true, datum, video: dag.video_url, duur: dag.duur, metStem: dag.metStem, stem: dag.stem, ttsFout: dag.ttsFout, fouten: dag.fouten, vetomail: !!dag.vetomail, asr: dag.asr ? { score: dag.asr.score, afwijkend: dag.asr.afwijkend, fout: dag.asr.fout, blokken: (dag.asr.blokken || []).map(b => ({ blok: b.blok, score: b.score, weg: b.weg, extra: b.extra })) } : null, preview: `${PUBLIC_BASE}?preview=1&s=${sign('preview')}`, publicatie: pub });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.get('/api/ewb/status', async (req, res) => {
@@ -1091,14 +1152,14 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
           if (!ok) log('uitleg: onderdeel niet gevonden', sc.sel);
           await new Promise(r => setTimeout(r, 600));
           const img = path.join(dir, `s${String(i).padStart(2, '0')}.jpg`);
-          await page.screenshot({ path: img, type: 'jpeg', quality: 90 }); beelden.push({ img, tekst: sc.tekst });
+          await page.screenshot({ path: img, type: 'jpeg', quality: 90 }); beelden.push({ img, tekst: sc.tekst, titel: sc.titel });
         }
         await page.setContent(uitlegKaart('Wat betekent dit voor jouw bedrijf?', 'Vraag een analyse op maat: mail je energiefactuur naar', true), { waitUntil: 'load', timeout: 15000 }).catch(() => {});
         await page.screenshot({ path: path.join(dir, 'k1.jpg'), type: 'jpeg', quality: 90 }); beelden.push({ img: path.join(dir, 'k1.jpg'), tekst: U.slot, eind: true });
       } finally { await browser.close().catch(() => {}); }
       // stem + segmenten
       const tempo = Math.min(1.3, Math.max(1, +process.env.UITLEG_TEMPO || 1.12));
-      const al = [];
+      const al = [], uitlegAsr = [];
       for (let i = 0; i < beelden.length; i++) {
         const b = beelden[i]; let dur = b.min || 2.5, wav = null;
         if (b.video) { // kant-en-klare clip (sting): stil stemspoor, de begintune ligt eronder
@@ -1110,7 +1171,7 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
           try {
             if (await tts(b.tekst, ap, 'gids')) {
               const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]);
-              dur = (await duur(ap2)) + 0.6 + (b.eind ? 3.5 : 0); wav = ap2;
+              dur = (await duur(ap2)) + 0.6 + (b.eind ? 3.5 : 0); wav = ap2; uitlegAsr.push({ blok: b.titel || (b.eind ? 'Slot' : 'Aankondiging'), verwacht: b.tekst, pad: ap2 });
             } else metStem = false;
           } catch (e) { log('uitleg tts:', e.message); metStem = false; }
         }
@@ -1139,9 +1200,15 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
       const vp = `uitleg/${appId}.mp4`, pp = `uitleg/${appId}.jpg`;
       await sbPut('ewb', vp, fs.readFileSync(eind), 'video/mp4');
       { const pb = beelden.filter(b => b.img); await sbPut('ewb', pp, fs.readFileSync((pb[1] || pb[0]).img), 'image/jpeg'); }
+      const asr = metStem ? await asrControle(uitlegAsr) : null;
       const st = await state(); st.uitleg = st.uitleg || {};
-      st.uitleg[appId] = { video: publiekeUrl(vp) + '?v=' + Date.now(), poster: publiekeUrl(pp) + '?v=' + Date.now(), duur: T, metStem, gemaakt: new Date().toISOString(), versie: EWB_VERSIE, stem: _stemmen.gids };
+      st.uitleg[appId] = { video: publiekeUrl(vp) + '?v=' + Date.now(), poster: publiekeUrl(pp) + '?v=' + Date.now(), duur: T, metStem, gemaakt: new Date().toISOString(), versie: EWB_VERSIE, stem: _stemmen.gids, asr };
       await bewaarState();
+      try { // v1.3.0: mail «uitlegvideo klaar» met link en stemcontrole
+        const to = (opt.reviewTo || process.env.EWB_REVIEW_TO || process.env.AUDIT_MAIL_TO || '').split(',').map(x => x.trim()).filter(Boolean);
+        if (to.length && process.env.BREVO_API_KEY) await brevo('/smtp/email', 'POST', { sender: afzender(), to: to.map(email => ({ email })), subject: `Uitlegvideo klaar: ${U.naam}${asr && asr.afwijkend ? ' — ' + asr.afwijkend + ' blok(ken) herbeluisteren' : ''}`,
+          htmlContent: `<div style="font-family:Arial,sans-serif;max-width:600px;color:#1b2a3d"><p style="font-size:13px;color:#05B050;letter-spacing:1px;text-transform:uppercase">Uitlegvideo · ${esc(U.naam)}</p><p><a href="${esc(st.uitleg[appId].video)}"><img src="${esc(st.uitleg[appId].poster)}" style="width:100%;border-radius:8px"></a></p><p><a href="${esc(st.uitleg[appId].video)}">▶ Video openen</a> (${Math.round(T)} s)</p>${asrHtml(asr)}</div>` });
+      } catch (e) { log('uitleg mail:', e.message); }
       log(`uitleg ${appId} klaar in ${Math.round((Date.now() - t0) / 1000)} s, ${Math.round(T)} s video`);
       return st.uitleg[appId];
     } finally { uitlegBezig = null; fs.rmSync(dir, { recursive: true, force: true }); }
