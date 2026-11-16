@@ -32,7 +32,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.2.1'; // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.2.2'; // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -576,19 +576,22 @@ ${chip}<div class="band"></div>
   const STING_S = 2.8;
   const JINGLE_BEGIN = path.join(__dirname, 'assets', 'ewb-begin.mp3');
   const JINGLE_EINDE = path.join(__dirname, 'assets', 'ewb-einde.mp3');
-  function stingHtml(A) {
+  function stingHtml(A, o = {}) {
+    // v1.2.2: ook bruikbaar voor liggende video's (o.bw × o.bh) en met eigen teksten (o.a, o.b)
+    const bw = o.bw || W, bh = o.bh || H, k = o.bw ? (bh * 0.8) / 860 : 1, ox = o.bw ? (bw - W * k) / 2 : 0, oy = o.bw ? (bh - 860 * k) / 2 - 250 * k : 0;
     const LICHT = '#e6edf3', GROEN = '#6bae40';
     const arc = (a0, a1, r = 172, cx = 240, cy = 245) => { const p = a => [cx + r * Math.cos(a * Math.PI / 180), cy + r * Math.sin(a * Math.PI / 180)]; const [x0, y0] = p(a0), [x1, y1] = p(a1); return `M${x0.toFixed(1)},${y0.toFixed(1)} A${r},${r} 0 ${((a1 - a0 + 360) % 360) > 180 ? 1 : 0} 1 ${x1.toFixed(1)},${y1.toFixed(1)}`; };
     return `<!doctype html><html><head><meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;800&display=swap" rel="stylesheet">
-<style>*{margin:0;padding:0;box-sizing:border-box}body{width:${W}px;height:${H}px;overflow:hidden;position:relative;font-family:Poppins,'DejaVu Sans',Arial,sans-serif;background:radial-gradient(ellipse at 50% 38%,#22345c 0%,#14203a 62%)}
+<style>*{margin:0;padding:0;box-sizing:border-box}body{width:${bw}px;height:${bh}px;overflow:hidden;position:relative;font-family:Poppins,'DejaVu Sans',Arial,sans-serif;background:radial-gradient(ellipse at 50% 38%,#22345c 0%,#14203a 62%)}
+#st{position:absolute;left:${ox}px;top:${oy}px;width:${W}px;height:${H}px;transform:scale(${k});transform-origin:0 0}
 #sym{position:absolute;left:${(W - 500) / 2}px;top:250px;width:500px;height:480px;overflow:visible}
 #wm{position:absolute;left:${(W - 738) / 2}px;top:760px;width:738px;height:204px;background:url('${process.env.EWB_ASSET_BASE || 'https://app.energie-compas.eu'}/apps/ec-logo-dark.png') -217.6px 0/955.4px 204px no-repeat;opacity:0}
 #brow{position:absolute;left:0;right:0;top:1010px;text-align:center;opacity:0}
 #brow .a{font-size:34px;font-weight:600;letter-spacing:7px;color:#05B050;text-transform:uppercase}
 #brow .b{font-size:40px;font-weight:800;color:#fff;margin-top:12px}
 .band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050}</style></head><body>
-<svg id="sym" viewBox="0 0 500 480" xmlns="http://www.w3.org/2000/svg">
+<div id="st"><svg id="sym" viewBox="0 0 500 480" xmlns="http://www.w3.org/2000/svg">
 <defs><filter id="gl" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="9"/></filter></defs>
 <path class="ring" d="${arc(154, 258)}" stroke="${LICHT}" stroke-width="15" fill="none" stroke-linecap="round" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
 <path class="ring" d="${arc(290, 70)}" stroke="${GROEN}" stroke-width="15" fill="none" stroke-linecap="round" pathLength="1" stroke-dasharray="1 1" stroke-dashoffset="1"/>
@@ -597,7 +600,7 @@ ${chip}<div class="band"></div>
 <circle id="glow" r="22" fill="${GROEN}" opacity="0" filter="url(#gl)"/><circle id="hart" r="19" fill="#14203a" stroke="${LICHT}" stroke-width="5"/></g>
 </svg>
 <div id="wm"></div>
-<div id="brow"><div class="a">Energieweerbericht</div><div class="b">voor ${esc(datumLang(A.doel))}</div></div>
+<div id="brow"><div class="a">${esc(o.a || 'Energieweerbericht')}</div><div class="b">${esc(o.b || 'voor ' + datumLang(A.doel))}</div></div></div>
 <div class="band"></div>
 <script>
 const cl=(x)=>Math.max(0,Math.min(1,x)), eo=(x)=>1-Math.pow(1-cl(x),3), bo=(x)=>{x=cl(x);const c=1.9;return 1+(c+1)*Math.pow(x-1,3)+c*Math.pow(x-1,2);};
@@ -612,9 +615,9 @@ window.setT=function(t){
 };window.setT(0);
 </script></body></html>`;
   }
-  async function renderSting(page, A, dir) {
+  async function renderSting(page, A, dir, o = {}) {
     const sd = path.join(dir, 'sting'); fs.mkdirSync(sd, { recursive: true });
-    await page.setContent(stingHtml(A), { waitUntil: 'load', timeout: 10000 }).catch(() => {});
+    await page.setContent(stingHtml(A, o), { waitUntil: 'load', timeout: 10000 }).catch(() => {});
     const n = Math.round(STING_S * FPS);
     for (let f = 0; f < n; f++) {
       await page.evaluate(t => window.setT && window.setT(t), f / FPS);
@@ -1008,7 +1011,9 @@ ${metStop || ''}
   ROL_INSTR.gids = 'Je bent een vriendelijke Vlaamse productgids die een collega rustig en helder door een app leidt. Natuurlijk, warm en duidelijk, met korte pauzes tussen de zinnen. Nederlands met een Vlaamse tongval.';
   const UITLEG = {
     energiemarkt: {
-      naam: 'De energiemarkt-app', url: process.env.EWB_UITLEG_URL || 'https://app.energie-compas.eu/apps/energiemarkt.html',
+      naam: 'De energiemarkt-app',
+      intro: 'In drie minuten loop je door de energiemarkt-app: de spot- en onbalansprijzen, de productiemix met import en gas, de dagelijkse spread, en hoe je de waarde en de terugverdientijd van zonnepanelen en een batterij berekent.',
+      url: process.env.EWB_UITLEG_URL || 'https://app.energie-compas.eu/apps/energiemarkt.html',
       klaar: `(() => { const m = document.getElementById('fd-m1'); const e3 = document.getElementById('fd-e3'); return m && m.textContent.trim() !== '—' && (!e3 || e3.style.display === 'none'); })()`,
       scenes: [
         { titel: 'Overzicht', sel: '#fluctus-dashboard', top: true, tekst: 'Dit is de energiemarkt-app van Energie-Compas. Je ziet hier hoe de Belgische stroommarkt beweegt: spotprijzen, onbalans, wind en zon, de productiemix en gas. We lopen kort alle onderdelen langs.' },
@@ -1066,9 +1071,10 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
       const beelden = [];
       try {
         const page = await browser.newPage(); await page.setViewport({ width: UW, height: UH, deviceScaleFactor: UDSF });
-        // titelkaart
+        // v1.2.2: bewegend kompas uit het logo + begintune, dan titelkaart met gesproken aankondiging
+        try { const sv = await renderSting(page, {}, dir, { a: 'Uitleg', b: U.naam, bw: UW, bh: UH }); beelden.push({ video: sv, dur: STING_S }); } catch (e) { log('uitleg sting:', e.message); }
         await page.setContent(uitlegKaart(U.naam, 'Een rondleiding langs alle onderdelen'), { waitUntil: 'load', timeout: 15000 }).catch(() => {});
-        await page.screenshot({ path: path.join(dir, 'k0.jpg'), type: 'jpeg', quality: 90 }); beelden.push({ img: path.join(dir, 'k0.jpg'), tekst: null, min: 2.6 });
+        await page.screenshot({ path: path.join(dir, 'k0.jpg'), type: 'jpeg', quality: 90 }); beelden.push({ img: path.join(dir, 'k0.jpg'), tekst: U.intro || null, min: 2.6 });
         await page.goto(U.url, { waitUntil: 'networkidle2', timeout: 90000 }).catch(e => log('uitleg goto:', e.message));
         for (let i = 0; i < 90; i++) { if (await page.evaluate(U.klaar).catch(() => false)) break; await new Promise(r => setTimeout(r, 1000)); }
         await new Promise(r => setTimeout(r, 2500));
@@ -1095,6 +1101,10 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
       const al = [];
       for (let i = 0; i < beelden.length; i++) {
         const b = beelden[i]; let dur = b.min || 2.5, wav = null;
+        if (b.video) { // kant-en-klare clip (sting): stil stemspoor, de begintune ligt eronder
+          segs.push({ out: b.video, dur: b.dur }); const w = path.join(dir, `w${i}.wav`);
+          await run('ffmpeg', ['-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-t', b.dur.toFixed(3), w]); al.push(`file '${w}'`); continue;
+        }
         if (b.tekst && metStem) {
           const ap = path.join(dir, `a${i}.mp3`);
           try {
@@ -1125,10 +1135,10 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
         const fc = `[1:a]apad,atrim=0:${T.toFixed(3)}[v];[2:a]aformat=sample_rates=44100:channel_layouts=stereo,volume=eval=frame:volume='${JV}*if(lt(t,${s0.toFixed(2)}),1,max(0.12,1-(t-${s0.toFixed(2)})/0.6*0.88))'[b];[3:a]aformat=sample_rates=44100:channel_layouts=stereo,adelay=${Math.round(eStart * 1000)}|${Math.round(eStart * 1000)},volume=eval=frame:volume='${JV}*0.6'[e];[v][b][e]amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.95[a]`;
         await run('ffmpeg', ['-y', '-i', stil, '-i', stem, '-i', JINGLE_BEGIN, '-i', JINGLE_EINDE, '-filter_complex', fc, '-map', '0:v', '-map', '[a]', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-t', T.toFixed(3), '-movflags', '+faststart', eind]);
       } else await run('ffmpeg', ['-y', '-i', stil, '-i', stem, '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', '-b:a', '160k', '-shortest', '-movflags', '+faststart', eind]);
-      if (process.env.EWB_UITLEG_LOKAAL) { fs.copyFileSync(eind, path.join(process.env.EWB_UITLEG_LOKAAL, appId + '.mp4')); beelden.forEach((b, i) => fs.copyFileSync(b.img, path.join(process.env.EWB_UITLEG_LOKAAL, `beeld${i}.jpg`))); return { lokaal: true, duur: T }; } // enkel lokale test
+      if (process.env.EWB_UITLEG_LOKAAL) { fs.copyFileSync(eind, path.join(process.env.EWB_UITLEG_LOKAAL, appId + '.mp4')); beelden.filter(b => b.img).forEach((b, i) => fs.copyFileSync(b.img, path.join(process.env.EWB_UITLEG_LOKAAL, `beeld${i}.jpg`))); return { lokaal: true, duur: T }; } // enkel lokale test
       const vp = `uitleg/${appId}.mp4`, pp = `uitleg/${appId}.jpg`;
       await sbPut('ewb', vp, fs.readFileSync(eind), 'video/mp4');
-      await sbPut('ewb', pp, fs.readFileSync(beelden[1] ? beelden[1].img : beelden[0].img), 'image/jpeg');
+      { const pb = beelden.filter(b => b.img); await sbPut('ewb', pp, fs.readFileSync((pb[1] || pb[0]).img), 'image/jpeg'); }
       const st = await state(); st.uitleg = st.uitleg || {};
       st.uitleg[appId] = { video: publiekeUrl(vp) + '?v=' + Date.now(), poster: publiekeUrl(pp) + '?v=' + Date.now(), duur: T, metStem, gemaakt: new Date().toISOString(), versie: EWB_VERSIE, stem: _stemmen.gids };
       await bewaarState();
