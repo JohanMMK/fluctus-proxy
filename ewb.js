@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.8'; // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.9'; // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -306,12 +306,12 @@ module.exports = function mountEwb(app, opt = {}) {
     const a = [];
     const best = A.nacht || A.goedkoop;
     if (best && A.gemKomend != null) { const dEur = A.gemKomend - best.g; if (dEur > 5) A.besparing = { eurMwh: dEur, per100km: dEur * 0.016, perJaar: dEur * 0.016 * 150 }; }
-    const bsp = A.besparing ? `Dat bespaart zo'n ${A.besparing.per100km >= 1 ? nl1(A.besparing.per100km) + ' euro' : nl0(A.besparing.per100km * 100) + ' cent'} per 100 kilometer op de energieprijs, of ${nl0(A.besparing.perJaar)} euro per wagen per jaar als je dat elke dag doet.` : null;
+    const bsp = A.besparing ? `Dat bespaart zo'n ${A.besparing.per100km >= 1 ? nl1(A.besparing.per100km) + ' euro' : nl0(A.besparing.per100km * 100) + ' cent'} per 100 kilometer, of ${nl0(A.besparing.perJaar)} euro per wagen per jaar.` : null;
     if (A.negatief.length) { a.push(`Wat raden we vandaag aan? Verschuif verbruik en het laden van je vloot naar ${dagPre(A.negatief[0])}${uu(A.negatief[0])} tot ${uu(A.negatief[A.negatief.length - 1] + 1)}, en zet zonnepanelen zonder vaste vergoeding af bij een negatieve prijs.`); if (bsp) a.push(bsp); }
     else if (A.goedkoop && A.duur) {
       a.push(A.nacht ? `Wat raden we vandaag aan? Laad je vloot ${tb(A.nacht)}, of overdag ${tb(A.goedkoop)}.` : `Wat raden we vandaag aan? Laad je elektrische vloot bij voorkeur ${tb(A.goedkoop)}.`);
       if (bsp) a.push(bsp);
-      a.push(`Heb je een batterij? Zorg dat ze vol is vóór ${voor(A.duur.van)} en ontlaad tijdens het duurste blok.`);
+      a.push(`Batterij vol vóór ${voor(A.duur.van)}.`);
     } else a.push('Wat raden we vandaag aan? Er zijn geen uitgesproken goedkope of dure uren; houd je normale planning aan.');
     sc.push({ id: 'actie', titel: 'Actie van de dag', zinnen: a });
     // 5. morgen + week
@@ -324,7 +324,7 @@ module.exports = function mountEwb(app, opt = {}) {
     else if (goed.length) wk.push(`Later deze week wordt ${goed.join(' en ')} goedkoper dankzij meer wind of zon.`);
     sc.push({ id: 'week', titel: 'Morgen en de komende dagen', zinnen: wk.length ? wk : ['Het vooruitzicht voor de komende dagen volgt morgen.'] });
     // 6. CTA (vast)
-    sc.push({ id: 'cta', geenCaption: true, naloop: 4, zinnen: ['Wil je weten wat dit voor jouw bedrijf betekent? Scan de code: je mail staat klaar. Voeg je energiefactuur toe en je krijgt een analyse op maat.'] });
+    sc.push({ id: 'cta', geenCaption: true, naloop: 4, zinnen: ['Wat betekent dit voor jouw bedrijf? Scan de code, voeg je energiefactuur toe en je krijgt een analyse op maat.'] });
     return sc;
   }
 
@@ -556,7 +556,7 @@ ${sc.id === 'cta' && A.qr ? `<div class="qr"><img src="${A.qr}"><div>Scan · je 
             const ap = path.join(dir, 'blok' + String(i).padStart(3, '0') + '.mp3');
             if (await tts(spreek.join(' '), ap, ROL[sc.id] || 'hoofd')) {
               metStem = true;
-              const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.15));
+              const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.22));
               if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
               blokDur = (await duur(ap)) + 0.35; audio = ap;
             } else metStem = false;
