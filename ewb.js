@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.5'; // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.7'; // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -167,7 +167,13 @@ module.exports = function mountEwb(app, opt = {}) {
     return best;
   }
   function dagGem(map, datum) { const v = []; for (let h = 0; h < 24; h++) { const x = map && map[datum + 'T' + String(h).padStart(2, '0')]; if (x != null) v.push(x); } return v.length ? { gem: v.reduce((a, b) => a + b, 0) / v.length, som: v.reduce((a, b) => a + b, 0), n: v.length } : null; }
-  const uu = h => `${h}u`;
+  const uu = h => `${h % 24}u`;
+  // v1.0.6: blokken lopen over vandaag + (indien bekend) morgen: index 0–23 = vandaag, 24–47 = morgen
+  const dagPre = i => i >= 24 ? 'morgen ' : (i % 24 >= 18 ? 'vanavond ' : '');
+  const tb = b => `${dagPre(b.van)}tussen ${b.van % 24}u en ${b.tot % 24 === 0 ? 'middernacht' : (b.tot % 24) + 'u'}`; // gesproken/ondertitel
+  const kort = b => `${b.van >= 24 ? 'morgen ' : ''}${b.van % 24}u–${b.tot % 24 === 0 ? 24 : b.tot % 24}u`;      // in beeld
+  const voor = i => `${uu(i)}${i >= 24 ? ' morgen' : (i % 24 >= 18 ? ' vanavond' : '')}`;
+  const inB = (b, i) => b && i >= b.van && i < b.tot;
 
   function analyse(d, vorige) {
     const A = { datum: d.datum };
@@ -175,9 +181,24 @@ module.exports = function mountEwb(app, opt = {}) {
     A.pVandaag = dagPrijzen(d, d.datum); A.pGisteren = dagPrijzen(d, d.gisteren); A.pMorgen = dagPrijzen(d, d.morgen);
     A.morgenBekend = A.pMorgen.filter(x => x != null).length >= 20;
     A.gemV = gem(A.pVandaag); A.gemG = gem(A.pGisteren);
-    A.goedkoop = blok(A.pVandaag, 3, true, 7, 22); A.duur = blok(A.pVandaag, 3, false, 6, 23);
-    A.nacht = blok(A.pVandaag, 3, true, 0, 7);
-    A.negatief = A.pVandaag.map((v, h) => v != null && v < 0 ? h : null).filter(x => x != null);
+    // v1.0.6: adviezen enkel over de uren die nog KOMEN (om 7u30 is de nacht van vandaag voorbij); zijn de
+    //   prijzen van morgen al bekend, dan lopen de blokken door tot morgenavond.
+    const nu = brussel(); A.start = nu.datum === d.datum ? nu.uur + 1 : nu.datum > d.datum ? 24 : 0;
+    A.reeks = A.pVandaag.concat(A.morgenBekend ? A.pMorgen : []);
+    const blokR = (len, goedkoop, uren) => {
+      let best = null;
+      for (let i = A.start; i + len <= A.reeks.length; i++) {
+        const sl = A.reeks.slice(i, i + len); if (sl.some(x => x == null)) continue;
+        if (uren && ![...Array(len).keys()].every(k => uren((i + k) % 24))) continue;
+        const g = gem(sl); if (best == null || (goedkoop ? g < best.g : g > best.g)) best = { van: i, tot: i + len, g };
+      }
+      return best;
+    };
+    A.goedkoop = blokR(3, true, h => h >= 7 && h < 21);        // overdag (werkuren)
+    A.nacht = blokR(3, true, null);                            // goedkoopst, eender wanneer
+    if (A.nacht && A.goedkoop && (A.nacht.van === A.goedkoop.van || A.nacht.g >= A.goedkoop.g - 15)) A.nacht = null;
+    A.duur = blokR(3, false, h => h >= 6 && h < 23);
+    A.negatief = A.reeks.map((v, i) => i >= A.start && v != null && v < 0 ? i : null).filter(x => x != null);
     A.minV = Math.min(...A.pVandaag.filter(x => x != null)); A.maxV = Math.max(...A.pVandaag.filter(x => x != null));
     // wind/zon
     A.windV = dagGem(d.windU, d.datum); A.windM = dagGem(d.windU, d.morgen); A.zonV = dagGem(d.zonU, d.datum); A.zonM = dagGem(d.zonU, d.morgen);
@@ -251,10 +272,10 @@ module.exports = function mountEwb(app, opt = {}) {
     const p = [];
     if (A.gemV != null) {
       p.push(`Stroom kost vandaag gemiddeld ${nl0(A.gemV)} euro per megawattuur${A.gemG != null ? (Math.abs(A.gemV - A.gemG) < 5 ? ', zoals gisteren' : `, ${A.gemV < A.gemG ? 'minder' : 'meer'} dan gisteren`) : ''}.`);
-      if (A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15) p.push(`Goedkoopst 's nachts tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}, overdag tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
-      else if (A.goedkoop) p.push(`Overdag is het goedkoopst tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}, rond ${nl0(A.goedkoop.g)} euro.`);
-      if (A.duur) p.push(`Het duurst tussen ${uu(A.duur.van)} en ${uu(A.duur.tot)}, rond ${nl0(A.duur.g)} euro.`);
-      if (A.negatief.length) p.push(`Let op: ${A.negatief.length} ${A.negatief.length === 1 ? 'uur' : 'uren'} met een negatieve prijs, vanaf ${uu(A.negatief[0])}.`);
+      if (A.nacht && A.goedkoop) p.push(`Goedkoopst ${tb(A.nacht)}, overdag ${tb(A.goedkoop)}.`);
+      else if (A.goedkoop) p.push(`Het goedkoopst ${tb(A.goedkoop)}, rond ${nl0(A.goedkoop.g)} euro.`);
+      if (A.duur) p.push(`Het duurst ${tb(A.duur)}, rond ${nl0(A.duur.g)} euro.`);
+      if (A.negatief.length) p.push(`Let op: ${A.negatief.length} ${A.negatief.length === 1 ? 'uur' : 'uren'} met een negatieve prijs, vanaf ${dagPre(A.negatief[0])}${uu(A.negatief[0])}.`);
     } else p.push('De day-aheadprijzen van vandaag zijn nog niet beschikbaar.');
     sc.push({ id: 'prijs', titel: 'Stroomprijs vandaag', zinnen: p });
     // 3. net en systeem
@@ -277,11 +298,11 @@ module.exports = function mountEwb(app, opt = {}) {
     sc.push({ id: 'net', titel: 'Net en markt', zinnen: n.length ? n : ['De netgegevens van Elia zijn vandaag niet beschikbaar.'] });
     // 4. actie van de dag
     const a = [];
-    if (A.negatief.length) a.push(`Actie van de dag: verschuif verbruik en het laden van je vloot naar ${uu(A.negatief[0])} tot ${uu(A.negatief[A.negatief.length - 1] + 1)}, en zet zonnepanelen zonder vaste vergoeding af bij een negatieve prijs.`);
+    if (A.negatief.length) a.push(`Actie van de dag: verschuif verbruik en het laden van je vloot naar ${dagPre(A.negatief[0])}${uu(A.negatief[0])} tot ${uu(A.negatief[A.negatief.length - 1] + 1)}, en zet zonnepanelen zonder vaste vergoeding af bij een negatieve prijs.`);
     else if (A.goedkoop && A.duur) {
-      if (A.nacht && A.nacht.g < A.goedkoop.g - 15) a.push(`Actie van de dag: laad 's nachts tussen ${uu(A.nacht.van)} en ${uu(A.nacht.tot)}, overdag tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
-      else a.push(`Actie van de dag: laad je elektrische vloot bij voorkeur tussen ${uu(A.goedkoop.van)} en ${uu(A.goedkoop.tot)}.`);
-      a.push(`Batterij vol vóór ${uu(A.duur.van)}, ontladen tijdens het duurste blok.`);
+      if (A.nacht) a.push(`Actie van de dag: laad je vloot ${tb(A.nacht)}; overdag ${tb(A.goedkoop)}.`);
+      else a.push(`Actie van de dag: laad je elektrische vloot bij voorkeur ${tb(A.goedkoop)}.`);
+      a.push(`Batterij vol vóór ${voor(A.duur.van)}, ontladen tijdens het duurste blok.`);
     } else a.push('Actie van de dag: vandaag geen uitgesproken goedkope of dure uren; houd je normale planning aan.');
     sc.push({ id: 'actie', titel: 'Actie van de dag', zinnen: a });
     // 5. morgen + week
@@ -301,17 +322,28 @@ module.exports = function mountEwb(app, opt = {}) {
   // ── TTS ────────────────────────────────────────────────────────────────────────────────────
   // v1.0.2: stem roteert per aflevering (vaste stem binnen één video). Lijst via OPENAI_TTS_VOICES (komma's);
   //   OPENAI_TTS_VOICE = één vaste stem (wint). Index = dagnummer sinds 1970, dus elke werkdag een andere.
-  let _stemVanDag = null;
-  function stemVoor(datum) {
-    if (process.env.OPENAI_TTS_VOICE) return process.env.OPENAI_TTS_VOICE;
+  // v1.0.6: drie stemmen per aflevering — presentator (intro t.e.m. net), adviseur (actie + vooruitzicht) en
+  //   afsluiter (CTA). Rotatie per dag over OPENAI_TTS_VOICES; OPENAI_TTS_VOICE zet de presentator vast.
+  let _stemmen = null;
+  function stemmenVoor(datum) {
     const l = (process.env.OPENAI_TTS_VOICES || 'marin,cedar,coral,sage,verse').split(',').map(x => x.trim()).filter(Boolean);
-    return l[Math.floor(Date.parse(datum + 'T12:00:00Z') / 864e5) % l.length];
+    const n = Math.floor(Date.parse(datum + 'T12:00:00Z') / 864e5);
+    const hoofd = process.env.OPENAI_TTS_VOICE || l[n % l.length];
+    const rest = l.filter(x => x !== hoofd); if (!rest.length) rest.push(hoofd);
+    return { hoofd, advies: rest[n % rest.length], cta: rest[(n + 1) % rest.length] };
   }
-  async function tts(tekst, uitPad) {
+  const ROL = { actie: 'advies', week: 'advies', cta: 'cta' };
+  const ROL_INSTR = {
+    hoofd: 'Je bent een Vlaamse weerpresentator op de radio. Spreek natuurlijk, warm en betrokken, met levendige intonatie en een glimlach in de stem. Vlot tempo, korte natuurlijke pauzes. Nederlands met een Vlaamse tongval. Getallen voluit.',
+    advies: 'Je bent een Vlaamse energie-adviseur die een bedrijfsleider concreet coacht. Praktisch, zelfzeker en vriendelijk, met nadruk op de uren en wat te doen. Vlot tempo, natuurlijke intonatie. Nederlands met een Vlaamse tongval. Getallen voluit.',
+    cta: 'Je bent een rustige, uitnodigende Vlaamse stem die een persoonlijk aanbod doet. Warm, kort en duidelijk, zonder verkooppraat. Nederlands met een Vlaamse tongval.'
+  };
+  async function tts(tekst, uitPad, rol = 'hoofd') {
+    const stem = (_stemmen && _stemmen[rol]) || 'marin';
     const prov = (process.env.TTS_PROVIDER || '').toLowerCase();
     if (prov === 'openai' && process.env.OPENAI_API_KEY) {
       const r = await fetch('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: _stemVanDag || 'marin', input: tekst, response_format: 'mp3', instructions: 'Je bent een Vlaamse weerpresentator op de radio. Spreek natuurlijk, warm en betrokken, met levendige intonatie en een glimlach in de stem, alsof je een collega bijpraat. Vlot tempo, korte natuurlijke pauzes tussen zinnen, nadruk op de uren en de actie. Spreek Nederlands met een Vlaamse tongval. Getallen voluit.' }) });
+        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: stem, input: tekst, response_format: 'mp3', instructions: ROL_INSTR[rol] || ROL_INSTR.hoofd }) });
       if (!r.ok) throw new Error('openai tts ' + r.status + ' ' + (await r.text()).slice(0, 200));
       fs.writeFileSync(uitPad, Buffer.from(await r.arrayBuffer())); return true;
     }
@@ -338,7 +370,7 @@ module.exports = function mountEwb(app, opt = {}) {
     reeks.forEach((v, i) => {
       if (v == null) return;
       const h0 = i % 24;
-      const kl = i < 24 && A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 && h0 >= A.nacht.van && h0 < A.nacht.tot ? '#2f8f5b' : i < 24 && A.goedkoop && h0 >= A.goedkoop.van && h0 < A.goedkoop.tot ? C.groen : i < 24 && A.duur && h0 >= A.duur.van && h0 < A.duur.tot ? C.rood : v < 0 ? C.groen : (i >= 24 ? '#2c4a7a' : C.blauw);
+      const kl = i < (A.start || 0) ? '#2a3550' : inB(A.nacht, i) ? '#2f8f5b' : inB(A.goedkoop, i) ? C.groen : inB(A.duur, i) ? C.rood : v < 0 ? C.groen : (i >= 24 ? '#3d6db0' : C.blauw);
       const y1 = y(Math.max(v, 0)), y2 = y(Math.min(v, 0));
       s += `<rect x="${i * bw + 2}" y="${Math.min(y1, y2)}" width="${bw - 4}" height="${Math.max(2, Math.abs(y2 - y1))}" rx="3" fill="${kl}"/>`;
     });
@@ -397,12 +429,12 @@ module.exports = function mountEwb(app, opt = {}) {
       const w = A.weerV || {}; const kv = [['Temperatuur', w.tmin != null ? `${nl0(w.tmin)}–${nl0(w.tmax)} °C` : '—'], ['Zon (PV België)', A.zonV ? `${nl0(A.zonV.som / 1000)} GWh` : '—'], ['Wind gemiddeld', A.windV ? `${nl1(A.windV.gem / 1000)} GW` : '—'], ['Neerslag', w.regen != null ? `${nl0(w.regen)} mm` : '—']];
       return `<div class="grid">${kv.map(([k, v]) => `<div class="tegel"><div class="tl">${k}</div><div class="tv">${v}</div></div>`).join('')}</div>`;
     }
-    if (id === 'prijs') return `<div class="kpi"><span>gemiddeld <b>${A.gemV != null ? nl0(A.gemV) : '—'} €/MWh</b></span><span style="color:${C.groen}">goedkoop ${A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? uu(A.nacht.van) + '–' + uu(A.nacht.tot) + ' · ' : ''}${A.goedkoop ? uu(A.goedkoop.van) + '–' + uu(A.goedkoop.tot) : '—'}</span><span style="color:${C.rood}">duur ${A.duur ? uu(A.duur.van) + '–' + uu(A.duur.tot) : '—'}</span></div>${prijsSvg(A, 960, 480)}`;
+    if (id === 'prijs') return `<div class="kpi"><span>gemiddeld <b>${A.gemV != null ? nl0(A.gemV) : '—'} €/MWh</b></span><span style="color:${C.groen}">goedkoop ${A.nacht ? kort(A.nacht) + ' · ' : ''}${A.goedkoop ? kort(A.goedkoop) : '—'}</span><span style="color:${C.rood}">duur ${A.duur ? kort(A.duur) : '—'}</span></div>${prijsSvg(A, 960, 480)}`;
     if (id === 'net') {
       const g = A.gas && A.gas.ttf, o = A.gas && A.gas.opslag && A.gas.opslag.eu;
       return `${mixSvg(d, 960, 300)}<div class="leg">${[['kern', C.paars], ['gas', C.rood], ['wind', C.windG], ['zon', C.oranje], ['water', C.water], ['opslag', C.cyan]].map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join('')}</div>${A.gasHist && A.gasHist.length > 2 ? `<div class="sub2" style="font-size:26px;margin-top:6px">Europese gasprijs sinds 1/1/2024 (€/MWh, maandgemiddelde · nu = TTF)</div>${gasSvg(A, 960, 175)}` : ''}<div class="kpi">${g ? `<span>TTF gas <b>${nl0(g.prijs)} €/MWh</b></span>` : ''}${o && o.vol_pct != null ? `<span>EU-gasopslag <b>${nl0(o.vol_pct)}%</b>${o.vorig_jaar_pct != null ? ` (vorig jaar ${nl0(o.vorig_jaar_pct)}%)` : ''}</span>` : ''}</div>`;
     }
-    if (id === 'actie') return `${!A.negatief.length && A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? `<div class="actie">🌙 ${uu(A.nacht.van)}–${uu(A.nacht.tot)}</div>` : ''}<div class="actie">${A.negatief.length ? `⚡ ${uu(A.negatief[0])}–${uu(A.negatief[A.negatief.length - 1] + 1)}` : A.goedkoop ? `🔌 ${uu(A.goedkoop.van)}–${uu(A.goedkoop.tot)}` : '—'}</div><div class="sub2">${A.duur && !A.negatief.length ? `🔋 vol vóór ${uu(A.duur.van)}` : ''}</div>`;
+    if (id === 'actie') return `${!A.negatief.length && A.nacht ? `<div class="actie" style="font-size:76px;white-space:nowrap">🌙 ${kort(A.nacht)}</div>` : ''}<div class="actie" style="font-size:76px;white-space:nowrap">${A.negatief.length ? `⚡ ${A.negatief[0] >= 24 ? 'morgen ' : ''}${uu(A.negatief[0])}–${uu(A.negatief[A.negatief.length - 1] + 1)}` : A.goedkoop ? `🔌 ${kort(A.goedkoop)}` : '—'}</div><div class="sub2">${A.duur && !A.negatief.length ? `🔋 vol vóór ${voor(A.duur.van)}` : ''}</div>`;
     if (id === 'week') return `<div class="week">${A.week.map(x => `<div class="wd"><div class="wn">${x.dag}</div><div class="wt">${x.tmin != null ? nl0(x.tmin) + '/' + nl0(x.tmax) + '°' : '—'}</div><div class="wv">💨 ${x.windGw != null ? nl1(x.windGw) : '—'}</div><div class="wv">☀️ ${x.zonGwh != null ? nl0(x.zonGwh) : '—'}</div><div class="wr" style="color:${KLEUR[x.richting]}">${ICOON[x.richting]}</div></div>`).join('')}</div><div class="sub2">💨 wind GW · ☀️ zon GWh · ▼ goedkoper ▲ duurder dan vandaag (verwachting)</div>`;
     if (id === 'cta') return `<div class="sub2" style="font-size:40px;color:#e8edf5">Wat betekent dit voor jouw bedrijf?</div><div class="cta">Je afrekening naar</div><div class="cta" style="color:#4be08a;font-size:54px;white-space:nowrap">${CTA_MAIL}</div><div class="sub2">Persoonlijke voorspelling terug.</div>`;
     return '';
@@ -439,7 +471,7 @@ module.exports = function mountEwb(app, opt = {}) {
     if (type === 'mist') g += `<rect width="1080" height="760" fill="#e9edf0" opacity=".35"/>`;
     return 'data:image/svg+xml;base64,' + Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760">${g}</svg>`).toString('base64');
   }
-  const THEMA = { kern: 'nuclear power plant cooling tower', gas: 'gas pipeline industry', wind: 'offshore wind farm', zon: 'solar panels sunlight', import: 'high voltage power lines', koude: 'frost winter morning landscape' };
+  const THEMA = { advies: 'electric car charging station', adviesZon: 'solar panels roof business', kern: 'nuclear power plant cooling tower', gas: 'gas pipeline industry', wind: 'offshore wind farm', zon: 'solar panels sunlight', import: 'high voltage power lines', koude: 'frost winter morning landscape' };
   async function weerFoto(type, datum, thema) {
     const key = process.env.UNSPLASH_ACCESS_KEY; if (!key) return null;
     const q = thema && THEMA[thema] ? THEMA[thema] : { helder: 'sunny countryside Belgium', halfbewolkt: 'clouds fields Flanders', bewolkt: 'overcast sky landscape Belgium', regen: 'rain city Belgium', mist: 'foggy morning Flanders', sneeuw: 'snow landscape Belgium', onweer: 'storm clouds landscape' }[type];
@@ -457,7 +489,7 @@ module.exports = function mountEwb(app, opt = {}) {
   const FOTO = datum => { const d = new Date(datum + 'T12:00:00Z'); const n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5); return `https://app.energie-compas.eu/ec-img/factuurcheck/fc-${String((n % 24) + 1).padStart(2, '0')}.jpg`; };
   function sceneHtml(sc, A, d, caption, metStem) {
     const fotoScene = sc.id === 'intro' || sc.id === 'cta';
-    const bg = (A.weerFoto && A.weerFoto.url) || luchtSvg(weerType(A.weerV && A.weerV.code));
+    const bg = sc.id === 'cta' ? FOTO(A.datum) : ((A.weerFoto && A.weerFoto.url) || luchtSvg(weerType(A.weerV && A.weerV.code)));
     const chip = `<div class="chip"><div class="kompas"><img src="https://app.energie-compas.eu/apps/ec-logo.png" onerror="this.style.display='none'"></div>${sc.id === 'actie' || sc.id === 'cta' ? '<div class="badge">ACTIE</div>' : '<div class="badge stil">7u30</div>'}</div>`;
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -483,12 +515,12 @@ module.exports = function mountEwb(app, opt = {}) {
 .badge{background:#05B050;color:#fff;font-weight:800;font-size:30px;letter-spacing:3px;padding:8px 20px;border-radius:10px}.badge.stil{background:#14203a}
 .band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050;z-index:3}
 </style></head><body>
-${fotoScene ? '<div class="foto"></div>' : sc.id === 'weer' ? '<div class="foto zacht"></div>' : sc.id === 'net' && A.themaFoto ? `<div class="foto zacht" style="background-image:url('${A.themaFoto.url}')"></div>` : ''}
+${fotoScene ? '<div class="foto"></div>' : sc.id === 'weer' ? '<div class="foto zacht"></div>' : sc.id === 'net' && A.themaFoto ? `<div class="foto zacht" style="background-image:url('${A.themaFoto.url}')"></div>` : (sc.id === 'actie' || sc.id === 'week') && A.adviesFoto ? `<div class="foto zacht" style="background-image:url('${A.adviesFoto.url}')"></div>` : ''}
 <div class="brow">Energieweerbericht · ${esc(datumLang(A.datum))}</div>
 ${sc.titel ? `<div class="titel">${esc(sc.titel)}</div>` : ''}
 <div class="paneel${fotoScene ? ' onder' : ''}${sc.id === 'cta' ? ' eind' : ''}${sc.id === 'net' ? ' net' : ''}">${scenePaneel(sc.id, A, d)}</div>
 ${caption ? `<div class="cap">${esc(caption)}</div>` : ''}
-<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance · gas historiek: IMF/FRED${sc.id === 'net' && A.themaFoto ? ' · ' + esc(A.themaFoto.credit) : A.weerFoto && A.weerFoto.credit ? ' · ' + esc(A.weerFoto.credit) : ''}${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
+<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance · gas historiek: IMF/FRED${sc.id === 'net' && A.themaFoto ? ' · ' + esc(A.themaFoto.credit) : (sc.id === 'actie' || sc.id === 'week') && A.adviesFoto ? ' · ' + esc(A.adviesFoto.credit) : sc.id !== 'cta' && A.weerFoto && A.weerFoto.credit ? ' · ' + esc(A.weerFoto.credit) : ''}${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
 ${chip}<div class="band"></div>
 </body></html>`;
   }
@@ -512,7 +544,7 @@ ${chip}<div class="band"></div>
         if (metStem !== false) {
           try {
             const ap = path.join(dir, 'blok' + String(i).padStart(3, '0') + '.mp3');
-            if (await tts(spreek.join(' '), ap)) {
+            if (await tts(spreek.join(' '), ap, ROL[sc.id] || 'hoofd')) {
               metStem = true;
               const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.15));
               if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
@@ -665,13 +697,14 @@ ${metStop || ''}
       const A = analyse(d, vorigeDatum ? st.dagen[vorigeDatum].kern : null);
       A.weerFoto = await weerFoto(weerType(A.weerV && A.weerV.code), datum);
       A.themaFoto = A.verhaal && A.verhaal !== 'weer' ? await weerFoto(null, datum, A.verhaal) : null;
-      _stemVanDag = stemVoor(datum);
+      A.adviesFoto = await weerFoto(null, datum, A.negatief && A.negatief.length ? 'adviesZon' : 'advies');
+      _stemmen = stemmenVoor(datum);
       const script = maakScript(A);
       const r = await render(d, A, script, dir);
       const v = `${datum}/video.mp4`, po = `${datum}/poster.jpg`;
       await sbPut('ewb', v, fs.readFileSync(r.video), 'video/mp4');
       await sbPut('ewb', po, fs.readFileSync(r.poster), 'image/jpeg');
-      const dag = { datum, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemVanDag : null, ttsFout: r.ttsFout || undefined,
+      const dag = { datum, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemmen : null, ttsFout: r.ttsFout || undefined,
         video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten,
         kern: { gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, verhaal: A.verhaal, pVandaag: A.pVandaag, weerV: A.weerV },
         status: (st.dagen[datum] && st.dagen[datum].status) || 'klaar' };
