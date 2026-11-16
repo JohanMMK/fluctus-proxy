@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.14'; // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.15'; // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -225,6 +225,14 @@ module.exports = function mountEwb(app, opt = {}) {
       const r = ren(x); const t = x.tmin != null ? (x.tmin + x.tmax) / 2 : tV;
       const score = (r - renV) * 1.0 + (t - tV) * 0.08; // + = goedkoper
       x.richting = score > 0.6 ? 'goedkoper' : score < -0.6 ? 'duurder' : 'gelijk';
+      // v1.0.15: reden per dag uit de eigen cijfers van die dag (geen vaste formule meer)
+      const windV = A.windV ? A.windV.gem / 1000 : null, zonV = A.zonV ? A.zonV.som / 1000 : null;
+      x.redenen = [];
+      if (x.windGw != null && (x.windGw < 1 || (windV != null && x.windGw < 0.7 * windV))) x.redenen.push('weinig wind');
+      if (x.zonGwh != null && zonV != null && x.zonGwh < 0.7 * zonV) x.redenen.push('weinig zon');
+      if (x.tmax != null && x.tmax <= 0) x.redenen.push('vrieskou');
+      else if (x.tmin != null && x.tmin <= -3) x.redenen.push('nachtvorst');
+      else if (x.tmin != null && t < tV - 3) x.redenen.push('kouder weer');
     }
     A.richtingMorgen = A.week[0] ? A.week[0].richting : 'gelijk';
     // mix: laatste 24 u beschikbaar
@@ -330,7 +338,11 @@ module.exports = function mountEwb(app, opt = {}) {
     if (m) wk.push(`Morgen ${m.tmin != null ? nl0(m.tmin) + ' tot ' + nl0(m.tmax) + ' graden' : ''}${m.windGw != null ? ` en ${nl1(m.windGw)} gigawatt wind` : ''}: ${m.richting === 'goedkoper' ? 'een goedkopere' : m.richting === 'duurder' ? 'een duurdere' : 'een gelijkaardige'} stroomdag.`);
     const duur = A.week.slice(1).filter(x => x.richting === 'duurder').map(x => dagNaam(x.datum));
     const goed = A.week.slice(1).filter(x => x.richting === 'goedkoper').map(x => dagNaam(x.datum));
-    if (duur.length) wk.push(`Opgelet voor ${duur.length === 1 ? duur[0] : duur.slice(0, -1).join(', ') + ' en ' + duur[duur.length - 1]}: weinig wind of zon${A.week.some(x => x.tmin != null && x.tmin < 1) ? ' en vrieskou' : ''}.`); // v1.0.12: goedkopere dagen later enkel in beeld
+    if (duur.length) {
+      const red = [...new Set(A.week.slice(1).filter(x => x.richting === 'duurder').flatMap(x => x.redenen || []))];
+      const lijst = red.length > 1 ? red.slice(0, -1).join(', ') + ' en ' + red[red.length - 1] : red[0];
+      wk.push(`Opgelet voor ${duur.length === 1 ? duur[0] : duur.slice(0, -1).join(', ') + ' en ' + duur[duur.length - 1]}: ${lijst ? lijst + ', dus duurdere stroom' : 'dan verwachten we duurdere stroom'}.`);
+    } // v1.0.12: goedkopere dagen later enkel in beeld
     void goed;
     sc.push({ id: 'week', titel: 'Morgen en de komende dagen', zinnen: wk.length ? wk : ['Het vooruitzicht voor de komende dagen volgt morgen.'] });
     // 6. CTA (vast)
