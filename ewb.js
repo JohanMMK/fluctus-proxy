@@ -1228,5 +1228,5 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
   let _uitlegFout = null;
   app.get('/api/uitleg/:app/status', async (req, res) => { const st = await state(); res.json({ bezig: uitlegBezig, fout: _uitlegFout, laatste: st.uitleg && st.uitleg[req.params.app] || null }); });
 
-  return { genereer, publiceer, _intern: { maakUitleg, UITLEG, analyse, maakScript, sceneHtml, render, haalData, brussel } };
+  return { genereer, publiceer, _intern: { maakUitleg, UITLEG, analyse, maakScript, sceneHtml, render, haalData, brussel, renderSting, STING_S, JINGLE_BEGIN, JINGLE_EINDE } };   // + renderSting/jingles voor vena-video.js (V&A-video)
 };
