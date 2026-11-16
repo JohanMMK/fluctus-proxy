@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.13'; // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.14'; // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -264,6 +264,14 @@ module.exports = function mountEwb(app, opt = {}) {
 
   // ── script (vast format) ───────────────────────────────────────────────────────────────────
   const GRENS = { France: 'Frankrijk', Netherlands: 'Nederland', Germany: 'Duitsland', UnitedKingdom: 'het VK', Luxembourg: 'Luxemburg' };
+  const GROET = ['Ik wens je een energieke dag.', 'Een energieke dag gewenst!', 'Maak er een energieke dag van. Tot morgen!', 'Veel energie vandaag!', 'Hou de stroom erin, en een energieke dag gewenst.', 'Laad ook jezelf op: een energieke dag!', 'Tot morgen, en een energieke dag toegewenst.'];
+  const GROET_VRIJDAG = ['Een energiek weekend gewenst!', 'Fijn weekend, en laad je batterijen op!', 'Tot maandag, en een energiek weekend!'];
+  function afsluiter(datum) {
+    const d = new Date(datum + 'T12:00:00Z'), dag = Math.floor(d / 864e5), wk = Math.floor((dag + 3) / 7); // weken sinds 1970 (maandag-start)
+    const wd = Math.min(4, Math.max(0, (d.getUTCDay() + 6) % 7)); // ma=0 … vr=4
+    if (d.getUTCDay() === 5) return GROET_VRIJDAG[wk % GROET_VRIJDAG.length];
+    return GROET[(wk * 4 + wd) % GROET.length]; // werkdagteller (ma–do) → geen vaste groet per weekdag
+  }
   function maakScript(A) {
     const sc = [];
     sc.push({ id: 'intro', zinnen: [`Goedemorgen. Dit is het energieweerbericht van ${datumLang(A.datum)}.`] });
@@ -326,7 +334,8 @@ module.exports = function mountEwb(app, opt = {}) {
     void goed;
     sc.push({ id: 'week', titel: 'Morgen en de komende dagen', zinnen: wk.length ? wk : ['Het vooruitzicht voor de komende dagen volgt morgen.'] });
     // 6. CTA (vast)
-    sc.push({ id: 'cta', geenCaption: true, naloop: 5, zinnen: ['Wat betekent dit voor jouw bedrijf? Scan de code, voeg je energiefactuur toe en je krijgt een analyse op maat.'] });
+    // v1.0.14: kort en wisselend afsluiten — «Vraag een analyse op maat.» + groet die per dag roteert (vrijdag: weekend)
+    sc.push({ id: 'cta', geenCaption: true, naloop: 5, zinnen: ['Vraag een analyse op maat. ' + afsluiter(A.datum)] });
     return sc;
   }
 
