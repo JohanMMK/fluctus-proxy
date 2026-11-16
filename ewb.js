@@ -31,7 +31,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.0.1'; // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.0.2'; // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -261,16 +261,24 @@ module.exports = function mountEwb(app, opt = {}) {
     else if (goed.length) wk.push(`Later deze week wordt ${goed.join(' en ')} goedkoper dankzij meer wind of zon.`);
     sc.push({ id: 'week', titel: 'Morgen en de komende dagen', zinnen: wk.length ? wk : ['Het vooruitzicht voor de komende dagen volgt morgen.'] });
     // 6. CTA (vast)
-    sc.push({ id: 'cta', zinnen: [`Wil je weten wat dit voor jouw bedrijf betekent? Mail je energiefactuur naar ${'dossier apenstaartje energie-compas punt e u'} en je krijgt een persoonlijke voorspelling.`], tekst: [`Wil je weten wat dit voor jouw bedrijf betekent? Mail je energiefactuur naar ${CTA_MAIL} en je krijgt een persoonlijke voorspelling.`] });
+    sc.push({ id: 'cta', geenCaption: true, naloop: 3.5, zinnen: ['Wil je weten wat dit voor jouw bedrijf betekent? Stuur ons je energiefactuur. Het adres staat in beeld.'] });
     return sc;
   }
 
   // ── TTS ────────────────────────────────────────────────────────────────────────────────────
+  // v1.0.2: stem roteert per aflevering (vaste stem binnen één video). Lijst via OPENAI_TTS_VOICES (komma's);
+  //   OPENAI_TTS_VOICE = één vaste stem (wint). Index = dagnummer sinds 1970, dus elke werkdag een andere.
+  let _stemVanDag = null;
+  function stemVoor(datum) {
+    if (process.env.OPENAI_TTS_VOICE) return process.env.OPENAI_TTS_VOICE;
+    const l = (process.env.OPENAI_TTS_VOICES || 'marin,cedar,coral,sage,verse').split(',').map(x => x.trim()).filter(Boolean);
+    return l[Math.floor(Date.parse(datum + 'T12:00:00Z') / 864e5) % l.length];
+  }
   async function tts(tekst, uitPad) {
     const prov = (process.env.TTS_PROVIDER || '').toLowerCase();
     if (prov === 'openai' && process.env.OPENAI_API_KEY) {
       const r = await fetch('https://api.openai.com/v1/audio/speech', { method: 'POST', headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: process.env.OPENAI_TTS_VOICE || 'cedar', input: tekst, response_format: 'mp3', instructions: 'Spreek Nederlands zoals een Vlaamse radionieuwslezer: helder, zakelijk en in een vlot tempo, zonder lange pauzes. Getallen voluit.' }) });
+        body: JSON.stringify({ model: 'gpt-4o-mini-tts', voice: _stemVanDag || 'marin', input: tekst, response_format: 'mp3', instructions: 'Je bent een Vlaamse weerpresentator op de radio. Spreek natuurlijk, warm en betrokken, met levendige intonatie en een glimlach in de stem, alsof je een collega bijpraat. Vlot tempo, korte natuurlijke pauzes tussen zinnen, nadruk op de uren en de actie. Spreek Nederlands met een Vlaamse tongval. Getallen voluit.' }) });
       if (!r.ok) throw new Error('openai tts ' + r.status + ' ' + (await r.text()).slice(0, 200));
       fs.writeFileSync(uitPad, Buffer.from(await r.arrayBuffer())); return true;
     }
@@ -291,8 +299,8 @@ module.exports = function mountEwb(app, opt = {}) {
     const reeks = A.pVandaag.concat(A.morgenBekend ? A.pMorgen : []);
     const vals = reeks.filter(x => x != null); if (!vals.length) return '';
     const lo = Math.min(0, ...vals), hi = Math.max(...vals) * 1.08, n = reeks.length, bw = w / n;
-    const y = v => h - 30 - (v - lo) / (hi - lo) * (h - 50);
-    let s = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">`;
+    const y = v => h - 70 - (v - lo) / (hi - lo) * (h - 90); // onderaan ruimte voor uren + dag
+    let s = `<svg width="${w}" height="${h}" style="overflow:visible" xmlns="http://www.w3.org/2000/svg">`;
     if (lo < 0) s += `<line x1="0" x2="${w}" y1="${y(0)}" y2="${y(0)}" stroke="${C.grijs}" stroke-width="2"/>`;
     reeks.forEach((v, i) => {
       if (v == null) return;
@@ -301,8 +309,16 @@ module.exports = function mountEwb(app, opt = {}) {
       const y1 = y(Math.max(v, 0)), y2 = y(Math.min(v, 0));
       s += `<rect x="${i * bw + 2}" y="${Math.min(y1, y2)}" width="${bw - 4}" height="${Math.max(2, Math.abs(y2 - y1))}" rx="3" fill="${kl}"/>`;
     });
-    for (const t of [0, 6, 12, 18]) s += `<text x="${t * bw + 2}" y="${h - 6}" fill="${C.grijs}" font-size="24">${t}u</text>`;
-    if (A.morgenBekend) s += `<text x="${24 * bw + 6}" y="${h - 6}" fill="${C.grijs}" font-size="24">morgen</text>`;
+    // v1.0.2: uren om de 3 u onder de staven, daaronder de dag per blok van 24 u
+    const dagen = [A.datum].concat(A.morgenBekend ? [plusDag(A.datum, 1)] : []);
+    dagen.forEach((dg, di) => {
+      const x0 = di * 24 * bw;
+      for (let t = 0; t < 24; t += 3) s += `<text x="${(x0 + (t + 0.5) * bw).toFixed(1)}" y="${h - 40}" fill="${C.grijs}" font-size="${dagen.length > 1 ? 21 : 26}" text-anchor="middle">${t}u</text>`;
+      const lbl = new Date(dg + 'T12:00:00Z'); const naam = `${WD[lbl.getUTCDay()]} ${lbl.getUTCDate()}/${lbl.getUTCMonth() + 1}`;
+      s += `<line x1="${(x0 + 4).toFixed(1)}" x2="${(x0 + 24 * bw - 4).toFixed(1)}" y1="${h - 30}" y2="${h - 30}" stroke="#2c3e63" stroke-width="2"/>`;
+      s += `<text x="${(x0 + 12 * bw).toFixed(1)}" y="${h - 4}" fill="#e8edf5" font-size="28" font-weight="600" text-anchor="middle">${di === 0 ? 'vandaag · ' : 'morgen · '}${naam}</text>`;
+      if (di > 0) s += `<line x1="${x0.toFixed(1)}" x2="${x0.toFixed(1)}" y1="20" y2="${h - 30}" stroke="#2c3e63" stroke-width="2" stroke-dasharray="6 6"/>`;
+    });
     s += `<text x="${w - 4}" y="${y(hi / 1.08) - 6}" fill="${C.grijs}" font-size="24" text-anchor="end">${nl0(Math.max(...vals))} €/MWh</text>`;
     return s + '</svg>';
   }
@@ -334,33 +350,78 @@ module.exports = function mountEwb(app, opt = {}) {
       const w = A.weerV || {}; const kv = [['Temperatuur', w.tmin != null ? `${nl0(w.tmin)}–${nl0(w.tmax)} °C` : '—'], ['Zon (PV België)', A.zonV ? `${nl0(A.zonV.som / 1000)} GWh` : '—'], ['Wind gemiddeld', A.windV ? `${nl1(A.windV.gem / 1000)} GW` : '—'], ['Neerslag', w.regen != null ? `${nl0(w.regen)} mm` : '—']];
       return `<div class="grid">${kv.map(([k, v]) => `<div class="tegel"><div class="tl">${k}</div><div class="tv">${v}</div></div>`).join('')}</div>`;
     }
-    if (id === 'prijs') return `<div class="kpi"><span>gemiddeld <b>${A.gemV != null ? nl0(A.gemV) : '—'} €/MWh</b></span><span style="color:${C.groen}">goedkoop ${A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? uu(A.nacht.van) + '–' + uu(A.nacht.tot) + ' · ' : ''}${A.goedkoop ? uu(A.goedkoop.van) + '–' + uu(A.goedkoop.tot) : '—'}</span><span style="color:${C.rood}">duur ${A.duur ? uu(A.duur.van) + '–' + uu(A.duur.tot) : '—'}</span></div>${prijsSvg(A, 960, 560)}`;
+    if (id === 'prijs') return `<div class="kpi"><span>gemiddeld <b>${A.gemV != null ? nl0(A.gemV) : '—'} €/MWh</b></span><span style="color:${C.groen}">goedkoop ${A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? uu(A.nacht.van) + '–' + uu(A.nacht.tot) + ' · ' : ''}${A.goedkoop ? uu(A.goedkoop.van) + '–' + uu(A.goedkoop.tot) : '—'}</span><span style="color:${C.rood}">duur ${A.duur ? uu(A.duur.van) + '–' + uu(A.duur.tot) : '—'}</span></div>${prijsSvg(A, 960, 480)}`;
     if (id === 'net') {
       const g = A.gas && A.gas.ttf, o = A.gas && A.gas.opslag && A.gas.opslag.eu;
       return `${mixSvg(d, 960, 470)}<div class="leg">${[['kern', C.paars], ['gas', C.rood], ['wind', C.windG], ['zon', C.oranje], ['water', C.water], ['opslag', C.cyan]].map(([k, c]) => `<span><i style="background:${c}"></i>${k}</span>`).join('')}</div><div class="kpi">${g ? `<span>TTF gas <b>${nl0(g.prijs)} €/MWh</b></span>` : ''}${o && o.vol_pct != null ? `<span>EU-gasopslag <b>${nl0(o.vol_pct)}%</b>${o.vorig_jaar_pct != null ? ` (vorig jaar ${nl0(o.vorig_jaar_pct)}%)` : ''}</span>` : ''}</div>`;
     }
     if (id === 'actie') return `${!A.negatief.length && A.nacht && A.goedkoop && A.nacht.g < A.goedkoop.g - 15 ? `<div class="actie">🌙 ${uu(A.nacht.van)}–${uu(A.nacht.tot)}</div>` : ''}<div class="actie">${A.negatief.length ? `⚡ ${uu(A.negatief[0])}–${uu(A.negatief[A.negatief.length - 1] + 1)}` : A.goedkoop ? `🔌 ${uu(A.goedkoop.van)}–${uu(A.goedkoop.tot)}` : '—'}</div><div class="sub2">${A.duur && !A.negatief.length ? `🔋 vol vóór ${uu(A.duur.van)}` : ''}</div>`;
     if (id === 'week') return `<div class="week">${A.week.map(x => `<div class="wd"><div class="wn">${x.dag}</div><div class="wt">${x.tmin != null ? nl0(x.tmin) + '/' + nl0(x.tmax) + '°' : '—'}</div><div class="wv">💨 ${x.windGw != null ? nl1(x.windGw) : '—'}</div><div class="wv">☀️ ${x.zonGwh != null ? nl0(x.zonGwh) : '—'}</div><div class="wr" style="color:${KLEUR[x.richting]}">${ICOON[x.richting]}</div></div>`).join('')}</div><div class="sub2">💨 wind GW · ☀️ zon GWh · ▼ goedkoper ▲ duurder dan vandaag (verwachting)</div>`;
-    if (id === 'cta') return `<div class="cta">Wat betekent dit voor jouw bedrijf?</div><div class="sub2">Mail je energiefactuur naar <b style="color:#4be08a">${CTA_MAIL}</b>.<br>Persoonlijke voorspelling terug.</div>`;
+    if (id === 'cta') return `<div class="sub2" style="font-size:40px;color:#e8edf5">Wat betekent dit voor jouw bedrijf?</div><div class="cta">Je afrekening naar</div><div class="cta" style="color:#4be08a;font-size:54px;white-space:nowrap">${CTA_MAIL}</div><div class="sub2">Persoonlijke voorspelling terug.</div>`;
     return '';
   }
+  // ── weerbeeld van de dag (v1.0.2) ─────────────────────────────────────────────────────────
+  // Zonder sleutel: getekend sfeerbeeld (lucht volgens het weer van vandaag, Vlaams landschap met windmolens).
+  // Met UNSPLASH_ACCESS_KEY: echte foto volgens het weertype (gratis licentie, vermelding fotograaf in beeld).
+  function weerType(code) {
+    if (code == null) return 'bewolkt';
+    if (code >= 95) return 'onweer'; if (code >= 71 && code <= 77 || code === 85 || code === 86) return 'sneeuw';
+    if (code >= 51 && code <= 67 || code >= 80 && code <= 82) return 'regen'; if (code === 45 || code === 48) return 'mist';
+    if (code === 3) return 'bewolkt'; if (code === 2) return 'halfbewolkt'; return 'helder';
+  }
+  function luchtSvg(type) {
+    const L = { helder: ['#3f8fd8', '#bfe0f6'], halfbewolkt: ['#5b98cf', '#d3e4f0'], bewolkt: ['#7d8a9b', '#c8cfd8'], regen: ['#4e5b6c', '#9aa6b4'], mist: ['#aab4bd', '#e2e6e9'], sneeuw: ['#93a7bd', '#e6edf3'], onweer: ['#2c3442', '#6b7584'] }[type] || ['#7d8a9b', '#c8cfd8'];
+    const wolk = (x, y, s, c) => `<g fill="${c}" opacity=".92"><ellipse cx="${x}" cy="${y}" rx="${110 * s}" ry="${42 * s}"/><ellipse cx="${x - 60 * s}" cy="${y + 8 * s}" rx="${70 * s}" ry="${34 * s}"/><ellipse cx="${x + 55 * s}" cy="${y - 18 * s}" rx="${75 * s}" ry="${45 * s}"/></g>`;
+    let g = `<defs><linearGradient id="l" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="${L[0]}"/><stop offset="1" stop-color="${L[1]}"/></linearGradient><radialGradient id="z"><stop offset="0" stop-color="#fff7d6"/><stop offset=".35" stop-color="#ffe08a" stop-opacity=".9"/><stop offset="1" stop-color="#ffe08a" stop-opacity="0"/></radialGradient></defs><rect width="1080" height="760" fill="url(#l)"/>`;
+    if (type === 'helder' || type === 'halfbewolkt') g += `<circle cx="820" cy="170" r="230" fill="url(#z)"/><circle cx="820" cy="170" r="62" fill="#fff6c9"/>`;
+    if (type === 'halfbewolkt') g += wolk(300, 190, 1.2, '#ffffff') + wolk(640, 120, 0.8, '#f4f7fa');
+    if (['bewolkt', 'regen', 'onweer', 'sneeuw'].includes(type)) { const c = type === 'bewolkt' ? '#e3e7ec' : type === 'sneeuw' ? '#f2f5f8' : '#8b95a3'; g += wolk(220, 150, 1.5, c) + wolk(620, 110, 1.7, c) + wolk(960, 190, 1.3, c) + wolk(420, 260, 1.2, c); }
+    if (type === 'regen' || type === 'onweer') { let r = ''; for (let k = 0; k < 140; k++) { const x = (k * 97) % 1100, y = 230 + (k * 53) % 420; r += `<line x1="${x}" y1="${y}" x2="${x - 14}" y2="${y + 38}"/>`; } g += `<g stroke="#dde4ec" stroke-width="3" opacity=".55">${r}</g>`; }
+    if (type === 'onweer') g += `<path d="M640 200 L600 320 L640 320 L590 450 L690 290 L648 290 L690 200Z" fill="#fff3b0"/>`;
+    if (type === 'sneeuw') { let r = ''; for (let k = 0; k < 120; k++) r += `<circle cx="${(k * 89) % 1080}" cy="${200 + (k * 61) % 460}" r="${3 + k % 4}"/>`; g += `<g fill="#fff" opacity=".85">${r}</g>`; }
+    if (type === 'mist') for (let k = 0; k < 5; k++) g += `<rect x="-50" y="${330 + k * 70}" width="1200" height="34" rx="17" fill="#fff" opacity=".35"/>`;
+    // landschap: polders, populieren, windmolens
+    const veld = type === 'sneeuw' ? ['#dfe6ec', '#c9d3dc'] : ['#5f7d4f', '#46623b'];
+    g += `<path d="M0 600 Q270 560 540 590 T1080 575 V760 H0Z" fill="${veld[0]}"/><path d="M0 655 Q300 620 620 650 T1080 640 V760 H0Z" fill="${veld[1]}"/>`;
+    for (const x of [80, 110, 140, 975, 1005]) g += `<ellipse cx="${x}" cy="565" rx="11" ry="46" fill="#3c5435"/>`;
+    for (const [x, y, s] of [[330, 590, 1], [470, 585, 0.8], [760, 580, 1.15]]) {
+      const h = 210 * s; g += `<g stroke="#f1f3f5" stroke-linecap="round"><line x1="${x}" y1="${y}" x2="${x}" y2="${y - h}" stroke-width="${7 * s}"/>`;
+      for (const a of [0, 120, 240]) { const r = (a - 90) * Math.PI / 180, l = 95 * s; g += `<line x1="${x}" y1="${y - h}" x2="${(x + Math.cos(r) * l).toFixed(1)}" y2="${(y - h + Math.sin(r) * l).toFixed(1)}" stroke-width="${6 * s}"/>`; }
+      g += `<circle cx="${x}" cy="${y - h}" r="${8 * s}" fill="#f1f3f5"/></g>`;
+    }
+    if (type === 'mist') g += `<rect width="1080" height="760" fill="#e9edf0" opacity=".35"/>`;
+    return 'data:image/svg+xml;base64,' + Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760">${g}</svg>`).toString('base64');
+  }
+  async function weerFoto(type, datum) {
+    const key = process.env.UNSPLASH_ACCESS_KEY; if (!key) return null;
+    const q = { helder: 'sunny countryside Belgium', halfbewolkt: 'clouds fields Flanders', bewolkt: 'overcast sky landscape Belgium', regen: 'rain city Belgium', mist: 'foggy morning Flanders', sneeuw: 'snow landscape Belgium', onweer: 'storm clouds landscape' }[type];
+    try {
+      const j = await jget(`https://api.unsplash.com/search/photos?query=${encodeURIComponent(q)}&orientation=landscape&per_page=20&content_filter=high&client_id=${encodeURIComponent(key)}`);
+      const lijst = (j.results || []).filter(x => x.urls); if (!lijst.length) return null;
+      const f = lijst[(Date.parse(datum) / 864e5 | 0) % lijst.length];
+      fetch(`${f.links.download_location}${f.links.download_location.includes('?') ? '&' : '?'}client_id=${encodeURIComponent(key)}`).catch(() => {}); // Unsplash-richtlijn: download melden
+      return { url: f.urls.regular, credit: `Foto: ${f.user && f.user.name || 'Unsplash'} / Unsplash` };
+    } catch (e) { log('unsplash:', e.message); return null; }
+  }
+
   // Look-and-feel = LinkedIn-campagne factuurcheck (navy #14203a, Poppins, groene eyebrow met streep,
   // witte koppen, groene band onderaan, witte chip met kompas-symbool + groene badge «ACTIE»).
   const FOTO = datum => { const d = new Date(datum + 'T12:00:00Z'); const n = Math.floor((d - new Date(Date.UTC(d.getUTCFullYear(), 0, 0))) / 864e5); return `https://app.energie-compas.eu/ec-img/factuurcheck/fc-${String((n % 24) + 1).padStart(2, '0')}.jpg`; };
   function sceneHtml(sc, A, d, caption, metStem) {
     const fotoScene = sc.id === 'intro' || sc.id === 'cta';
+    const bg = (A.weerFoto && A.weerFoto.url) || luchtSvg(weerType(A.weerV && A.weerV.code));
     const chip = `<div class="chip"><div class="kompas"><img src="https://app.energie-compas.eu/apps/ec-logo.png" onerror="this.style.display='none'"></div>${sc.id === 'actie' || sc.id === 'cta' ? '<div class="badge">ACTIE</div>' : '<div class="badge stil">7u30</div>'}</div>`;
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
 <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}body{width:${W}px;height:${H}px;background:#14203a;color:#fff;font-family:Poppins,'DejaVu Sans',Arial,sans-serif;overflow:hidden;position:relative}
-.foto{position:absolute;left:0;right:0;top:0;height:760px;background:url('${FOTO(A.datum)}') center/cover}
+.foto{position:absolute;left:0;right:0;top:0;height:760px;background:url('${bg}') center/cover}.foto.zacht{opacity:.38}
 .foto:after{content:'';position:absolute;inset:0;background:linear-gradient(180deg,rgba(20,32,58,.85) 0%,rgba(20,32,58,.1) 22%,rgba(20,32,58,.55) 60%,#14203a 100%)}
 .brow{position:absolute;top:56px;left:72px;right:72px;display:flex;align-items:center;gap:16px;font-size:26px;font-weight:600;letter-spacing:4px;color:#05B050;text-transform:uppercase;z-index:2}
 .brow:before{content:'';width:7px;height:34px;background:#05B050;border-radius:2px}
 .titel{position:absolute;top:122px;left:72px;right:72px;font-size:66px;font-weight:800;line-height:1.08;z-index:2}
 .paneel{position:absolute;top:260px;left:72px;right:72px;height:660px;display:flex;flex-direction:column;justify-content:center;gap:26px;z-index:2}
-.paneel.onder{top:auto;bottom:420px;height:auto;justify-content:flex-end}
+.paneel.onder{top:auto;bottom:420px;height:auto;justify-content:flex-end}.paneel.eind{bottom:170px}
 .groot{font-size:88px;font-weight:800;line-height:1.05}.sub{font-size:40px;font-weight:600;line-height:1.3;color:#e8edf5}.sub2{font-size:31px;color:#b9c4d6;line-height:1.35}
 .grid{display:grid;grid-template-columns:1fr 1fr;gap:26px}.tegel{background:#1c2b4d;border-radius:20px;padding:34px}.tl{font-size:28px;color:#b9c4d6}.tv{font-size:60px;font-weight:800;margin-top:6px}
 .kpi{display:flex;gap:30px;flex-wrap:wrap;font-size:31px;color:#b9c4d6}.kpi b{color:#fff}
@@ -374,12 +435,12 @@ module.exports = function mountEwb(app, opt = {}) {
 .badge{background:#05B050;color:#fff;font-weight:800;font-size:30px;letter-spacing:3px;padding:8px 20px;border-radius:10px}.badge.stil{background:#14203a}
 .band{position:absolute;left:0;right:0;bottom:0;height:12px;background:#05B050;z-index:3}
 </style></head><body>
-${fotoScene ? '<div class="foto"></div>' : ''}
+${fotoScene ? '<div class="foto"></div>' : sc.id === 'weer' ? '<div class="foto zacht"></div>' : ''}
 <div class="brow">Energieweerbericht · ${esc(datumLang(A.datum))}</div>
 ${sc.titel ? `<div class="titel">${esc(sc.titel)}</div>` : ''}
-<div class="paneel${fotoScene ? ' onder' : ''}">${scenePaneel(sc.id, A, d)}</div>
-<div class="cap">${esc(caption)}</div>
-<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
+<div class="paneel${fotoScene ? ' onder' : ''}${sc.id === 'cta' ? ' eind' : ''}">${scenePaneel(sc.id, A, d)}</div>
+${caption ? `<div class="cap">${esc(caption)}</div>` : ''}
+<div class="voet">Bronnen: Elia Open Data · ENTSO-E/Energy-Charts · Open-Meteo · GIE AGSI+ · TTF: Yahoo Finance${A.weerFoto && A.weerFoto.credit ? ' · ' + esc(A.weerFoto.credit) : ''}${metStem ? ' · Stem gegenereerd met AI' : ''}</div>
 ${chip}<div class="band"></div>
 </body></html>`;
   }
@@ -392,30 +453,37 @@ ${chip}<div class="band"></div>
     try {
       const page = await browser.newPage(); await page.setViewport({ width: W, height: H });
       let i = 0;
+      const spreekVorm = t => t.replace(/\b(\d{1,2})u\b/g, '$1 uur').replace(/\b(\d{1,2}) uur en (\d{1,2}) uur\b/g, '$1 en $2 uur');
       for (const sc of script) {
+        // v1.0.2: één stemopname per BLOK (natuurlijker intonatie dan per zin); de zinnen krijgen elk een deel van
+        //   de blokduur volgens hun lengte. sc.naloop = stilstaand beeld na de stem (eindbeeld).
+        const spreek = sc.zinnen.map(spreekVorm);
+        const lens = spreek.map(t => Math.max(8, t.length)); const somLen = lens.reduce((a, b) => a + b, 0);
+        let blokDur = spreek.reduce((a, t) => a + Math.max(2.4, t.split(/\s+/).length / 2.8 + 0.5), 0); // leestempo zonder stem
+        let audio = null;
+        if (metStem !== false) {
+          try {
+            const ap = path.join(dir, 'blok' + String(i).padStart(3, '0') + '.mp3');
+            if (await tts(spreek.join(' '), ap)) {
+              metStem = true;
+              const tempo = Math.min(1.3, Math.max(1, +process.env.EWB_TEMPO || 1.06));
+              if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
+              blokDur = (await duur(ap)) + 0.35; audio = ap;
+            } else metStem = false;
+          } catch (e) { ttsFout = e.message; metStem = false; log('tts fout → zonder stem:', e.message); }
+        }
+        if (metStem === false && audios.length) audios.length = 0; // consistent: geen half-stem
+        const totaal = blokDur + (sc.naloop || 0);
+        if (audio) audios.push({ ap: audio, dur: totaal });
         for (let z = 0; z < sc.zinnen.length; z++) {
-          const toon = (sc.tekst && sc.tekst[z]) || sc.zinnen[z];
-          const spreek = sc.zinnen[z].replace(/\b(\d{1,2})u\b/g, '$1 uur').replace(/\b(\d{1,2}) uur en (\d{1,2}) uur\b/g, '$1 en $2 uur');
+          const toon = sc.geenCaption ? '' : ((sc.tekst && sc.tekst[z]) || sc.zinnen[z]);
           const nm = String(i).padStart(3, '0');
-          // stem
-          let dur = Math.max(2.4, spreek.split(/\s+/).length / 2.8 + 0.5); // leestempo zonder stem
-          if (metStem !== false) {
-            try {
-              const ap = path.join(dir, nm + '.mp3');
-              if (await tts(spreek, ap)) {
-                metStem = true;
-                const tempo = Math.min(1.35, Math.max(1, +process.env.EWB_TEMPO || 1.15)); // iets vlotter, zelfde toonhoogte
-                if (tempo !== 1) { const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]); fs.renameSync(ap2, ap); }
-                dur = (await duur(ap)) + 0.2; audios.push({ ap, dur });
-              } else metStem = false;
-            } catch (e) { ttsFout = e.message; metStem = false; log('tts fout → zonder stem:', e.message); }
-          }
-          if (metStem === false && audios.length) { audios.length = 0; } // consistent: geen half-stem
-          await page.setContent(sceneHtml(sc, A, d, toon, metStem === true), { waitUntil: 'load', timeout: 8000 }).catch(() => {});
+          let dur = blokDur * lens[z] / somLen; if (z === sc.zinnen.length - 1) dur += (sc.naloop || 0);
+          await page.setContent(sceneHtml(sc, A, d, toon, metStem === true), { waitUntil: 'load', timeout: 10000 }).catch(() => {});
           const png = path.join(dir, nm + '.png');
           await page.screenshot({ path: png, type: 'png' });
           if (z === 0 && sc.id === 'intro') await page.screenshot({ path: path.join(dir, 'poster.jpg'), type: 'jpeg', quality: 88 });
-          segs.push({ png, dur, nm, fadeIn: z === 0 });
+          segs.push({ png, dur, nm, fadeIn: z === 0, blok: sc.id });
           i++;
         }
       }
@@ -432,8 +500,8 @@ ${chip}<div class="band"></div>
     const stil = path.join(dir, 'video_stil.mp4');
     await run('ffmpeg', ['-y', '-f', 'concat', '-safe', '0', '-i', lf, '-c', 'copy', stil]);
     const eind = path.join(dir, 'video.mp4');
-    if (metStem && audios.length === segs.length) {
-      // audio per zin, opgevuld tot de segmentduur
+    if (metStem && audios.length === script.length) {
+      // audio per blok, opgevuld tot de blokduur (incl. naloop)
       const al = [];
       for (const a of audios) { const o = a.ap.replace('.mp3', '.wav'); await run('ffmpeg', ['-y', '-i', a.ap, '-af', `apad,atrim=0:${a.dur.toFixed(3)}`, '-ar', '44100', '-ac', '2', o]); al.push(`file '${o}'`); }
       const af = path.join(dir, 'alijst.txt'); fs.writeFileSync(af, al.join('\n'));
@@ -442,7 +510,7 @@ ${chip}<div class="band"></div>
     } else {
       await run('ffmpeg', ['-y', '-i', stil, '-c', 'copy', '-movflags', '+faststart', eind]);
     }
-    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: segs.reduce((a, s) => a + s.dur, 0), metStem: !!(metStem && audios.length === segs.length), ttsFout };
+    return { video: eind, poster: path.join(dir, 'poster.jpg'), duur: segs.reduce((a, s) => a + s.dur, 0), metStem: !!(metStem && audios.length === script.length), ttsFout };
   }
 
   // ── mail (Brevo) ───────────────────────────────────────────────────────────────────────────
@@ -541,12 +609,14 @@ ${metStop || ''}
       const d = await haalData(datum);
       const vorigeDatum = Object.keys(st.dagen).filter(k => k < datum).sort().pop();
       const A = analyse(d, vorigeDatum ? st.dagen[vorigeDatum].kern : null);
+      A.weerFoto = await weerFoto(weerType(A.weerV && A.weerV.code), datum);
+      _stemVanDag = stemVoor(datum);
       const script = maakScript(A);
       const r = await render(d, A, script, dir);
       const v = `${datum}/video.mp4`, po = `${datum}/poster.jpg`;
       await sbPut('ewb', v, fs.readFileSync(r.video), 'video/mp4');
       await sbPut('ewb', po, fs.readFileSync(r.poster), 'image/jpeg');
-      const dag = { datum, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, ttsFout: r.ttsFout || undefined,
+      const dag = { datum, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemVanDag : null, ttsFout: r.ttsFout || undefined,
         video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten,
         kern: { gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, pVandaag: A.pVandaag, weerV: A.weerV },
         status: (st.dagen[datum] && st.dagen[datum].status) || 'klaar' };
@@ -654,7 +724,7 @@ ${metStop || ''}
       const datum = (req.body && req.body.datum) || brussel().datum;
       const dag = await genereer(datum, { force: true });
       let pub = null; if (req.body && req.body.publiceer && MODE() === 'aan') pub = await publiceer(datum);
-      res.json({ ok: true, datum, video: dag.video_url, duur: dag.duur, metStem: dag.metStem, ttsFout: dag.ttsFout, fouten: dag.fouten, vetomail: !!dag.vetomail, preview: `${PUBLIC_BASE}?preview=1&s=${sign('preview')}`, publicatie: pub });
+      res.json({ ok: true, datum, video: dag.video_url, duur: dag.duur, metStem: dag.metStem, stem: dag.stem, ttsFout: dag.ttsFout, fouten: dag.fouten, vetomail: !!dag.vetomail, preview: `${PUBLIC_BASE}?preview=1&s=${sign('preview')}`, publicatie: pub });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
   app.get('/api/ewb/status', async (req, res) => {
