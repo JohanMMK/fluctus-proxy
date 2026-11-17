@@ -130,7 +130,7 @@ async function fetchRecent() {
   const mb = encodeURIComponent(_env('GRAPH_MAILBOX'));
   // v15.184: enkel de INBOX (niet de hele mailbox) → een naar 'Verwerkt' verplaatste mail valt uit de fetch en
   //   kan dus fysiek niet meer opnieuw verwerkt worden (belt-and-suspenders bovenop de verwerkt-lijst + in-proces dedup).
-  const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments,ccRecipients&$top=50`;   // v15.408.0: + cc (factuurcheck)
+  const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments,ccRecipients,toRecipients&$top=50`;   // v15.408.0: + cc (factuurcheck) · 15.433.0: + to (partner-alias Betere Lader)
   const r = await _g(q);
   if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
@@ -141,6 +141,7 @@ async function fetchRecent() {
       from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
       ontvangen: m.receivedDateTime || '',
       heeftBijlage: !!m.hasAttachments,
+      to: (m.toRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(Boolean),   // 15.433.0
       cc: (m.ccRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(a => a && a.toLowerCase() !== String(_env('GRAPH_MAILBOX')).toLowerCase()),
     }))
     .sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));
