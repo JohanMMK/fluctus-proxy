@@ -1,5 +1,5 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.0.0, 2026-11-18, Johan)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.0.1, 2026-11-18, Johan; 1.0.1: extra_dom_kw/verzwaren_dom terug)
 // ----------------------------------------------------------------------------
 // Niet «toegangsvermogen − piek» (dat is één kwartier per maand), maar: hoeveel ENERGIE kan er door de
 // aansluiting tijdens de uren dat de wagens er staan, zonder het toegangsvermogen te overschrijden.
@@ -130,7 +130,7 @@ function simHorizon(L, dagen, h, o, spot) {
     past: kortDagen <= Math.floor(n * 0.05),          // past op ≥ 95 % van de laaddagen
     dagen_te_kort: kortDagen,
     niveau_slim_kw: Math.round(maxSlim), piek_slim_kw: Math.round(Math.max(nivo0, maxSlim)), extra_slim_kw: Math.round(extraSlim),
-    piek_dom_kw: Math.round(Math.max(nivo0, maxDom)),   // je hoogste kwartier blijft sowieso staan extra_dom_kw: Math.round(extraDom), verzwaren_dom: maxDom > o.toeg,
+    piek_dom_kw: Math.round(Math.max(nivo0, maxDom)), extra_dom_kw: Math.round(extraDom), verzwaren_dom: maxDom > o.toeg,   // piek dom: je hoogste kwartier blijft sowieso staan
     net_eur_jaar_slim: Math.round(extraSlim * eur), net_eur_jaar_dom: Math.round(extraDom * eur),
     net_eur100_slim: km100 > 0 ? extraSlim * eur / km100 : null, net_eur100_dom: km100 > 0 ? extraDom * eur / km100 : null,
     gem_slim_kw: Array.from(gemSlim, v => Math.round(v / n)), gem_dom_kw: Array.from(gemDom, v => Math.round(v / n)),
@@ -176,4 +176,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, VERSIE: '1.0.0' };
+module.exports = { simuleer, bouwProfiel, vensters, VERSIE: '1.0.1' };
