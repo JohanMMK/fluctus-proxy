@@ -9,6 +9,8 @@
  *   enkel als eanBlokken leeg was) met _rol_bron 'eanNrs'; (3) deterministische PDF-tekstscan (zlib-inflate van de
  *   content-streams, GS1-controlecijfer) vult ontbrekende EAN's aan (_rol_bron 'pdf_scan'); (4) dedup op 18 cijfers;
  *   (5) aansluitingen-telling eanAansluitingen {afname, injectie, gas, zeker_afname, zeker_injectie} voor de splits-check.
+ * Versie: 1.6.1 (2026-11-18) — JAARVERBRUIK (Johan): nieuw optioneel veld jaarverbruikKwh = het jaarverbruik dat de factuur
+ *   EXPLICIET vermeldt (bv. Electrabel «Jaarverbruik : 1.043,010 MWh»). Additief; afnameKwh ongewijzigd. Gebruikt door Betere Lader.
  * Versie: 1.5.5 (2026-09-30) — PERIODE-RECONCILIATIE via tot_excl (Johan): sommige facturen leveren de ENERGIE-post én de
  *   afname als JAARcijfer terwijl distributie/heffingen/tot_excl de VERBRUIKSPERIODE (maand) betreffen (gemengde-periode-
  *   extractie; bv. Gerresheimer Momignies). tot_excl = periodetotaal = energie+distr+heffingen → energie_periode =
@@ -220,6 +222,12 @@ AFNAME / VERBRUIK — ENKEL DE FACTUURPERIODE (ZEER BELANGRIJK):
   NOOIT groter zijn dan maandpiek_kW × 24 × aantal_dagen (dat zou loadfactor > 100% = onmogelijk).
   Klopt dat niet, dan heb je de historiek meegeteld — herlees en neem enkel de periode.
 
+JAARVERBRUIK (apart veld, v1.6.1):
+- jaarverbruikKwh = enkel als de factuur EXPLICIET een jaarverbruik / verbruik over 12 maanden als getal vermeldt
+  (bv. "Jaarverbruik : 1.043,010 MWh", "Verbruik laatste 12 maanden", "Uw jaarverbruik"). Omzetten naar kWh.
+- NIET optellen uit de verbruikshistoriek of een grafiek, NIET afleiden uit afnameKwh. Niet vermeld → null.
+- Dit veld verandert afnameKwh NOOIT (afnameKwh blijft het volume van deze factuurperiode).
+
 DAG/NACHT VERBRUIK:
 - Als factuur expliciete kWh-totalen toont voor dag/nacht: vul direct in.
 - Als alleen METERSTANDEN gegeven: bereken delta's. Vermeld in _provider_notes.
@@ -387,6 +395,7 @@ JSON SCHEMA (output):
   "periodeVan": "YYYY-MM-DD",
   "periodeTot": "YYYY-MM-DD",
   "afnameKwh": number,
+  "jaarverbruikKwh": number of null,
   "afnameDagKwh": number of null,
   "afnameNachtKwh": number of null,
   "injectieKwh": number,
