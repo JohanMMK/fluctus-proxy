@@ -1,5 +1,12 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.0.1, 2026-11-18, Johan; 1.0.1: extra_dom_kw/verzwaren_dom terug)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.1.0, 2026-11-18, Johan)
+// 1.1.0: (0) per dag eigen verbruik + laden, per maand de hoogste piek → netkost per maand; grafiek = de drukste laaddag
+//        (a) netkost zonder sturing als VORK — beste geval (laden valt op je gemiddelde verbruik) en slechtste geval
+//        (laden valt bovenop je hoogste kwartier: + het volle laadvermogen); (b) €/kW uit de tariefkaart van de DNB:
+//        extra piek × maandpiektarief + wat boven het toegangsvermogen komt × toegangstarief (geen kaart → € 100/kW);
+//        (c) kost per 100 km met een DYNAMISCH contract: spot (dom/slim) + opslag + vergroening + GSC + WKK +
+//        netkost per MWh + accijns (marginale schijf), excl. btw.
+// 1.0.1: extra_dom_kw/verzwaren_dom terug
 // ----------------------------------------------------------------------------
 // Niet «toegangsvermogen − piek» (dat is één kwartier per maand), maar: hoeveel ENERGIE kan er door de
 // aansluiting tijdens de uren dat de wagens er staan, zonder het toegangsvermogen te overschrijden.
@@ -102,43 +109,82 @@ function _niveau(L, qs, D, C, hoog) {
   return hi;
 }
 
+// variabele kost per MWh bovenop de spot (dynamisch contract), voor een totaal jaarverbruik E (MWh)
+function tariefVar(t, E) {
+  if (!t) return null;
+  const band = (lijst, f) => { for (const r of (lijst || [])) if (E <= f(r)) return r; return (lijst || [])[(lijst || []).length - 1]; };
+  const sch = band(t.staffel, r => +r.max_mwh || 1e12) || {};
+  const acc = band(t.accijns, r => +r[0]) || [0, 0];
+  const d = { opslag: +sch.consumption_dam_markup || 0, vergroening: +t.vergroening || 0, gsc: +t.gsc || 0, wkk: +t.wkk || 0, net: +t.net_mwh || 0, accijns: +acc[1] || 0 };
+  d.totaal = d.opslag + d.vergroening + d.gsc + d.wkk + d.net + d.accijns;
+  for (const k in d) d[k] = Math.round(d[k] * 100) / 100;
+  return d;
+}
 function simHorizon(L, dagen, h, o, spot) {
   const D = +h.edag_kwh || 0, C = Math.max(0.1, (+h.lp || 0) * (+h.paal_kw || 11)), grens = o.grens, nivo0 = o.nivo0;
   const res = { ev: +h.ev || 0, dag_kwh: Math.round(D), laadvermogen_kw: Math.round(C) };
   if (!(D > 0)) return res;
-  let maxSlim = 0, maxDom = 0, kortDagen = 0, eSlim = 0, eDom = 0, kSlim = 0, kDom = 0;
-  const gemSlim = new Float64Array(QD), gemDom = new Float64Array(QD);
-  for (const d of dagen) {
-    // SLIM: niveau zo laag mogelijk, minstens tot de huidige piek (die kost niets extra)
-    const lam = _niveau(L, d.qs, D, C, grens);
-    const lvl = lam == null ? grens : Math.max(nivo0, lam);
-    if (lam == null) kortDagen++;
-    maxSlim = Math.max(maxSlim, lam == null ? grens : lam);
+  // één laaddag: slim (dalen vullen, goedkoopste kwartieren) en dom (meteen bij aankomst) — kW per kwartier
+  function dag(d) {
+    const lam = _niveau(L, d.qs, D, C, grens), lvl = lam == null ? grens : Math.max(nivo0, lam);
+    const slim = new Map(), dom = new Map();
     const volg = spot ? d.qs.slice().sort((a, b) => spot(a) - spot(b)) : d.qs;
     let rest = D;
-    for (const q of volg) { if (rest <= 0) break; const p = Math.min(C, Math.max(0, lvl - L[q]), rest * 4); if (p <= 0) continue; rest -= p * 0.25; eSlim += p * 0.25; if (spot) kSlim += p * 0.25 * spot(q); gemSlim[q % QD] += p; }
-    // DOM: aankomst gespreid over het eerste uur (4 cohorten), elk laadt meteen aan vol vermogen
-    const coh = [D / 4, D / 4, D / 4, D / 4];
-    d.qs.forEach((q, k) => {
-      let p = 0; for (let c = 0; c < 4; c++) if (k >= c && coh[c] > 0) { const pc = Math.min(C / 4, coh[c] * 4); coh[c] -= pc * 0.25; p += pc; }
-      if (p > 0) { maxDom = Math.max(maxDom, L[q] + p); eDom += p * 0.25; if (spot) kDom += p * 0.25 * spot(q); gemDom[q % QD] += p; }
-    });
+    for (const q of volg) { if (rest <= 0) break; const p = Math.min(C, Math.max(0, lvl - L[q]), rest * 4); if (p <= 0) continue; rest -= p * 0.25; slim.set(q, p); }
+    const coh = [D / 4, D / 4, D / 4, D / 4];   // aankomst gespreid over het eerste uur
+    d.qs.forEach((q, k) => { let p = 0; for (let c = 0; c < 4; c++) if (k >= c && coh[c] > 0) { const pc = Math.min(C / 4, coh[c] * 4); coh[c] -= pc * 0.25; p += pc; } if (p > 0) dom.set(q, p); });
+    return { lam, slim, dom };
   }
-  const n = dagen.length || 1, km100 = (+h.km_jaar || 0) / 100, kwhkm = +h.kwh_km || 0.16, eur = o.eur_kw;
+  let maxSlim = 0, maxDom = 0, maxEvDom = 0, kortDagen = 0, eSlim = 0, eDom = 0, kSlim = 0, kDom = 0, piekDag = null;
+  const mDom = new Float64Array(12), mSlim = new Float64Array(12), mBasis = new Float64Array(12);
+  for (const d of dagen) {
+    const r = dag(d);
+    if (r.lam == null) kortDagen++;
+    maxSlim = Math.max(maxSlim, r.lam == null ? grens : r.lam);
+    for (const q of d.qs) {   // site-last per kwartier = eigen verbruik + laden, per maand de hoogste
+      const ps = r.slim.get(q) || 0, pd = r.dom.get(q) || 0;
+      mSlim[d.maand] = Math.max(mSlim[d.maand], L[q] + ps); mBasis[d.maand] = Math.max(mBasis[d.maand], L[q]);
+      if (L[q] + pd > mDom[d.maand]) mDom[d.maand] = L[q] + pd;
+      if (L[q] + pd > maxDom) { maxDom = L[q] + pd; piekDag = d; }
+      if (ps > 0) { eSlim += ps * 0.25; if (spot) kSlim += ps * 0.25 * spot(q); }
+      if (pd > 0) { maxEvDom = Math.max(maxEvDom, pd); eDom += pd * 0.25; if (spot) kDom += pd * 0.25 * spot(q); }
+    }
+  }
+  const n = dagen.length || 1, km100 = (+h.km_jaar || 0) / 100, kwhkm = +h.kwh_km || 0.16;
   const extraSlim = Math.max(0, maxSlim - nivo0), extraDom = Math.max(0, maxDom - nivo0);
+  const piekDomMax = nivo0 + maxEvDom;                      // slechtste geval: laden valt bovenop je hoogste kwartier
+  // netkost: maandpiek per MAAND (hoogste kwartier van die maand boven je huidige piek), toegangsvermogen op de jaarpiek
+  const mp = o.tarief ? o.tarief.mp_eur_kw : o.eur_kw, tv = o.tarief ? o.tarief.tv_eur_kw : 0, plafond = Math.max(o.toeg, nivo0);
+  const nk = (maanden, jaarPiek) => maanden.reduce((s, x) => s + Math.max(0, x - nivo0) * mp / 12, 0) + Math.max(0, jaarPiek - plafond) * tv;
+  const actief = Array.from(mDom, (x, m) => x > 0 ? m : -1).filter(m => m >= 0);
+  const nS = nk(actief.map(m => mSlim[m]), Math.max(nivo0, maxSlim)), nD = nk(actief.map(m => mDom[m]), maxDom), nDmax = nk(actief.map(() => piekDomMax), piekDomMax);
   Object.assign(res, {
     past: kortDagen <= Math.floor(n * 0.05),          // past op ≥ 95 % van de laaddagen
     dagen_te_kort: kortDagen,
     niveau_slim_kw: Math.round(maxSlim), piek_slim_kw: Math.round(Math.max(nivo0, maxSlim)), extra_slim_kw: Math.round(extraSlim),
-    piek_dom_kw: Math.round(Math.max(nivo0, maxDom)), extra_dom_kw: Math.round(extraDom), verzwaren_dom: maxDom > o.toeg,   // piek dom: je hoogste kwartier blijft sowieso staan
-    net_eur_jaar_slim: Math.round(extraSlim * eur), net_eur_jaar_dom: Math.round(extraDom * eur),
-    net_eur100_slim: km100 > 0 ? extraSlim * eur / km100 : null, net_eur100_dom: km100 > 0 ? extraDom * eur / km100 : null,
-    gem_slim_kw: Array.from(gemSlim, v => Math.round(v / n)), gem_dom_kw: Array.from(gemDom, v => Math.round(v / n)),
+    piek_dom_kw: Math.round(Math.max(nivo0, maxDom)), extra_dom_kw: Math.round(extraDom), verzwaren_dom: maxDom > o.toeg,
+    piek_dom_max_kw: Math.round(piekDomMax), extra_dom_max_kw: Math.round(maxEvDom),
+    maandpiek_dom_kw: Array.from(mDom, Math.round), maandpiek_slim_kw: Array.from(mSlim, Math.round),
+    net_eur_jaar_slim: Math.round(nS), net_eur_jaar_dom: Math.round(nD), net_eur_jaar_dom_max: Math.round(nDmax),
+    net_eur100_slim: km100 > 0 ? nS / km100 : null, net_eur100_dom: km100 > 0 ? nD / km100 : null, net_eur100_dom_max: km100 > 0 ? nDmax / km100 : null,
   });
+  // de drukste laaddag (hoogste piek zonder sturing) — 24 u vanaf middernacht van de aankomstdag
+  if (piekDag) {
+    const r = dag(piekDag), q0 = piekDag.dag * QD, b = [], sl = [], dm = [];
+    for (let k = 0; k < QD; k++) { const q = (q0 + k) % Q; b.push(Math.round(L[q])); sl.push(Math.round(r.slim.get(q) || 0)); dm.push(Math.round(r.dom.get(q) || 0)); }
+    const dt = new Date(Date.UTC(2025, 0, 1 + piekDag.dag));
+    res.piekdag = { datum: dt.toISOString().slice(0, 10), weekdag: _weekdag(piekDag.dag), last_kw: b, slim_kw: sl, dom_kw: dm };
+  }
   if (spot && eSlim > 0 && eDom > 0) {
     const pS = kSlim / eSlim, pD = kDom / eDom;   // €/MWh
     Object.assign(res, { spot_slim_eur_mwh: Math.round(pS * 10) / 10, spot_dom_eur_mwh: Math.round(pD * 10) / 10,
       spot_eur100: (pD - pS) / 1000 * kwhkm * 100, spot_eur_jaar: Math.round((kDom / eDom - kSlim / eSlim) / 1000 * D * n) });
+    const tvr = tariefVar(o.tarief, (o.jaarMwh || 0) + D * n / 1000);
+    if (tvr) {
+      const k100 = kwhkm * 100, eD = k100 * (pD + tvr.totaal) / 1000, eS = k100 * (pS + tvr.totaal) / 1000;
+      Object.assign(res, { var_eur_mwh: tvr, stroom100_dom: eD, stroom100_slim: eS,
+        kost100_slim: eS + (res.net_eur100_slim || 0), kost100_dom: eD + (res.net_eur100_dom || 0), kost100_dom_max: eD + (res.net_eur100_dom_max || 0) });
+    }
   }
   return res;
 }
@@ -154,7 +200,7 @@ function simuleer(vorm, o, markt) {
   const lastVenster = []; dagen.forEach(d => d.qs.forEach(q => lastVenster.push(L[q])));
   const startMax = dagen.reduce((m, d) => Math.max(m, ...d.qs.slice(0, 4).map(q => L[q])), 0);
   const gemDag = new Float64Array(QD); dagen.forEach(d => { for (let k = 0; k < QD; k++) gemDag[k] += L[d.dag * QD + k]; });
-  const opt = { grens, nivo0: piek, toeg, eur_kw: +o.eur_kw > 0 ? +o.eur_kw : 100 };
+  const opt = { grens, nivo0: piek, toeg, eur_kw: +o.eur_kw > 0 ? +o.eur_kw : 100, tarief: o.tarief || null, jaarMwh: P.jaarKwh / 1000 };
   const H = {};
   for (const k of ['nu', 'm12', 'm24', 'm36']) if (o.horizons && o.horizons[k]) H[k] = simHorizon(L, dagen, o.horizons[k], opt, spot);
   // toegangsvermogen dat volstaat: hoogste van (huidige piek, slim laadniveau van de laatste horizon) + marge
@@ -173,7 +219,8 @@ function simuleer(vorm, o, markt) {
     toegang_volstaat_kw: Math.ceil(nodig / 5) * 5,
     dag_last_kw: Array.from(gemDag, v => Math.round(v / Math.max(1, dagen.length))),
     spot: !!spot, eur_kw: opt.eur_kw, horizons: H,
+    tarief: o.tarief ? { dnb: o.tarief.dnb, spanning: o.tarief.spanning, jaar: o.tarief.jaar, mp_eur_kw: Math.round(o.tarief.mp_eur_kw * 100) / 100, tv_eur_kw: Math.round(o.tarief.tv_eur_kw * 100) / 100, var_eur_mwh: tariefVar(o.tarief, P.jaarKwh / 1000) } : null,
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, VERSIE: '1.0.1' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.1.0' };
