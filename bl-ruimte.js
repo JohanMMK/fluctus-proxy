@@ -1,5 +1,6 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.1.0, 2026-11-18, Johan)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.2.0, 2026-11-18, Johan)
+// 1.2.0: PIEKCORRECTIE — korte kwartierpieken tot de gemeten maandpiek (standaardprofiel is te glad), jaarverbruik gelijk.
 // 1.1.0: (0) per dag eigen verbruik + laden, per maand de hoogste piek → netkost per maand; grafiek = de drukste laaddag
 //        (a) netkost zonder sturing als VORK — beste geval (laden valt op je gemiddelde verbruik) en slechtste geval
 //        (laden valt bovenop je hoogste kwartier: + het volle laadvermogen); (b) €/kW uit de tariefkaart van de DNB:
@@ -79,7 +80,32 @@ function bouwProfiel(vorm, o) {
   if (!(jaarKwh > 0) && +o.afname_kwh > 0) { jaarKwh = +o.afname_kwh * 12; bron = 'factuur × 12 (ruw)'; }
   if (!(jaarKwh > 0)) throw new Error('geen verbruik');
   const L = new Float64Array(Q); for (let i = 0; i < Q; i++) L[i] = s[i] * jaarKwh * 4;   // kW per kwartier
-  return { L, jaarKwh, bron, herweging };
+  // 1.2.0 PIEKCORRECTIE: een standaardprofiel is glad (hoogste kwartier ± 2 × het gemiddelde). Ligt de gemeten maandpiek
+  //   duidelijk hoger, dan leggen we per werkdag één korte kwartierpiek op een willekeurig (vast gezaaid) tijdstip, hoogte
+  //   50–100 % tot de gemeten piek, en per maand minstens één die de piek haalt. Het jaarverbruik blijft gelijk.
+  let pieken = null;
+  const piek = +o.piek_kw || 0;
+  if (piek > 0) {
+    let maxPer = 0; for (let i = 0; i < Q; i++) if (inPer(i) && L[i] > maxPer) maxPer = L[i];
+    if (piek > 1.3 * maxPer) {
+      let seed = 20251; const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+      const dagE = new Float64Array(365); for (let i = 0; i < Q; i++) dagE[Math.floor(i / QD)] += L[i];
+      const med = _pct(Array.from(dagE), 0.5), doel = new Map(), maandBest = {};
+      for (let dag = 0; dag < 365; dag++) {
+        const w = _weekdag(dag), r1 = rnd(), r2 = rnd(); if (w === 0 || w === 6 || dagE[dag] < 0.4 * med) continue;
+        const q = dag * QD + Math.floor(r1 * QD), f = 0.5 + 0.5 * r2, m = _datum(dag).getUTCMonth();
+        doel.set(q, f * piek);
+        if (!maandBest[m] || f > maandBest[m].f) maandBest[m] = { q, f };
+      }
+      for (const m in maandBest) doel.set(maandBest[m].q, piek);   // per maand haalt minstens één kwartier de gemeten piek
+      let eExtra = 0; for (const [q, v] of doel) eExtra += Math.max(0, v - L[q]) / 4;
+      const k = Math.max(0.5, (jaarKwh - eExtra) / jaarKwh);   // jaarverbruik behouden: de rest schaalt licht mee
+      for (let i = 0; i < Q; i++) L[i] *= k;
+      let n = 0; for (const [q, v] of doel) if (v > L[q]) { L[q] = v; n++; }
+      pieken = { aantal: n, piek_kw: Math.round(piek), profiel_max_kw: Math.round(maxPer), aanname: '1 kwartierpiek per werkdag, willekeurig tijdstip, 50–100 % van je gemeten piek' };
+    }
+  }
+  return { L, jaarKwh, bron, herweging, pieken };
 }
 
 // Laaddagen + venster (indexen, kan over middernacht lopen)
@@ -198,7 +224,7 @@ function simuleer(vorm, o, markt) {
   const eWagen = +o.wagen_kwh_dag > 0 ? +o.wagen_kwh_dag : 15000 / 230 * 0.16;
   const rGrens = ruimte(L, dagen, grens), rPiek = ruimte(L, dagen, Math.min(piek, grens));
   const lastVenster = []; dagen.forEach(d => d.qs.forEach(q => lastVenster.push(L[q])));
-  const startMax = dagen.reduce((m, d) => Math.max(m, ...d.qs.slice(0, 4).map(q => L[q])), 0);
+  const startMax = _pct(dagen.map(d => Math.max(...d.qs.slice(0, 4).map(q => L[q]))), 0.95);   // 1.2.0: P95 van het eerste uur (één toevallige machinepiek bepaalt het niet alleen)
   const gemDag = new Float64Array(QD); dagen.forEach(d => { for (let k = 0; k < QD; k++) gemDag[k] += L[d.dag * QD + k]; });
   const opt = { grens, nivo0: piek, toeg, eur_kw: +o.eur_kw > 0 ? +o.eur_kw : 100, tarief: o.tarief || null, jaarMwh: P.jaarKwh / 1000 };
   const H = {};
@@ -207,7 +233,7 @@ function simuleer(vorm, o, markt) {
   const laatste = ['m36', 'm24', 'm12', 'nu'].map(k => H[k]).filter(x => x && x.ev > 0)[0];
   const nodig = Math.max(piek, laatste ? (laatste.niveau_slim_kw || 0) : 0) / (1 - MARGE);
   return {
-    jaar_mwh: Math.round(P.jaarKwh / 100) / 10, jaar_bron: P.bron, dag_nacht: P.herweging, profiel: o.profiel,
+    jaar_mwh: Math.round(P.jaarKwh / 100) / 10, jaar_bron: P.bron, dag_nacht: P.herweging, pieken: P.pieken, profiel: o.profiel,
     toeg_kw: toeg, grens_kw: Math.round(grens), piek_kw: Math.round(piek), profielpiek_kw: Math.round(maxL), gem_kw: Math.round(P.jaarKwh / 8760),
     laaddagen: dagen.length, venster: { start_u: o.doelgroep === 'kmo' ? 8 : 18, duur_u: +o.venster_u || 8 },
     last_venster_gem_kw: Math.round(lastVenster.reduce((a, b) => a + b, 0) / Math.max(1, lastVenster.length)),
@@ -223,4 +249,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.1.0' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.2.0' };
