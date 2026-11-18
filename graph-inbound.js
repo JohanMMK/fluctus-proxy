@@ -131,9 +131,17 @@ async function fetchRecent() {
   // v15.184: enkel de INBOX (niet de hele mailbox) → een naar 'Verwerkt' verplaatste mail valt uit de fetch en
   //   kan dus fysiek niet meer opnieuw verwerkt worden (belt-and-suspenders bovenop de verwerkt-lijst + in-proces dedup).
   const q = `/users/${mb}/mailFolders/inbox/messages?$select=id,subject,from,receivedDateTime,hasAttachments,ccRecipients,toRecipients&$top=50`;   // v15.408.0: + cc (factuurcheck) · 15.433.0: + to (partner-alias Betere Lader)
-  const r = await _g(q);
+  // 15.437.0 (Johan 18-11): Exchange zet een alias van dezelfde mailbox (dieteren@ → dossier@) in toRecipients om naar het hoofdadres →
+  //   de partner-alias werd nooit herkend. De ruwe headers (To, Delivered-To, X-Original-To, Received … for <…>) bewaren het adres zoals
+  //   het getypt werd. Eerst MET headers; lukt dat niet, terugval zonder (de intake mag hier nooit op breken).
+  let r = await _g(q.replace('toRecipients&', 'toRecipients,internetMessageHeaders&'));
+  if (!r.ok) r = await _g(q);
   if (!r.ok) throw new Error('Graph fetchRecent: HTTP ' + r.status + ' ' + (await r.text().catch(() => '')).slice(0, 200));
   const j = await r.json();
+  const _hdrAdr = (hs) => { const uit = []; try { for (const h of (Array.isArray(hs) ? hs : [])) { const n = String(h && h.name || '').toLowerCase();
+      if (!/^(to|cc|delivered-to|x-original-to|x-forwarded-to|envelope-to|x-envelope-to|x-ms-exchange-organization-originalenveloperecipients|received)$/.test(n)) continue;
+      const v = String(h.value || ''); const re = n === 'received' ? /for\s+<?([^\s<>;"]+@[^\s<>;"]+)>?/gi : /([A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})/g; let mm;
+      while ((mm = re.exec(v))) uit.push(String(mm[1]).toLowerCase().replace(/[>;,]+$/, '')); } } catch (e) {} return uit; };
   // v15.185: ALLE Inbox-mails (niet enkel met bijlage) → de sweep kan zo triageren (facturen → Verwerkt, rest → Andere).
   return (j.value || [])
     .map(m => ({
@@ -141,7 +149,7 @@ async function fetchRecent() {
       from: (m.from && m.from.emailAddress && m.from.emailAddress.address) || '',
       ontvangen: m.receivedDateTime || '',
       heeftBijlage: !!m.hasAttachments,
-      to: (m.toRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(Boolean),   // 15.433.0
+      to: Array.from(new Set((m.toRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(Boolean).map(a => String(a).toLowerCase()).concat(_hdrAdr(m.internetMessageHeaders)))),   // 15.433.0 · 15.437.0: + adressen uit de ruwe headers (alias)
       cc: (m.ccRecipients || []).map(x => x && x.emailAddress && x.emailAddress.address).filter(a => a && a.toLowerCase() !== String(_env('GRAPH_MAILBOX')).toLowerCase()),
     }))
     .sort((a, b) => (a.ontvangen < b.ontvangen ? -1 : a.ontvangen > b.ontvangen ? 1 : 0));
