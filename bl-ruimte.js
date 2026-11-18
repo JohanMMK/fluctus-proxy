@@ -1,5 +1,6 @@
 // ============================================================================
 // bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.2.0, 2026-11-18, Johan)
+// 1.2.1: gemiddeld verbruik in de laaduren zonder de korte pieken (last_venster_gem_kw), met pieken apart.
 // 1.2.0: PIEKCORRECTIE — korte kwartierpieken tot de gemeten maandpiek (standaardprofiel is te glad), jaarverbruik gelijk.
 // 1.1.0: (0) per dag eigen verbruik + laden, per maand de hoogste piek → netkost per maand; grafiek = de drukste laaddag
 //        (a) netkost zonder sturing als VORK — beste geval (laden valt op je gemiddelde verbruik) en slechtste geval
@@ -83,7 +84,7 @@ function bouwProfiel(vorm, o) {
   // 1.2.0 PIEKCORRECTIE: een standaardprofiel is glad (hoogste kwartier ± 2 × het gemiddelde). Ligt de gemeten maandpiek
   //   duidelijk hoger, dan leggen we per werkdag één korte kwartierpiek op een willekeurig (vast gezaaid) tijdstip, hoogte
   //   50–100 % tot de gemeten piek, en per maand minstens één die de piek haalt. Het jaarverbruik blijft gelijk.
-  let pieken = null;
+  let pieken = null; const piekQ = new Set();
   const piek = +o.piek_kw || 0;
   if (piek > 0) {
     let maxPer = 0; for (let i = 0; i < Q; i++) if (inPer(i) && L[i] > maxPer) maxPer = L[i];
@@ -101,11 +102,11 @@ function bouwProfiel(vorm, o) {
       let eExtra = 0; for (const [q, v] of doel) eExtra += Math.max(0, v - L[q]) / 4;
       const k = Math.max(0.5, (jaarKwh - eExtra) / jaarKwh);   // jaarverbruik behouden: de rest schaalt licht mee
       for (let i = 0; i < Q; i++) L[i] *= k;
-      let n = 0; for (const [q, v] of doel) if (v > L[q]) { L[q] = v; n++; }
+      let n = 0; for (const [q, v] of doel) if (v > L[q]) { L[q] = v; n++; piekQ.add(q); }
       pieken = { aantal: n, piek_kw: Math.round(piek), profiel_max_kw: Math.round(maxPer), aanname: '1 kwartierpiek per werkdag, willekeurig tijdstip, 50–100 % van je gemeten piek' };
     }
   }
-  return { L, jaarKwh, bron, herweging, pieken };
+  return { L, jaarKwh, bron, herweging, pieken, piekQ };
 }
 
 // Laaddagen + venster (indexen, kan over middernacht lopen)
@@ -223,7 +224,7 @@ function simuleer(vorm, o, markt) {
   const dagen = vensters(L, o), spot = _spotKaart(markt);
   const eWagen = +o.wagen_kwh_dag > 0 ? +o.wagen_kwh_dag : 15000 / 230 * 0.16;
   const rGrens = ruimte(L, dagen, grens), rPiek = ruimte(L, dagen, Math.min(piek, grens));
-  const lastVenster = []; dagen.forEach(d => d.qs.forEach(q => lastVenster.push(L[q])));
+  const lastVenster = [], lastMet = []; dagen.forEach(d => d.qs.forEach(q => { lastMet.push(L[q]); if (!P.piekQ.has(q)) lastVenster.push(L[q]); }));   // 1.2.1: gemiddelde zonder de korte pieken
   const startMax = _pct(dagen.map(d => Math.max(...d.qs.slice(0, 4).map(q => L[q]))), 0.95);   // 1.2.0: P95 van het eerste uur (één toevallige machinepiek bepaalt het niet alleen)
   const gemDag = new Float64Array(QD); dagen.forEach(d => { for (let k = 0; k < QD; k++) gemDag[k] += L[d.dag * QD + k]; });
   const opt = { grens, nivo0: piek, toeg, eur_kw: +o.eur_kw > 0 ? +o.eur_kw : 100, tarief: o.tarief || null, jaarMwh: P.jaarKwh / 1000 };
@@ -237,6 +238,7 @@ function simuleer(vorm, o, markt) {
     toeg_kw: toeg, grens_kw: Math.round(grens), piek_kw: Math.round(piek), profielpiek_kw: Math.round(maxL), gem_kw: Math.round(P.jaarKwh / 8760),
     laaddagen: dagen.length, venster: { start_u: o.doelgroep === 'kmo' ? 8 : 18, duur_u: +o.venster_u || 8 },
     last_venster_gem_kw: Math.round(lastVenster.reduce((a, b) => a + b, 0) / Math.max(1, lastVenster.length)),
+    last_venster_gem_met_pieken_kw: Math.round(lastMet.reduce((a, b) => a + b, 0) / Math.max(1, lastMet.length)),
     ruimte_kwh_dag_p5: Math.round(_pct(rGrens, 0.05)), ruimte_kwh_dag_med: Math.round(_pct(rGrens, 0.5)),
     ruimte_onder_piek_kwh_dag_p5: Math.round(_pct(rPiek, 0.05)),
     wagen_kwh_dag: Math.round(eWagen * 10) / 10,
@@ -249,4 +251,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.2.0' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.2.1' };
