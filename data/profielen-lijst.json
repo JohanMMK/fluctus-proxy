@@ -37,7 +37,7 @@
   },
   {
     "naam": "Industrie met zomersluiting",
-    "beschrijving": "sterk weekdagprofiel, één ploeg 7–16 u, zomersluiting 28/7–17/8 en kerst, loadfactor ± 33 %, piek 8u"
+    "beschrijving": "sterk weekdagprofiel, één ploeg 6–16 u (vorm van een echt atelier), wisselend verbruik binnen de dag en van dag tot dag, zomersluiting 28/7–17/8 en kerst, loadfactor ± 23 %, piek 8u"
   },
   {
     "naam": "Industrie voeding",
@@ -45,11 +45,11 @@
   },
   {
     "naam": "Industrie zonder zomersluiting",
-    "beschrijving": "sterk weekdagprofiel, één ploeg 7–16 u, seizoensstabiel, geen zomersluiting, loadfactor ± 35 %, piek 8u"
+    "beschrijving": "sterk weekdagprofiel, één ploeg 6–16 u (vorm van een echt atelier), wisselend verbruik binnen de dag en van dag tot dag, geen zomersluiting, loadfactor ± 25 %, piek 8u"
   },
   {
     "naam": "Kantoor",
-    "beschrijving": "weekdagprofiel, overwegend dag, sterk seizoensgebonden, variabel, piek 11u"
+    "beschrijving": "weekdagprofiel ma–vr, werkuren 7–18 u (vorm van een echt kantoor), wisselend verbruik binnen de dag en van dag tot dag, weekend basislast, zomer lager, loadfactor ± 27 %, piek 9u"
   },
   {
     "naam": "Luchthaven",
