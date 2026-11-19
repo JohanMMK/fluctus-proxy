@@ -32,7 +32,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.3.3'; // 1.3.3: controlemail — poster en «Bekijk de video» openen de voorvertoning van die aflevering (?d=…&preview=1&s=…) i.p.v. de publieke pagina (daar stond vóór publicatie / in proefmodus nog niets) // 1.3.2: stemcontrole negeert accenten (vóór = voor), «een» blijft lidwoord // 1.3.1: «Het voorbije etmaal» → «De voorbije 24 uur» (stemcontrole vond onduidelijke uitspraak); afkortingen in de transcriptie (mm, GW, …) genormaliseerd // 1.3.0: automatische stemcontrole (ASR): elke stemopname uitgeschreven en woord voor woord vergeleken met de tekst; resultaat in de vetomail, in /run en bij uitlegvideo's (mail «uitlegvideo klaar») // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.4.0'; // 1.4.0 (Johan 19-11): UNSPLASH-VERMELDING volgens de API-richtlijnen — «Foto van <fotograaf> op Unsplash» met links (utm_source=energie_compas&utm_medium=referral) naar het profiel van de fotograaf en naar Unsplash: in de dagrecord (dag.fotos), /api/ewb/vandaag (fotos), de mail en de LinkedIn-tekst; in de video «Foto: <naam> op Unsplash». // 1.3.3: controlemail — poster en «Bekijk de video» openen de voorvertoning van die aflevering (?d=…&preview=1&s=…) i.p.v. de publieke pagina (daar stond vóór publicatie / in proefmodus nog niets) // 1.3.2: stemcontrole negeert accenten (vóór = voor), «een» blijft lidwoord // 1.3.1: «Het voorbije etmaal» → «De voorbije 24 uur» (stemcontrole vond onduidelijke uitspraak); afkortingen in de transcriptie (mm, GW, …) genormaliseerd // 1.3.0: automatische stemcontrole (ASR): elke stemopname uitgeschreven en woord voor woord vergeleken met de tekst; resultaat in de vetomail, in /run en bij uitlegvideo's (mail «uitlegvideo klaar») // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -515,6 +515,23 @@ module.exports = function mountEwb(app, opt = {}) {
     return 'data:image/svg+xml;base64,' + Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="760" viewBox="0 0 1080 760">${g}</svg>`).toString('base64');
   }
   const THEMA = { advies: 'electric car charging station', adviesZon: 'solar panels roof business', kern: 'nuclear power plant cooling tower', gas: 'gas pipeline industry', wind: 'offshore wind farm', zon: 'solar panels sunlight', import: 'high voltage power lines', koude: 'frost winter morning landscape' };
+  // v1.4.0: Unsplash-richtlijnen — vermelding fotograaf + Unsplash met UTM-links (utm_source = naam van de app)
+  const UNSPLASH_UTM = 'utm_source=energie_compas&utm_medium=referral';
+  const utm = u => u ? u + (u.includes('?') ? '&' : '?') + UNSPLASH_UTM : '';
+  const UNSPLASH_LINK = utm('https://unsplash.com/');
+  function fotoLijst(A) {   // unieke fotografen van de foto's in deze aflevering (weerbeeld, thema, advies)
+    const uit = [], gezien = {};
+    for (const [rol, f] of [['weer', A.weerFoto], ['thema', A.themaFoto], ['advies', A.adviesFoto]]) {
+      if (!f || !f.naam) continue; const k = f.profiel || f.naam; if (gezien[k]) continue; gezien[k] = 1;
+      uit.push({ rol, naam: f.naam, profiel: f.profiel || '', foto: f.link || '', id: f.id || null });
+    }
+    return uit;
+  }
+  function fotoCreditHtml(fotos, stijl) {   // «Foto van <a>naam</a> op <a>Unsplash</a>»
+    if (!fotos || !fotos.length) return '';
+    const a = (u, t) => `<a href="${esc(u)}" style="${stijl || 'color:#7b8794'}">${esc(t)}</a>`;
+    return (fotos.length > 1 ? 'Foto’s: ' : '') + fotos.map(f => `Foto van ${f.profiel ? a(f.profiel, f.naam) : esc(f.naam)} op ${a(UNSPLASH_LINK, 'Unsplash')}`).join(' · ');
+  }
   async function weerFoto(type, datum, thema) {
     const key = process.env.UNSPLASH_ACCESS_KEY; if (!key) return null;
     const q = thema && THEMA[thema] ? THEMA[thema] : { helder: 'sunny countryside Belgium', halfbewolkt: 'clouds fields Flanders', bewolkt: 'overcast sky landscape Belgium', regen: 'rain city Belgium', mist: 'foggy morning Flanders', sneeuw: 'snow landscape Belgium', onweer: 'storm clouds landscape' }[type];
@@ -523,7 +540,9 @@ module.exports = function mountEwb(app, opt = {}) {
       const lijst = (j.results || []).filter(x => x.urls); if (!lijst.length) return null;
       const f = lijst[(Date.parse(datum) / 864e5 | 0) % lijst.length];
       fetch(`${f.links.download_location}${f.links.download_location.includes('?') ? '&' : '?'}client_id=${encodeURIComponent(key)}`).catch(() => {}); // Unsplash-richtlijn: download melden
-      return { url: f.urls.regular, credit: `${thema ? 'Sfeerbeeld · ' : ''}Foto: ${f.user && f.user.name || 'Unsplash'} / Unsplash`, thema: thema || null };
+      const naam = (f.user && f.user.name) || 'Unsplash';
+      return { url: f.urls.regular, credit: `${thema ? 'Sfeerbeeld · ' : ''}Foto: ${naam} op Unsplash`, thema: thema || null,   // v1.4.0
+        naam, profiel: utm(f.user && f.user.links && f.user.links.html || ''), link: utm(f.links && f.links.html || ''), id: f.id || null };
     } catch (e) { log('unsplash:', e.message); return null; }
   }
 
@@ -797,7 +816,7 @@ window.setT=function(t){
 <p style="text-align:center;margin:14px 0 20px"><a href="${esc(link || PUBLIC_BASE)}" style="background:#05B050;color:#fff;padding:12px 22px;border-radius:6px;text-decoration:none;font-weight:bold">▶ Bekijk de video (${nl0(dag.duur || 0)} s)</a></p>
 ${zinnen}
 ${metStop || ''}
-<p style="font-size:12px;color:#7b8794;border-top:1px solid #e5e9ef;padding-top:12px;margin-top:20px">Energie-Compas · een dienst van Fluctus.net CVSO · BE 0757 494 180${dag.metStem ? ' · De stem in de video is gegenereerd met AI.' : ''}<br>Bronnen: Elia Open Data, ENTSO-E/Energy-Charts, Open-Meteo, GIE AGSI+, TTF via Yahoo Finance.</p></div>`;
+<p style="font-size:12px;color:#7b8794;border-top:1px solid #e5e9ef;padding-top:12px;margin-top:20px">Energie-Compas · een dienst van Fluctus.net CVSO · BE 0757 494 180${dag.metStem ? ' · De stem in de video is gegenereerd met AI.' : ''}<br>Bronnen: Elia Open Data, ENTSO-E/Energy-Charts, Open-Meteo, GIE AGSI+, TTF via Yahoo Finance.${dag.fotos && dag.fotos.length ? '<br>' + fotoCreditHtml(dag.fotos) + '.' : ''}</p></div>`;
   }
   async function vetomail(dag) {
     const to = (opt.reviewTo || process.env.EWB_REVIEW_TO || process.env.AUDIT_MAIL_TO || '').split(',').map(s => s.trim()).filter(Boolean);
@@ -860,7 +879,7 @@ ${metStop || ''}
       await new Promise(r => setTimeout(r, 5000));
     }
     const m = dag.script.find(s => s.id === 'actie');
-    const tekst = `⚡ Energieweerbericht voor ${datumLang(dag.doel || plusDag(dag.datum, 1))}\n\n${(m && m.zinnen[0]) || ''}\n\nWil je weten wat dit voor jouw bedrijf betekent? Mail je energiefactuur naar ${CTA_MAIL} en je krijgt een persoonlijke voorspelling.\n\nZondag tot vrijdag om 18u50: ${PUBLIC_BASE}\n\n#energie #stroomprijs #NetBeterGebruiken${dag.metStem ? '\n(Stem gegenereerd met AI.)' : ''}`;
+    const tekst = `⚡ Energieweerbericht voor ${datumLang(dag.doel || plusDag(dag.datum, 1))}\n\n${(m && m.zinnen[0]) || ''}\n\nWil je weten wat dit voor jouw bedrijf betekent? Mail je energiefactuur naar ${CTA_MAIL} en je krijgt een persoonlijke voorspelling.\n\nZondag tot vrijdag om 18u50: ${PUBLIC_BASE}\n\n#energie #stroomprijs #NetBeterGebruiken${dag.metStem ? '\n(Stem gegenereerd met AI.)' : ''}${dag.fotos && dag.fotos.length ? '\n' + (dag.fotos.length > 1 ? 'Foto’s: ' : 'Foto: ') + dag.fotos.map(f => f.naam).join(', ') + ' op Unsplash' : ''}`;
     const p = await fetch('https://api.linkedin.com/rest/posts', { method: 'POST', headers: H, body: JSON.stringify({ author: t.urn, commentary: tekst.replace(/([\\|{}@\[\]()<>#*_~])/g, '\\$1'), visibility: 'PUBLIC', distribution: { feedDistribution: 'MAIN_FEED', targetEntities: [], thirdPartyDistributionChannels: [] }, content: { media: { title: `Energieweerbericht ${datumLang(dag.datum)}`, id: v.video } }, lifecycleState: 'PUBLISHED', isReshareDisabledByAuthor: false }) });
     if (!p.ok) throw new Error('LinkedIn post ' + p.status + ' ' + (await p.text()).slice(0, 300));
     return p.headers.get('x-restli-id') || 'ok';
@@ -894,7 +913,7 @@ ${metStop || ''}
       await sbPut('ewb', v, fs.readFileSync(r.video), 'video/mp4');
       await sbPut('ewb', po, fs.readFileSync(r.poster), 'image/jpeg');
       const dag = { datum, doel: A.doel, asr: r.asr || null, versie: EWB_VERSIE, gegenereerd: new Date().toISOString(), duur: r.duur, metStem: r.metStem, stem: r.metStem ? _stemmen : null, ttsFout: r.ttsFout || undefined,
-        video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten,
+        video_url: publiekeUrl(v) + '?v=' + Date.now(), poster_url: publiekeUrl(po) + '?v=' + Date.now(), script, fouten: d.fouten, fotos: fotoLijst(A),   // v1.4.0: Unsplash-vermelding
         kern: { editie: A.editie, doel: A.doel, gemM: A.gemM, gemV: A.gemV, richtingMorgen: A.richtingMorgen, goedkoop: A.goedkoop, duur: A.duur, negatief: A.negatief, week: A.week, mix: A.mix, netImport: A.netImport, gas: A.gas, check: A.check, verhaal: A.verhaal, pVandaag: A.pVandaag, weerV: A.weerV },
         status: (st.dagen[datum] && st.dagen[datum].status) || 'klaar' };
       if (force && dag.status === 'tegengehouden') dag.status = 'klaar';
@@ -993,6 +1012,7 @@ ${metStop || ''}
       const dg = st.dagen[datum];
       res.set('cache-control', mgr ? 'private, no-store' : 'public, max-age=120');
       res.json({ ok: true, versie: EWB_VERSIE, datum, proef: !dg.gepubliceerd, titel: `Energieweerbericht voor ${datumLang(dg.doel || plusDag(datum, 1))}`, video: dg.video_url, poster: dg.poster_url, duur: dg.duur, metStem: dg.metStem, script: dg.script.map(s => ({ id: s.id, titel: s.titel, zinnen: s.tekst || s.zinnen })), kern: dg.kern, cta_mail: CTA_MAIL, cta_mailto: MAILTO,
+        fotos: (dg.fotos || []).map(f => ({ naam: f.naam, profiel: f.profiel, foto: f.foto, rol: f.rol })), unsplash: UNSPLASH_LINK,   // v1.4.0: Unsplash-vermelding
         archief: Object.keys(st.dagen).filter(ok).sort().reverse().slice(0, 30) });
     } catch (e) { res.status(500).json({ error: e.message }); }
   });
