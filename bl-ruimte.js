@@ -1,5 +1,10 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.2.0, 2026-11-18, Johan)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.3.0, 2026-11-19, Johan)
+// 1.3.0: CABINE — bij een bedrijf op MS schatten we de cabine als de kleinste marktmaat (100, 250, 400, 630, 800, 1000,
+//        1500, 2000 kVA) die groter is dan de piek op de factuur en minstens het toegangsvermogen (of o.cabine_kva als gekend).
+//        Per horizon: past slim laden onder het toegangsvermogen («ok»), enkel onder de cabine («toegang»: toegangsvermogen
+//        verhogen, contract) of niet («ingreep»: werken aan de aansluiting → gratis studie na de kwaliteitscheck).
+//        «palen»: de laadpalen zelf halen de dagbehoefte niet binnen het venster (te traag), los van de aansluiting.
 // 1.2.1: gemiddeld verbruik in de laaduren zonder de korte pieken (last_venster_gem_kw), met pieken apart.
 // 1.2.0: PIEKCORRECTIE — korte kwartierpieken tot de gemeten maandpiek (standaardprofiel is te glad), jaarverbruik gelijk.
 // 1.1.0: (0) per dag eigen verbruik + laden, per maand de hoogste piek → netkost per maand; grafiek = de drukste laaddag
@@ -27,7 +32,8 @@
 'use strict';
 
 const Q = 35040, QD = 96, DAG0_WEEKDAG = 3;   // 1 jan 2025 = woensdag (0 = zondag)
-const MARGE = 0.10;                            // 10 % onder het toegangsvermogen: cos φ en korte pieken die een profiel niet toont
+const MARGE = 0.10;
+const CABINES = [100, 250, 400, 630, 800, 1000, 1500, 2000];   // kVA, klassieke marktmaten                            // 10 % onder het toegangsvermogen: cos φ en korte pieken die een profiel niet toont
 
 function _datum(dag) { const d = new Date(Date.UTC(2025, 0, 1 + dag)); return d; }
 function _weekdag(dag) { return (DAG0_WEEKDAG + dag) % 7; }
@@ -230,6 +236,34 @@ function simuleer(vorm, o, markt) {
   const opt = { grens, nivo0: piek, toeg, eur_kw: +o.eur_kw > 0 ? +o.eur_kw : 100, tarief: o.tarief || null, jaarMwh: P.jaarKwh / 1000 };
   const H = {};
   for (const k of ['nu', 'm12', 'm24', 'm36']) if (o.horizons && o.horizons[k]) H[k] = simHorizon(L, dagen, o.horizons[k], opt, spot);
+  // 1.3.0: cabine en status van de aansluiting per horizon
+  const spanning = o.spanning || (o.tarief && o.tarief.spanning) || (toeg >= 250 ? 'MS' : 'LS');
+  let cabine = null, cabineBron = null;
+  if (o.doelgroep !== 'thuisladen' && spanning === 'MS') {
+    if (+o.cabine_kva > 0) { cabine = +o.cabine_kva; cabineBron = 'opgegeven'; }
+    else { cabine = CABINES.find(c => c > piek && c >= toeg) || null; cabineBron = cabine ? 'geschat' : null; }
+  }
+  const aansl = { spanning, cabine_kva: cabine, cabine_bron: cabineBron, toeg_kw: toeg, horizons: {} };
+  for (const k in H) {
+    const x = H[k]; if (!(x.ev > 0)) continue;
+    let status = 'ok', toegNodig = null;
+    // de laadpalen zelf halen de dagbehoefte niet binnen het venster → geen netprobleem maar te trage palen
+    const hk = o.horizons[k], venH = Math.max(1, +o.venster_u || 8), capPalen = (+hk.lp || 0) * (+hk.paal_kw || 11) * venH;
+    if (!x.past && capPalen < (+hk.edag_kwh || 0) * 0.98) status = 'palen';
+    else if (!x.past) {
+      status = 'ingreep';
+      if (cabine && cabine > toeg) {
+        const gC = cabine * (1 - MARGE);
+        const xc = simHorizon(L, dagen, o.horizons[k], Object.assign({}, opt, { grens: gC, toeg: cabine }), spot);
+        if (xc.past) { status = 'toegang'; toegNodig = Math.min(cabine, Math.ceil(Math.max(piek, xc.niveau_slim_kw || 0) / (1 - MARGE) / 5) * 5); }
+      }
+    }
+    x.aansluiting = status; if (toegNodig) x.toeg_nodig_kw = toegNodig;
+    if (status === 'palen') x.palen_kwh_venster = Math.round(capPalen);
+    aansl.horizons[k] = { status, toeg_nodig_kw: toegNodig };
+  }
+  const _eerste = st => ['nu', 'm12', 'm24', 'm36'].find(k => aansl.horizons[k] && aansl.horizons[k].status === st) || null;
+  aansl.eerste_toegang = _eerste('toegang'); aansl.eerste_ingreep = _eerste('ingreep'); aansl.eerste_palen = _eerste('palen');
   // toegangsvermogen dat volstaat: hoogste van (huidige piek, slim laadniveau van de laatste horizon) + marge
   const laatste = ['m36', 'm24', 'm12', 'nu'].map(k => H[k]).filter(x => x && x.ev > 0)[0];
   const nodig = Math.max(piek, laatste ? (laatste.niveau_slim_kw || 0) : 0) / (1 - MARGE);
@@ -246,9 +280,9 @@ function simuleer(vorm, o, markt) {
     wagens_dom: Math.max(0, Math.floor((grens - startMax) / Math.max(3.7, +o.paal_kw || 11))),
     toegang_volstaat_kw: Math.ceil(nodig / 5) * 5,
     dag_last_kw: Array.from(gemDag, v => Math.round(v / Math.max(1, dagen.length))),
-    spot: !!spot, eur_kw: opt.eur_kw, horizons: H,
+    spot: !!spot, eur_kw: opt.eur_kw, horizons: H, aansluiting: aansl,
     tarief: o.tarief ? { dnb: o.tarief.dnb, spanning: o.tarief.spanning, jaar: o.tarief.jaar, mp_eur_kw: Math.round(o.tarief.mp_eur_kw * 100) / 100, tv_eur_kw: Math.round(o.tarief.tv_eur_kw * 100) / 100, var_eur_mwh: tariefVar(o.tarief, P.jaarKwh / 1000) } : null,
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, VERSIE: '1.2.1' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.0' };

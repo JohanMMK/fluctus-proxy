@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.27.0 (2026-11-19, Johan): PLEIN TYPE 'KADE' — snelladen tijdens laden/lossen van de eigen vloot. Zelfde
+#                sessiemodel als 'bezoekers' (_bezoekers_demand: vaste duur aan paal_kw, aantal_palen, vensters, wachtrij),
+#                maar modus 'kade': de aansluiting stijgt bij tekort (telt niet als bezoekersplein), server telt het als eigen vloot.
 # Versie:        v1.26.0 (2026-11-03, Johan): (1) MAXIMUMTARIEF IN DE STURING — bindt de VREG-grens in een maand al passief, dan stuurt de
 #                LP met de echte marginale kost (afname = maximumtarief/MWh, maandpiek-prikkel 0); de batterij drijft de netkost niet meer op.
 #                (2) TOEGANGSVERMOGEN ALS KEUZE (opt-in inp.tv_optimaliseer): laagste contract dat de batterij haalt (+ marge 1 − piek_realisatie),
@@ -879,7 +882,10 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
     for p in pleinen_in:
         # ── Betalende bezoekers (v1.14): random sessies in 2 vensters, vaste duur aan paalvermogen.
         # Vraag komt uit vrije aansluitruimte + batterij (nooit verzwaren); rest = gemist. ──
-        if str(p.get('type_plein', '')).lower() == 'bezoekers':
+        # v1.27.0 (Johan 19-11): 'kade' = snelladen tijdens laden/lossen van de EIGEN vloot — zelfde sessiemodel
+        #   (vaste duur aan paal_kw, aantal_palen, vensters), maar modus 'kade' (geen betalend plein in de server).
+        _tp = str(p.get('type_plein', '')).lower()
+        if _tp in ('bezoekers', 'kade'):
             # v1.17.0: opgegeven paal_kw (vermogen per wagen) wint van het paaltype-default.
             paal_kw = float(p.get('paal_kw') or 0) or _LAADPUNT_KW.get(p.get('paaltype', 'AC22'), 22.0)
             dur_min = float(p.get('duur_min', 30) or 30)
@@ -916,7 +922,7 @@ def _laadplein_prep(inp: dict, sim_timestamps: list) -> dict:
                 'cap_kw': (max(demand) if demand else 0.0),
                 'v_start': 0, 'v_eind': 24, 'wrap': False, 'dpw': dpw,
                 'bestaand': bool(p.get('bestaand')), 'periode_kwh': periode_kwh,
-                'modus': 'bezoekers', 'demand_kw': demand, 'paal_kw': paal_kw,
+                'modus': ('kade' if _tp == 'kade' else 'bezoekers'), 'demand_kw': demand, 'paal_kw': paal_kw,
                 'duur_min': dur_min, 'vensters': vensters, 'aantal_palen': aantal_palen,
                 'generator': _gen,
             }
@@ -1132,7 +1138,7 @@ def _bouw_ev_load_kern(lp_prep: dict, sim_timestamps: list, spot: list, imb: lis
             per_plein_out.append(_pp)
         # ── Betalende bezoekers: vaste per-kwartier vraag, chronologisch geserveerd uit
         # vrije aansluitruimte + batterij (grid-first). Wat niet past = gemist (throttling). ──
-        if rec.get('modus') == 'bezoekers':
+        if rec.get('modus') in ('bezoekers', 'kade'):   # v1.27.0: kade = zelfde chronologische bediening
             dem = rec.get('demand_kw') or []
             for i in range(N):
                 d = dem[i] if i < len(dem) else 0.0
