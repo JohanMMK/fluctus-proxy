@@ -1,5 +1,6 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.3.2, 2026-11-19, Johan)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.3.3, 2026-11-19, Johan)
+// 1.3.3: horizon cap_kw = Σ laadpunten × kW per wagentype (beterladen ≥ 0.9.2), anders lp × paal_kw.
 // 1.3.2: bedrijven zonder dag/nacht-herweging; hoogste kwartier = factuurpiek (te weinig → 2 korte pieken per werkdag, ochtend en na de middag; te veel → aftoppen).
 // 1.3.1: PLAFOND — het standaardprofiel komt nooit boven max(toegangsvermogen, gemeten piek); afgetopte energie gaat naar de kwartieren eronder.
 // 1.3.0: CABINE — bij een bedrijf op MS schatten we de cabine als de kleinste marktmaat (100, 250, 400, 630, 800, 1000,
@@ -175,7 +176,7 @@ function tariefVar(t, E) {
   return d;
 }
 function simHorizon(L, dagen, h, o, spot) {
-  const D = +h.edag_kwh || 0, C = Math.max(0.1, (+h.lp || 0) * (+h.paal_kw || 11)), grens = o.grens, nivo0 = o.nivo0;
+  const D = +h.edag_kwh || 0, C = Math.max(0.1, +h.cap_kw > 0 ? +h.cap_kw : (+h.lp || 0) * (+h.paal_kw || 11)), grens = o.grens, nivo0 = o.nivo0;   // 1.3.3: Σ laadvermogen per type
   const res = { ev: +h.ev || 0, dag_kwh: Math.round(D), laadvermogen_kw: Math.round(C) };
   if (!(D > 0)) return res;
   // één laaddag: slim (dalen vullen, goedkoopste kwartieren) en dom (meteen bij aankomst) — kW per kwartier
@@ -269,7 +270,7 @@ function simuleer(vorm, o, markt) {
     const x = H[k]; if (!(x.ev > 0)) continue;
     let status = 'ok', toegNodig = null;
     // de laadpalen zelf halen de dagbehoefte niet binnen het venster → geen netprobleem maar te trage palen
-    const hk = o.horizons[k], venH = Math.max(1, +o.venster_u || 8), capPalen = (+hk.lp || 0) * (+hk.paal_kw || 11) * venH;
+    const hk = o.horizons[k], venH = Math.max(1, +o.venster_u || 8), capPalen = (+hk.cap_kw > 0 ? +hk.cap_kw : (+hk.lp || 0) * (+hk.paal_kw || 11)) * venH;
     if (!x.past && capPalen < (+hk.edag_kwh || 0) * 0.98) status = 'palen';
     else if (!x.past) {
       status = 'ingreep';
@@ -306,4 +307,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.2' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.3' };
