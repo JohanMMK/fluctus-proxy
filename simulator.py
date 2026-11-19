@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.27.0 (2026-11-19, Johan): PLEIN TYPE 'KADE' — snelladen tijdens laden/lossen van de eigen vloot. Zelfde
+# Versie:        v1.28.0 (2026-11-19, Johan): KADE UIT DE DC-LAADBUFFER — met een DC-buffer en slim laden levert de buffer aan de lader
+#                eerst aan de kade-sessies (snelladen tijdens laden/lossen; buffervermogen + SOC), dan de vrije aansluiting, dan de
+#                AC-batterij. Om de SOC chronologisch te laten kloppen loopt dit geval dag per dag over alle pleinen (binnen de dag
+#                op het begin van het venster: kade overdag vóór de nachtsessie), met bijladen na de dag en op rustdagen (weekend).
+#                Zonder kade of zonder buffer: exact het vorige pad (regressietest identiek). Transport Schreurs: v1.27.0 gaf 673 kW.
+# Versie (vorig): v1.27.0 (2026-11-19, Johan): PLEIN TYPE 'KADE' — snelladen tijdens laden/lossen van de eigen vloot. Zelfde
 #                sessiemodel als 'bezoekers' (_bezoekers_demand: vaste duur aan paal_kw, aantal_palen, vensters, wachtrij),
 #                maar modus 'kade': de aansluiting stijgt bij tekort (telt niet als bezoekersplein), server telt het als eigen vloot.
 # Versie:        v1.26.0 (2026-11-03, Johan): (1) MAXIMUMTARIEF IN DE STURING — bindt de VREG-grens in een maand al passief, dan stuurt de
@@ -1127,6 +1132,8 @@ def _bouw_ev_load_kern(lp_prep: dict, sim_timestamps: list, spot: list, imb: lis
         # Vrije ruimte onder de AANSLUITING (zonder batterij), na wat al toegewezen is.
         return max(0.0, connection_kw - base_cons_kw[i] - ev[i])
 
+    # v1.28.0 (Johan 19-11): per-plein tracking vooraf aanmaken (zelfde volgorde als vroeger), daarna de bediening.
+    _paren = []
     for rec in lp_prep['pleinen']:
         # v1.9: per-plein tracking (alleen wanneer de caller erom vraagt).
         _pp = None
@@ -1136,126 +1143,173 @@ def _bouw_ev_load_kern(lp_prep: dict, sim_timestamps: list, spot: list, imb: lis
                    'periode_kwh': rec.get('periode_kwh', 0.0), 'aantal': rec.get('aantal', 0),
                    'modus': rec.get('modus'), 'tekort_kwh': 0.0, 'load_kw': [0.0] * N}
             per_plein_out.append(_pp)
-        # ── Betalende bezoekers: vaste per-kwartier vraag, chronologisch geserveerd uit
+        _paren.append((rec, _pp))
+    _tk = [0.0]   # tekort (kWh) — lijst zodat de geneste functies het kunnen ophogen
+
+    def _sessies(rec, _pp, idx_lijst, dc_eerst=False):
+        # ── Betalende bezoekers / kade: vaste per-kwartier vraag, chronologisch geserveerd uit
         # vrije aansluitruimte + batterij (grid-first). Wat niet past = gemist (throttling). ──
-        if rec.get('modus') in ('bezoekers', 'kade'):   # v1.27.0: kade = zelfde chronologische bediening
-            dem = rec.get('demand_kw') or []
-            for i in range(N):
-                d = dem[i] if i < len(dem) else 0.0
-                if d <= 1e-9:
+        # v1.28.0: dc_eerst (kade + DC-laadbuffer, slim laden) → eerst uit de buffer aan de lader (SOC, buffervermogen),
+        #   dan de vrije aansluiting, dan de AC-batterij. Wat uit de buffer komt, gaat niet over de aansluiting (geen ev[]).
+        dem = rec.get('demand_kw') or []
+        for i in idx_lijst:
+            d = dem[i] if i < len(dem) else 0.0
+            if d <= 1e-9:
+                continue
+            dag = sim_timestamps[i].date()
+            if not _batt_ongebonden and dag not in _batt_budget:
+                _batt_budget[dag] = _budget_start(dag)
+            uit_dc = 0.0
+            if dc_eerst and _dcb_soc[0] > 1e-9:
+                uit_dc = min(d, _dcb_kw, _dcb_soc[0] / dt_h)
+                _dcb_soc[0] -= uit_dc * dt_h
+            d_net = d - uit_dc
+            conn = _conn_vrij_kw(i)
+            uit_grid = min(d_net, conn); rest = d_net - uit_grid
+            if _batt_ongebonden:
+                batt_av = battery_kw
+            else:
+                _rem = _batt_budget.get(dag, 0.0)
+                batt_av = min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
+            uit_batt = min(rest, batt_av); served = uit_grid + uit_batt
+            if served > 0:
+                ev[i] += served
+                if _pp is not None:
+                    _pp['load_kw'][i] += served
+                if not _batt_ongebonden:
+                    _batt_budget[dag] -= uit_batt * dt_h
+                    if _batt_uit is not None:
+                        _batt_uit[dag] = _batt_uit.get(dag, 0.0) + uit_batt * dt_h
+            gemist = d_net - served
+            if gemist > 1e-9:
+                _tk[0] += gemist * dt_h
+                if _pp is not None:
+                    _pp['tekort_kwh'] += gemist * dt_h
+
+    def _wagenpark_dag(rec, _pp, dag, idxs, bijladen=True):
+        # Eén laadsessie (dag D) van een wagenpark-plein. bijladen=False (v1.28.0 dag-per-dag-pad): de buffer wordt
+        # na alle pleinen van de dag bijgeladen i.p.v. per plein.
+        cap, vs, ve = rec['cap_kw'], rec['v_start'], rec['v_eind']
+        wrap = rec.get('wrap', False)
+        if not wrap:
+            # Gewoon dagvenster: vs <= uur < ve op dezelfde dag.
+            venster = [i for i in idxs if vs <= _uur(i) < ve]
+        else:
+            # v1.8.9 overnacht/wrap-around: sessie start op dag D vanaf vs en
+            # loopt door tot ve op dag D+1. Avonddeel (dag D, uur >= vs) +
+            # ochtenddeel (dag D+1, uur < ve), chronologisch gesorteerd.
+            _dnext = dag + _dt.timedelta(days=1)
+            if _dnext not in per_dag:
+                # Incomplete rand-sessie aan het einde van de periode (geen
+                # ochtend erna) → overslaan, anders drijft die afgekapte sessie
+                # de dimensionering kunstmatig op.
+                return
+            venster = [i for i in idxs if _uur(i) >= vs]
+            venster += [i for i in per_dag[_dnext] if _uur(i) < ve]
+            venster.sort()
+        if not venster:
+            return
+        if modus == 'onmiddellijk':
+            volgorde = list(venster)  # chronologisch
+        else:
+            surplus = dict((i, max(0.0, pv_kw[i] - base_cons_kw[i])) for i in venster)
+            def _prijs(j):
+                return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
+            # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
+            volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
+        resterend = [rec['dag_kwh']]   # in lijst zodat de nested _vul() 'm kan aanpassen
+        # v1.23.1: DC-LAADBUFFER — eerst levert de buffer (SOC) aan de voertuigen (aan de lader, niet via het net); de rest
+        # laadt zoals gewoonlijk in het venster. Na de dag laadt de buffer bij (zie _dcb_bijladen). Enkel bij slim laden.
+        _dcb_lev = 0.0
+        if _dcb_kwh > 0 and modus != 'onmiddellijk' and _dcb_soc[0] > 1e-9:
+            _dcb_lev = min(_dcb_soc[0], resterend[0])
+            _dcb_soc[0] -= _dcb_lev
+            resterend[0] -= _dcb_lev
+        if not _batt_ongebonden and dag not in _batt_budget:
+            _batt_budget[dag] = _budget_start(dag)   # bruikbare batterij-energie voor deze sessie (v1.25.0: doorlopende laadtoestand)
+        _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
+        def _batt_vrij_kw():
+            if _batt_ongebonden:
+                return battery_kw
+            _rem = _batt_budget.get(dag, 0.0)
+            return min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
+        def _vul(gebruik_batt):
+            for i in volgorde:
+                if resterend[0] <= 1e-9:
+                    break
+                conn_kw = _conn_vrij_kw(i)
+                extra_batt = _batt_vrij_kw() if gebruik_batt else 0.0
+                ruimte_cap = cap - _pl_bij.get(i, 0.0)
+                if ruimte_cap <= 1e-9:
                     continue
-                dag = sim_timestamps[i].date()
-                if not _batt_ongebonden and dag not in _batt_budget:
-                    _batt_budget[dag] = _budget_start(dag)
-                conn = _conn_vrij_kw(i)
-                uit_grid = min(d, conn); rest = d - uit_grid
-                if _batt_ongebonden:
-                    batt_av = battery_kw
-                else:
-                    _rem = _batt_budget.get(dag, 0.0)
-                    batt_av = min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
-                uit_batt = min(rest, batt_av); served = uit_grid + uit_batt
-                if served > 0:
-                    ev[i] += served
+                beschikbaar_kw = min(ruimte_cap, conn_kw + extra_batt)
+                take = min(beschikbaar_kw * dt_h, resterend[0])
+                if take > 0:
+                    ev[i] += take / dt_h
+                    _pl_bij[i] = _pl_bij.get(i, 0.0) + take / dt_h
                     if _pp is not None:
-                        _pp['load_kw'][i] += served
+                        _pp['load_kw'][i] += take / dt_h
                     if not _batt_ongebonden:
-                        _batt_budget[dag] -= uit_batt * dt_h
-                        if _batt_uit is not None:
-                            _batt_uit[dag] = _batt_uit.get(dag, 0.0) + uit_batt * dt_h
-                gemist = d - served
-                if gemist > 1e-9:
-                    tekort_kwh += gemist * dt_h
-                    if _pp is not None:
-                        _pp['tekort_kwh'] += gemist * dt_h
+                        # energie boven de vrije aansluiting komt uit de batterij → budget aframen
+                        _uit_batt = max(0.0, take - conn_kw * dt_h)
+                        _batt_budget[dag] -= _uit_batt
+                        if _batt_uit is not None and _uit_batt > 0:
+                            _batt_uit[dag] = _batt_uit.get(dag, 0.0) + _uit_batt
+                    resterend[0] -= take
+        if grid_first:
+            # LADDER (Johan 16-08): 1) laad grid-first onder de aansluiting (transfo blijft heilig),
+            # 2) batterij vult enkel de rest bij, 3) wat dan nog rest = echt tekort. Zo blijft de
+            # batterij vrij voor arbitrage wanneer de laadvraag ruim onder het toegangsvermogen past.
+            _vul(False)   # 1) grid alleen
+            _vul(True)    # 2) batterij-headroom voor de rest
+        else:
+            _vul(True)    # oud gedrag: aansluiting + batterij samen (één pass)
+        if resterend[0] > 1e-6:
+            _tk[0] += resterend[0]  # paste niet onder de aansluiting in dit venster
+            if _pp is not None:
+                _pp['tekort_kwh'] += resterend[0]
+        if bijladen:
+            _dcb_bijladen(idxs, _pp)   # v1.23.1: na de laadsessie de buffer bijvullen (vrije aansluiting, goedkoopste kwartieren)
+
+    # v1.28.0 (Johan 19-11): KADE + DC-LAADBUFFER (slim laden) → DAG PER DAG over alle pleinen, zodat de buffer-SOC
+    #   chronologisch klopt: overdag levert de buffer aan de kade (snelladen tijdens laden/lossen), 's nachts aan het
+    #   wagenpark, daarna (en op rustdagen, ook in het weekend) laadt hij bij uit de vrije aansluiting op de goedkoopste
+    #   kwartieren. Zonder kade of zonder buffer: exact het oude pad (plein per plein).
+    _dag_per_dag = (_dcb_kwh > 0 and modus != 'onmiddellijk'
+                    and any(r.get('modus') == 'kade' for (r, _p) in _paren))
+    if _dag_per_dag:
+        _pp_buf = next((_p for (r, _p) in _paren if r.get('modus') not in ('bezoekers', 'kade')), None) \
+            or next((_p for (r, _p) in _paren if r.get('modus') == 'kade'), None)
+        # binnen de dag chronologisch op het begin van het venster (kade 11 u vóór de nachtsessie van 19 u)
+        def _start_uur(r):
+            if r.get('modus') in ('bezoekers', 'kade'):
+                return min([v[0] for v in (r.get('vensters') or [])] or [0.0])
+            return float(r.get('v_start', 0) or 0)
+        _paren_dag = sorted(_paren, key=lambda rp: _start_uur(rp[0]))
+        for dag, idxs in per_dag.items():
+            for (rec, _pp) in _paren_dag:
+                if rec.get('modus') in ('bezoekers', 'kade'):
+                    _sessies(rec, _pp, idxs, dc_eerst=(rec.get('modus') == 'kade'))
+                    continue
+                if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
+                    continue
+                if _is_laaddag(sim_timestamps[idxs[0]], rec['dpw']):
+                    _wagenpark_dag(rec, _pp, dag, idxs, bijladen=False)
+            _dcb_bijladen(idxs, _pp_buf)
+        return ev, _tk[0]
+
+    for (rec, _pp) in _paren:
+        if rec.get('modus') in ('bezoekers', 'kade'):   # v1.27.0: kade = zelfde chronologische bediening
+            _sessies(rec, _pp, range(N))
             continue
         if rec['dag_kwh'] <= 0 or rec['cap_kw'] <= 0:
             continue
-        cap, vs, ve, dpw = rec['cap_kw'], rec['v_start'], rec['v_eind'], rec['dpw']
-        wrap = rec.get('wrap', False)
         for dag, idxs in per_dag.items():
-            if not _is_laaddag(sim_timestamps[idxs[0]], dpw):
+            if not _is_laaddag(sim_timestamps[idxs[0]], rec['dpw']):
                 _dcb_bijladen(idxs, _pp)   # v1.23.1: rustdag → buffer vullen
                 continue
-            if not wrap:
-                # Gewoon dagvenster: vs <= uur < ve op dezelfde dag.
-                venster = [i for i in idxs if vs <= _uur(i) < ve]
-            else:
-                # v1.8.9 overnacht/wrap-around: sessie start op dag D vanaf vs en
-                # loopt door tot ve op dag D+1. Avonddeel (dag D, uur >= vs) +
-                # ochtenddeel (dag D+1, uur < ve), chronologisch gesorteerd.
-                _dnext = dag + _dt.timedelta(days=1)
-                if _dnext not in per_dag:
-                    # Incomplete rand-sessie aan het einde van de periode (geen
-                    # ochtend erna) → overslaan, anders drijft die afgekapte sessie
-                    # de dimensionering kunstmatig op.
-                    continue
-                venster = [i for i in idxs if _uur(i) >= vs]
-                venster += [i for i in per_dag[_dnext] if _uur(i) < ve]
-                venster.sort()
-            if not venster:
-                continue
-            if modus == 'onmiddellijk':
-                volgorde = list(venster)  # chronologisch
-            else:
-                surplus = dict((i, max(0.0, pv_kw[i] - base_cons_kw[i])) for i in venster)
-                def _prijs(j):
-                    return min(spot[j], imb[j]) if modus == 'shift_onbalans' else spot[j]
-                # PV-overschot-kwartieren eerst (zelfconsumptie), dan goedkoopste prijs.
-                volgorde = sorted(venster, key=lambda j: (0 if surplus[j] > 0 else 1, _prijs(j)))
-            resterend = [rec['dag_kwh']]   # in lijst zodat de nested _vul() 'm kan aanpassen
-            # v1.23.1: DC-LAADBUFFER — eerst levert de buffer (SOC) aan de voertuigen (aan de lader, niet via het net); de rest
-            # laadt zoals gewoonlijk in het venster. Na de dag laadt de buffer bij (zie _dcb_bijladen). Enkel bij slim laden.
-            _dcb_lev = 0.0
-            if _dcb_kwh > 0 and modus != 'onmiddellijk' and _dcb_soc[0] > 1e-9:
-                _dcb_lev = min(_dcb_soc[0], resterend[0])
-                _dcb_soc[0] -= _dcb_lev
-                resterend[0] -= _dcb_lev
-            if not _batt_ongebonden and dag not in _batt_budget:
-                _batt_budget[dag] = _budget_start(dag)   # bruikbare batterij-energie voor deze sessie (v1.25.0: doorlopende laadtoestand)
-            _pl_bij = {}   # bijdrage van DIT plein per kwartier vandaag (voor de cap over beide passes)
-            def _batt_vrij_kw():
-                if _batt_ongebonden:
-                    return battery_kw
-                _rem = _batt_budget.get(dag, 0.0)
-                return min(battery_kw, _rem / dt_h) if _rem > 1e-9 else 0.0
-            def _vul(gebruik_batt):
-                for i in volgorde:
-                    if resterend[0] <= 1e-9:
-                        break
-                    conn_kw = _conn_vrij_kw(i)
-                    extra_batt = _batt_vrij_kw() if gebruik_batt else 0.0
-                    ruimte_cap = cap - _pl_bij.get(i, 0.0)
-                    if ruimte_cap <= 1e-9:
-                        continue
-                    beschikbaar_kw = min(ruimte_cap, conn_kw + extra_batt)
-                    take = min(beschikbaar_kw * dt_h, resterend[0])
-                    if take > 0:
-                        ev[i] += take / dt_h
-                        _pl_bij[i] = _pl_bij.get(i, 0.0) + take / dt_h
-                        if _pp is not None:
-                            _pp['load_kw'][i] += take / dt_h
-                        if not _batt_ongebonden:
-                            # energie boven de vrije aansluiting komt uit de batterij → budget aframen
-                            _uit_batt = max(0.0, take - conn_kw * dt_h)
-                            _batt_budget[dag] -= _uit_batt
-                            if _batt_uit is not None and _uit_batt > 0:
-                                _batt_uit[dag] = _batt_uit.get(dag, 0.0) + _uit_batt
-                        resterend[0] -= take
-            if grid_first:
-                # LADDER (Johan 16-08): 1) laad grid-first onder de aansluiting (transfo blijft heilig),
-                # 2) batterij vult enkel de rest bij, 3) wat dan nog rest = echt tekort. Zo blijft de
-                # batterij vrij voor arbitrage wanneer de laadvraag ruim onder het toegangsvermogen past.
-                _vul(False)   # 1) grid alleen
-                _vul(True)    # 2) batterij-headroom voor de rest
-            else:
-                _vul(True)    # oud gedrag: aansluiting + batterij samen (één pass)
-            if resterend[0] > 1e-6:
-                tekort_kwh += resterend[0]  # paste niet onder de aansluiting in dit venster
-                if _pp is not None:
-                    _pp['tekort_kwh'] += resterend[0]
-            _dcb_bijladen(idxs, _pp)   # v1.23.1: na de laadsessie de buffer bijvullen (vrije aansluiting, goedkoopste kwartieren)
-    return ev, tekort_kwh
+            _wagenpark_dag(rec, _pp, dag, idxs)
+    return ev, _tk[0]
 
 
 def _laadplein_capaciteit(lp_prep: dict, sim_timestamps: list, spot: list, imb: list,
