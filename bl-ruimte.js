@@ -1,5 +1,7 @@
 // ============================================================================
-// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.3.0, 2026-11-19, Johan)
+// bl-ruimte.js — Betere Lader: KWARTIERANALYSE van de ruimte op de aansluiting (v1.3.2, 2026-11-19, Johan)
+// 1.3.2: bedrijven zonder dag/nacht-herweging; hoogste kwartier = factuurpiek (te weinig → 2 korte pieken per werkdag, ochtend en na de middag; te veel → aftoppen).
+// 1.3.1: PLAFOND — het standaardprofiel komt nooit boven max(toegangsvermogen, gemeten piek); afgetopte energie gaat naar de kwartieren eronder.
 // 1.3.0: CABINE — bij een bedrijf op MS schatten we de cabine als de kleinste marktmaat (100, 250, 400, 630, 800, 1000,
 //        1500, 2000 kVA) die groter is dan de piek op de factuur en minstens het toegangsvermogen (of o.cabine_kva als gekend).
 //        Per horizon: past slim laden onder het toegangsvermogen («ok»), enkel onder de cabine («toegang»: toegangsvermogen
@@ -32,7 +34,7 @@
 'use strict';
 
 const Q = 35040, QD = 96, DAG0_WEEKDAG = 3;   // 1 jan 2025 = woensdag (0 = zondag)
-const MARGE = 0.10;
+const MARGE = 0.05;   // 1.3.2 (Johan 19-11): 5 % (was 10 %) — het profiel haalt nu zelf de factuurpiek, gelijk aan de 0,95 in beterladen.html
 const CABINES = [100, 250, 400, 630, 800, 1000, 1500, 2000];   // kVA, klassieke marktmaten                            // 10 % onder het toegangsvermogen: cos φ en korte pieken die een profiel niet toont
 
 function _datum(dag) { const d = new Date(Date.UTC(2025, 0, 1 + dag)); return d; }
@@ -68,7 +70,9 @@ function bouwProfiel(vorm, o) {
   const inPer = (q) => { if (d0 == null || d1 == null) return true; const dag = Math.floor(q / QD); return d0 <= d1 ? (dag >= d0 && dag <= d1) : (dag >= d0 || dag <= d1); };
   // dag/nacht: herweeg normale ↔ stille uren naar de gemeten verhouding
   let herweging = null;
-  if (o.normaal_aandeel > 0.05 && o.normaal_aandeel < 0.98) {
+  // 1.3.2 (Johan 19-11): bedrijven — profiel enkel op het jaarverbruik, geen herweging dag/nacht (die duwde de werkuren
+  //   onrealistisch hoog, ± 88 % van het toegangsvermogen tussen 8 en 16 u). Enkel thuisladen herweegt nog.
+  if (o.doelgroep === 'thuisladen' && o.normaal_aandeel > 0.05 && o.normaal_aandeel < 0.98) {
     let n = 0, t = 0; for (let i = 0; i < Q; i++) if (inPer(i)) { t += s[i]; if (_normaal(i)) n += s[i]; }
     const np = t > 0 ? n / t : 0;
     if (np > 0.02 && np < 0.99) {
@@ -87,32 +91,49 @@ function bouwProfiel(vorm, o) {
   if (!(jaarKwh > 0) && +o.afname_kwh > 0) { jaarKwh = +o.afname_kwh * 12; bron = 'factuur × 12 (ruw)'; }
   if (!(jaarKwh > 0)) throw new Error('geen verbruik');
   const L = new Float64Array(Q); for (let i = 0; i < Q; i++) L[i] = s[i] * jaarKwh * 4;   // kW per kwartier
-  // 1.2.0 PIEKCORRECTIE: een standaardprofiel is glad (hoogste kwartier ± 2 × het gemiddelde). Ligt de gemeten maandpiek
-  //   duidelijk hoger, dan leggen we per werkdag één korte kwartierpiek op een willekeurig (vast gezaaid) tijdstip, hoogte
-  //   50–100 % tot de gemeten piek, en per maand minstens één die de piek haalt. Het jaarverbruik blijft gelijk.
-  let pieken = null; const piekQ = new Set();
+  // 1.3.2 PIEK = FACTUURPIEK (Johan 19-11): het profiel volgt het jaarverbruik; het hoogste kwartier moet de piek op de
+  //   factuur halen, niet meer en niet minder.
+  //   (a) Te weinig piek: per werkdag twee korte pieken (half uur) — in de ochtend (± 9 u) en net na de middag (± 13 u),
+  //       hoogte 85–100 % van de factuurpiek, per maand minstens één die de piek exact haalt. Jaarverbruik gelijk.
+  //   (b) Te veel piek (profiel boven de factuurpiek of het toegangsvermogen): aftoppen, energie naar de kwartieren eronder.
+  let pieken = null, plafond = null; const piekQ = new Set();
   const piek = +o.piek_kw || 0;
+  const cap = piek > 0 ? (+o.toeg_kw > 0 ? Math.min(piek, +o.toeg_kw) : piek) : (+o.toeg_kw || 0);
+  if (cap > 0) {
+    let maxL = 0; for (let i = 0; i < Q; i++) if (L[i] > maxL) maxL = L[i];
+    if (maxL > cap * 1.001) {
+      for (let it = 0; it < 40; it++) {
+        let over = 0, onder = 0;
+        for (let i = 0; i < Q; i++) { if (L[i] > cap) { over += L[i] - cap; L[i] = cap; } else onder += L[i]; }
+        if (over < 1e-6 || !(onder > 0)) break;
+        const f = 1 + over / onder; for (let i = 0; i < Q; i++) if (L[i] < cap) L[i] *= f;
+      }
+      plafond = { cap_kw: Math.round(cap), profiel_max_kw: Math.round(maxL) };
+    }
+  }
   if (piek > 0) {
     let maxPer = 0; for (let i = 0; i < Q; i++) if (inPer(i) && L[i] > maxPer) maxPer = L[i];
-    if (piek > 1.3 * maxPer) {
+    if (piek > 1.02 * maxPer) {
       let seed = 20251; const rnd = () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
       const dagE = new Float64Array(365); for (let i = 0; i < Q; i++) dagE[Math.floor(i / QD)] += L[i];
       const med = _pct(Array.from(dagE), 0.5), doel = new Map(), maandBest = {};
       for (let dag = 0; dag < 365; dag++) {
-        const w = _weekdag(dag), r1 = rnd(), r2 = rnd(); if (w === 0 || w === 6 || dagE[dag] < 0.4 * med) continue;
-        const q = dag * QD + Math.floor(r1 * QD), f = 0.5 + 0.5 * r2, m = _datum(dag).getUTCMonth();
-        doel.set(q, f * piek);
-        if (!maandBest[m] || f > maandBest[m].f) maandBest[m] = { q, f };
+        const w = _weekdag(dag); if (w === 0 || w === 6 || dagE[dag] < 0.4 * med) continue;
+        for (const [u0, du] of [[8.5, 1.5], [12.5, 1.5]]) {                      // ochtend 8u30–10u, na de middag 12u30–14u
+          const r1 = rnd(), r2 = rnd(), q = dag * QD + Math.round((u0 + r1 * du) * 4), f = 0.85 + 0.15 * r2, m = _datum(dag).getUTCMonth();
+          doel.set(q, f * piek); doel.set(q + 1, f * piek);                        // een half uur
+          if (!maandBest[m] || f > maandBest[m].f) maandBest[m] = { q, f };
+        }
       }
-      for (const m in maandBest) doel.set(maandBest[m].q, piek);   // per maand haalt minstens één kwartier de gemeten piek
+      for (const m in maandBest) { doel.set(maandBest[m].q, piek); doel.set(maandBest[m].q + 1, piek); }
       let eExtra = 0; for (const [q, v] of doel) eExtra += Math.max(0, v - L[q]) / 4;
-      const k = Math.max(0.5, (jaarKwh - eExtra) / jaarKwh);   // jaarverbruik behouden: de rest schaalt licht mee
-      for (let i = 0; i < Q; i++) L[i] *= k;
+      const k = Math.max(0.5, (jaarKwh - eExtra) / jaarKwh);
+      for (let i = 0; i < Q; i++) if (!doel.has(i)) L[i] *= k;
       let n = 0; for (const [q, v] of doel) if (v > L[q]) { L[q] = v; n++; piekQ.add(q); }
-      pieken = { aantal: n, piek_kw: Math.round(piek), profiel_max_kw: Math.round(maxPer), aanname: '1 kwartierpiek per werkdag, willekeurig tijdstip, 50–100 % van je gemeten piek' };
+      pieken = { aantal: n, piek_kw: Math.round(piek), profiel_max_kw: Math.round(maxPer), aanname: 'per werkdag 2 korte pieken (ochtend en na de middag), 85–100 % van de factuurpiek' };
     }
   }
-  return { L, jaarKwh, bron, herweging, pieken, piekQ };
+  return { L, jaarKwh, bron, herweging, pieken, piekQ, plafond };
 }
 
 // Laaddagen + venster (indexen, kan over middernacht lopen)
@@ -268,7 +289,7 @@ function simuleer(vorm, o, markt) {
   const laatste = ['m36', 'm24', 'm12', 'nu'].map(k => H[k]).filter(x => x && x.ev > 0)[0];
   const nodig = Math.max(piek, laatste ? (laatste.niveau_slim_kw || 0) : 0) / (1 - MARGE);
   return {
-    jaar_mwh: Math.round(P.jaarKwh / 100) / 10, jaar_bron: P.bron, dag_nacht: P.herweging, pieken: P.pieken, profiel: o.profiel,
+    jaar_mwh: Math.round(P.jaarKwh / 100) / 10, jaar_bron: P.bron, dag_nacht: P.herweging, pieken: P.pieken, plafond: P.plafond, profiel: o.profiel,
     toeg_kw: toeg, grens_kw: Math.round(grens), piek_kw: Math.round(piek), profielpiek_kw: Math.round(maxL), gem_kw: Math.round(P.jaarKwh / 8760),
     laaddagen: dagen.length, venster: { start_u: o.doelgroep === 'kmo' ? 8 : 18, duur_u: +o.venster_u || 8 },
     last_venster_gem_kw: Math.round(lastVenster.reduce((a, b) => a + b, 0) / Math.max(1, lastVenster.length)),
@@ -285,4 +306,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.0' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.2' };
