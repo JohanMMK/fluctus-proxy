@@ -37,11 +37,15 @@
   },
   {
     "naam": "Industrie met zomersluiting",
-    "beschrijving": "sterk weekdagprofiel, 24u-belasting, sterk seizoensgebonden, variabel, piek 10u"
+    "beschrijving": "sterk weekdagprofiel, één ploeg 7–16 u, zomersluiting 28/7–17/8 en kerst, loadfactor ± 33 %, piek 8u"
   },
   {
     "naam": "Industrie voeding",
-    "beschrijving": "weekdagprofiel, 24u-belasting, seizoensstabiel, piek 18u"
+    "beschrijving": "weekdagprofiel, 24u-belasting, seizoensstabiel, piek 18u (continu, loadfactor ± 69 %)"
+  },
+  {
+    "naam": "Industrie zonder zomersluiting",
+    "beschrijving": "sterk weekdagprofiel, één ploeg 7–16 u, seizoensstabiel, geen zomersluiting, loadfactor ± 35 %, piek 8u"
   },
   {
     "naam": "Kantoor",
