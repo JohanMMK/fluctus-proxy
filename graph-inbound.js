@@ -225,6 +225,9 @@ async function sendMail(to, subject, htmlContent, textContent, attachments, opts
   // GRAPH_MAILBOX (dossier@) met SendAs-recht op dat adres. Zonder SendAs geeft Graph een fout → de caller
   // valt terug op Brevo (die met hetzelfde @energie-compas.eu-afzenderadres mailt).
   if (opts && opts.from) message.from = { emailAddress: { address: String(opts.from) } };
+  // 15.462.0 (Johan 20-11): afzendernaam per mail (bv. «Betere Lader») — zelfde adres (dossier@), andere weergavenaam.
+  //   Exchange kan de naam van de eigen mailbox overschrijven; dan blijft het de mailboxnaam (geen fout).
+  if (opts && opts.from_naam) message.from = { emailAddress: { address: String(opts.from || _env('GRAPH_MAILBOX')), name: String(opts.from_naam) } };
   // v15.163: optionele bijlagen (bv. klantrapport-PDF). contentBytes = kale base64 (geen data:-prefix).
   if (Array.isArray(attachments) && attachments.length) {
     message.attachments = attachments.filter(a => a && a.contentBytes).map(a => ({
