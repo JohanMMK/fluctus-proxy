@@ -279,7 +279,18 @@ function simuleer(vorm, o, markt) {
       if (cabine && cabine > toeg) {
         const gC = cabine * (1 - MARGE);
         const xc = simHorizon(L, dagen, o.horizons[k], Object.assign({}, opt, { grens: gC, toeg: cabine }), spot);
-        if (xc.past) { status = 'toegang'; toegNodig = Math.min(cabine, Math.ceil(Math.max(piek, xc.niveau_slim_kw || 0) / (1 - MARGE) / 5) * 5); }
+        if (xc.past) {
+          // 1.5.0 (Johan 20-11): het KLEINSTE toegangsvermogen (stappen van 5 kW) waarbij slim laden past — niet het laadniveau
+          //   dat de simulatie onder de cabinegrens haalt (dat vult de dalen tot hoog en gaf bv. 180 kW waar 145 volstaat).
+          let lo = Math.ceil(toeg / 5) * 5, hi = Math.ceil(cabine / 5) * 5;
+          if (lo <= toeg) lo += 5;
+          while (lo < hi) {
+            const mid = Math.floor((lo + hi) / 10) * 5;
+            const xm = simHorizon(L, dagen, o.horizons[k], Object.assign({}, opt, { grens: mid * (1 - MARGE), toeg: mid }), spot);
+            if (xm.past) hi = mid; else lo = mid + 5;
+          }
+          status = 'toegang'; toegNodig = Math.min(cabine, lo);
+        }
       }
     }
     x.aansluiting = status; if (toegNodig) x.toeg_nodig_kw = toegNodig;
@@ -309,4 +320,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.4.0' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.5.0' };
