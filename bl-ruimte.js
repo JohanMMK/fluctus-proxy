@@ -137,11 +137,13 @@ function bouwProfiel(vorm, o) {
   return { L, jaarKwh, bron, herweging, pieken, piekQ, plafond };
 }
 
+// 1.4.0 (Johan 20-11): startuur kiesbaar (overdag 8 u / 's nachts 18 u); zonder keuze: kmo 8 u, anders 18 u
+function _startU(o) { const s = Number(o && o.start_u); return (o && o.start_u != null && o.start_u !== '' && Number.isFinite(s) && s >= 0 && s <= 23) ? Math.round(s) : (o && o.doelgroep === 'kmo' ? 8 : 18); }
 // Laaddagen + venster (indexen, kan over middernacht lopen)
 function vensters(L, o) {
   const dagE = new Float64Array(365); for (let i = 0; i < Q; i++) dagE[Math.floor(i / QD)] += L[i] / 4;
   const med = _pct(Array.from(dagE), 0.5);
-  const start = o.doelgroep === 'kmo' ? 8 : 18, lengte = Math.max(4, Math.min(96, Math.round((+o.venster_u || 8) * 4)));
+  const start = _startU(o), lengte = Math.max(4, Math.min(96, Math.round((+o.venster_u || 8) * 4)));
   const out = [];
   for (let dag = 0; dag < 365; dag++) {
     const w = _weekdag(dag);
@@ -292,7 +294,7 @@ function simuleer(vorm, o, markt) {
   return {
     jaar_mwh: Math.round(P.jaarKwh / 100) / 10, jaar_bron: P.bron, dag_nacht: P.herweging, pieken: P.pieken, plafond: P.plafond, profiel: o.profiel,
     toeg_kw: toeg, grens_kw: Math.round(grens), piek_kw: Math.round(piek), profielpiek_kw: Math.round(maxL), gem_kw: Math.round(P.jaarKwh / 8760),
-    laaddagen: dagen.length, venster: { start_u: o.doelgroep === 'kmo' ? 8 : 18, duur_u: +o.venster_u || 8 },
+    laaddagen: dagen.length, venster: { start_u: _startU(o), duur_u: +o.venster_u || 8 },
     last_venster_gem_kw: Math.round(lastVenster.reduce((a, b) => a + b, 0) / Math.max(1, lastVenster.length)),
     last_venster_gem_met_pieken_kw: Math.round(lastMet.reduce((a, b) => a + b, 0) / Math.max(1, lastMet.length)),
     ruimte_kwh_dag_p5: Math.round(_pct(rGrens, 0.05)), ruimte_kwh_dag_med: Math.round(_pct(rGrens, 0.5)),
@@ -307,4 +309,4 @@ function simuleer(vorm, o, markt) {
   };
 }
 
-module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.3.3' };
+module.exports = { simuleer, bouwProfiel, vensters, tariefVar, CABINES, VERSIE: '1.4.0' };
