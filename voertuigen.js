@@ -153,7 +153,13 @@ function createVoertuigen(deps) {
       const p = await leesJson('voertuigen/actief.json');
       if (p && p.versie) {
         const v = await leesJson(`voertuigen/v${p.versie}.json`);
-        if (v && Array.isArray(v.records) && v.records.length) { actief = Object.assign({}, v, { versie: p.versie }); log.log(`[voertuigen] actieve versie ${p.versie} (${v.records.length} modellen)`); return actief; }
+        if (v && Array.isArray(v.records) && v.records.length) {
+          // 15.464.0 (Johan 20-11): onze aanvullende tabel meteen over de actieve versie leggen, zodat een toegevoegde
+          //   wagen (bv. XPENG G9/G9L) na een deploy zichtbaar is zonder te wachten op de maandelijkse update.
+          let recs = v.records;
+          try { recs = merge(v.records.filter(r => r.herkomst !== 'eigen'), laadAanvullend(deps.aanvPad).records); } catch (e) { log.warn('[voertuigen] aanvullende tabel niet over de actieve versie gelegd:', e.message); }
+          actief = Object.assign({}, v, { versie: p.versie, records: recs }); log.log(`[voertuigen] actieve versie ${p.versie} (${recs.length} modellen, incl. aanvullende tabel)`); return actief;
+        }
       }
     } catch (e) { log.warn('[voertuigen] actieve versie niet leesbaar, basis gebruikt:', e.message); }
     actief = basis(); log.log(`[voertuigen] basisversie ${actief.versie} (${actief.records.length} modellen)`);
