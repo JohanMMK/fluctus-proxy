@@ -146,13 +146,14 @@ function dcfEigen(m, par){
 
 // Concessie: locatie draagt €0, krijgt omzetdeling + parkeergeld
 function concessieLocatie(m, par){
-  let totaal=0; const rij=[];
+  let totaal=0; const rij=[]; const cfs=[0]; let jaar1=0;
   for (let j=1;j<=par.model_jaren;j++){
     const gV=Math.pow(1+par.inflatie+par.verkoop_spread,j-1), gC=Math.pow(1+par.inflatie,j-1);
     const omzet=m.omzet*gV, deel=omzet*omzetdeelPct(omzet,par.omzetdeling), pk=m.parkeergeld*gC;
-    totaal+=deel+pk; if (j<=3||j===par.model_jaren) rij.push({j, deel, pk});
+    const y=deel+pk; cfs.push(y); totaal+=y; if (j===1) jaar1=y;
+    if (j<=3||j===par.model_jaren) rij.push({j, deel, pk});
   }
-  return { totaal, rij };
+  return { totaal, rij, jaar1, ncw: npv(par.discontovoet, cfs) };
 }
 
 // Concessie — rendement van de concessiegever (investeerder/exploitant): draagt de CAPEX,
@@ -191,36 +192,30 @@ function rapportHtml(ctx){
       ['Investering (CAPEX, incl. '+Math.round(par.contingency*100)+'% marge)', eur(m.capex)],
     ])}
     <div class="two">
-      <div class="col"><h3>Concessie (uitvoering door partner)</h3>
-        <div class="sm" style="font-weight:bold;color:#1F3864;margin:4px 0 2px">Wat de locatie krijgt</div>
-        ${kvTable([
-          ['Investering voor de locatie', eur(0)],
-          ['Omzetdeling (jaar 1)', eur(conc.rij[0]?conc.rij[0].deel:0)],
-          ['Parkeergeld (jaar 1)', eur(conc.rij[0]?conc.rij[0].pk:0)],
-          ['Opbrengst locatie (jaar 1)', eur(conc.rij[0]?conc.rij[0].deel+conc.rij[0].pk:0)],
-          ['Totale opbrengst locatie (15 jaar)', eur(conc.totaal)],
-        ])}
-        <div class="sm" style="font-weight:bold;color:#1F3864;margin:8px 0 2px">Rendement voor de concessiegever</div>
+      <div class="col" style="flex:1.55">
+        <h3>Rendement voor de locatie-eigenaar</h3>
+        <table class="kv cmp">
+          <tr><td class="lbl"></td><th>Eigen financiering</th><th>Concessie (concessiegever)</th></tr>
+          <tr><td class="lbl">Investering (CAPEX)</td><td class="r">${eur(m.capex)}</td><td class="r">${eur(0)}</td></tr>
+          <tr><td class="lbl">Opbrengst jaar 1</td><td class="r">${eur(m.netto_jaar1)}</td><td class="r">${eur(conc.jaar1)}</td></tr>
+          <tr><td class="lbl">Totaal over ${par.model_jaren} jaar</td><td class="r">${eur(eigen.totaal)}</td><td class="r">${eur(conc.totaal)}</td></tr>
+          <tr><td class="lbl">IRR</td><td class="r">${eigen.irr!=null?(Math.round(eigen.irr*1000)/10)+' %':'—'}</td><td class="r">n.v.t.</td></tr>
+          <tr><td class="lbl">NCW @ ${Math.round(par.discontovoet*100)}%</td><td class="r">${eur(eigen.ncw)}</td><td class="r">${eur(conc.ncw)}</td></tr>
+          <tr><td class="lbl">Terugverdientijd</td><td class="r">${eigen.tvt?eigen.tvt+' jaar':'> '+par.model_jaren+' jaar'}</td><td class="r">—</td></tr>
+        </table>
+        <p class="sm">Twee routes voor de eigenaar: <b>zelf financieren</b> (draagt de CAPEX, houdt de volledige netto-opbrengst) of een <b>concessie verlenen</b> (geen investering; ontvangt de omzetdeling ${staffelTxt} plus het parkeergeld). Zonder eigen investering zijn IRR en terugverdientijd niet van toepassing.</p>
+      </div>
+      <div class="col">
+        <h3>Rendement voor de concessienemer</h3>
         ${kvTable([
           ['Investering (CAPEX)', eur(m.capex)],
           ['Netto jaar 1', eur(concOp.cfs[1]||0)],
-          ['Terugverdientijd', concOp.tvt?concOp.tvt+' jaar':'> '+par.model_jaren+' jaar'],
-          ['IRR (15 jaar)', concOp.irr!=null?(Math.round(concOp.irr*1000)/10)+' %':'—'],
+          ['Totaal over '+par.model_jaren+' jaar', eur(concOp.totaal)],
+          ['IRR', concOp.irr!=null?(Math.round(concOp.irr*1000)/10)+' %':'—'],
           ['NCW @ '+Math.round(par.discontovoet*100)+'%', eur(concOp.ncw)],
-          ['Netto over 15 jaar', eur(concOp.totaal)],
+          ['Terugverdientijd', concOp.tvt?concOp.tvt+' jaar':'> '+par.model_jaren+' jaar'],
         ])}
-        <p class="sm">De locatie investeert niets en ontvangt een omzetdeling (${staffelTxt}) plus het parkeergeld. De concessiegever draagt de CAPEX en de exploitatie en houdt de resterende netto-opbrengst — berekend met dezelfde parameters als de eigen investering ernaast.</p>
-      </div>
-      <div class="col"><h3>Eigen investering door de locatie-eigenaar</h3>
-        ${kvTable([
-          ['Investering (CAPEX)', eur(m.capex)],
-          ['Netto-opbrengst jaar 1', eur(m.netto_jaar1)],
-          ['Terugverdientijd', eigen.tvt?eigen.tvt+' jaar':'> '+par.model_jaren+' jaar'],
-          ['IRR (15 jaar)', eigen.irr!=null?(Math.round(eigen.irr*1000)/10)+' %':'—'],
-          ['NCW @ '+Math.round(par.discontovoet*100)+'%', eur(eigen.ncw)],
-          ['Netto over 15 jaar', eur(eigen.totaal)],
-        ])}
-        <p class="sm">De locatie investeert zelf en houdt de volledige netto-opbrengst uit de laadverkoop.</p>
+        <p class="sm">De concessienemer (operator) draagt de CAPEX en de exploitatie en houdt de energiemarge minus de omzetdeling aan de locatie. Zelfde parameters als de eigen financiering ernaast; het parkeergeld gaat naar de locatie, niet naar de concessienemer.</p>
       </div>
     </div>`;
   }
@@ -279,6 +274,8 @@ function rapportHtml(ctx){
   table.ent th{background:#F2F6FC;color:#1F3864;text-align:left;font-size:10px;padding:4px 7px;border:1px solid #E2E8F2}
   table.ent td{font-size:10.5px} table.ent a{color:#05803B;text-decoration:none;font-weight:bold}
   table.kv{border-collapse:collapse;width:100%;margin:4px 0} table.kv td{border:1px solid #E2E8F2;padding:4px 7px;vertical-align:top}
+  table.cmp th{background:#F2F6FC;color:#1F3864;font-size:10px;text-align:right;padding:4px 7px;border:1px solid #E2E8F2;white-space:nowrap}
+  table.cmp td.lbl{color:#3a475c;font-weight:normal}
   table.kv td.r{text-align:right;font-weight:bold;white-space:nowrap} .two{display:flex;gap:12px;margin-top:6px} .col{flex:1}
   .sm{color:#5b6b85;font-size:10px;margin:4px 0} .tag{display:inline-block;background:#1F3864;color:#fff;border-radius:999px;font-size:10px;padding:2px 9px}
   .foot{color:#9AA3B0;font-size:9px;margin-top:14px;border-top:1px solid #E2E8F2;padding-top:6px}
