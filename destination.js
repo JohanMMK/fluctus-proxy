@@ -254,7 +254,7 @@ async function renderPdf(html){
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 45000 });
     const buf = await page.pdf({ format:'A4', printBackground:true, preferCSSPageSize:true });
-    return buf;
+    return Buffer.from(buf);   // puppeteer-core 23 geeft Uint8Array terug; Express res.send wil een Buffer
   } finally { if (browser) try { await browser.close(); } catch(e){} }
 }
 
