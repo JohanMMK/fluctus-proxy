@@ -155,16 +155,32 @@ function concessieLocatie(m, par){
   return { totaal, rij };
 }
 
+// Concessie — rendement van de concessiegever (investeerder/exploitant): draagt de CAPEX,
+// houdt de energiemarge minus de omzetdeling aan de locatie en minus de opex. Parkeergeld
+// gaat naar de locatie, niet naar de concessiegever. Zelfde parameters als "eigen investering".
+function concessieOperator(m, par){
+  const cfs=[-m.capex]; let cum=-m.capex, tvt=null;
+  for (let j=1;j<=par.model_jaren;j++){
+    const gV=Math.pow(1+par.inflatie+par.verkoop_spread,j-1), gC=Math.pow(1+par.inflatie,j-1);
+    const omzet=m.omzet*gV, deel=omzet*omzetdeelPct(omzet,par.omzetdeling);
+    const netto=(m.margeEnergie*gV) - deel - (m.opex*gC);
+    cfs.push(netto); cum+=netto; if (tvt===null && cum>=0) tvt=j;
+  }
+  return { cfs, totaal: cfs.reduce((a,c)=>a+c,0), irr: irr(cfs), ncw: npv(par.discontovoet,cfs), tvt };
+}
+
 // ─── HTML-template (generiek, print A4) ───────────────────────────────
 function rapportHtml(ctx){
   const { naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par } = ctx;
   const tl = TYPE_LABEL[type] || TYPE_LABEL.geen;
   const eigenA=dcfEigen(mA,par), eigenB=dcfEigen(mB,par);
   const concA=concessieLocatie(mA,par), concB=concessieLocatie(mB,par);
+  const concOpA=concessieOperator(mA,par), concOpB=concessieOperator(mB,par);
 
   function kvTable(rows){ return '<table class="kv">'+rows.map(r=>`<tr><td>${esc(r[0])}</td><td class="r">${r[1]}</td></tr>`).join('')+'</table>'; }
 
-  function bijlage(nr, titel, s, m, eigen, conc){
+  function bijlage(nr, titel, s, m, eigen, conc, concOp){
+    const staffelTxt = par.omzetdeling.map(function(x){ const pct=Math.round(x.pct*100)+'%'; return x.tot>=1e11 ? (pct+' daarboven') : (pct+' tot €'+Math.round(x.tot/1000)+'k'); }).join(', ');
     return `<h2>Bijlage ${nr} — ${esc(titel)}</h2>
     ${kvTable([
       ['Laadpunten', `${s.nAC}× AC${m.metDC?' + 1× DC 150 kVA + batterij (C&I 125/250)':''}`],
@@ -175,12 +191,24 @@ function rapportHtml(ctx){
     ])}
     <div class="two">
       <div class="col"><h3>Concessie (uitvoering door partner)</h3>
+        <div class="sm" style="font-weight:bold;color:#1F3864;margin:4px 0 2px">Wat de locatie krijgt</div>
         ${kvTable([
           ['Investering voor de locatie', eur(0)],
-          ['Opbrengst voor de locatie (jaar 1)', eur(conc.rij[0]?conc.rij[0].deel+conc.rij[0].pk:0)],
+          ['Omzetdeling (jaar 1)', eur(conc.rij[0]?conc.rij[0].deel:0)],
+          ['Parkeergeld (jaar 1)', eur(conc.rij[0]?conc.rij[0].pk:0)],
+          ['Opbrengst locatie (jaar 1)', eur(conc.rij[0]?conc.rij[0].deel+conc.rij[0].pk:0)],
           ['Totale opbrengst locatie (15 jaar)', eur(conc.totaal)],
         ])}
-        <p class="sm">De locatie investeert niets; de uitvoerder draagt de CAPEX en de exploitatie. De locatie ontvangt een omzetdeling plus het parkeergeld.</p>
+        <div class="sm" style="font-weight:bold;color:#1F3864;margin:8px 0 2px">Rendement voor de concessiegever</div>
+        ${kvTable([
+          ['Investering (CAPEX)', eur(m.capex)],
+          ['Netto jaar 1', eur(concOp.cfs[1]||0)],
+          ['Terugverdientijd', concOp.tvt?concOp.tvt+' jaar':'> '+par.model_jaren+' jaar'],
+          ['IRR (15 jaar)', concOp.irr!=null?(Math.round(concOp.irr*1000)/10)+' %':'—'],
+          ['NCW @ '+Math.round(par.discontovoet*100)+'%', eur(concOp.ncw)],
+          ['Netto over 15 jaar', eur(concOp.totaal)],
+        ])}
+        <p class="sm">De locatie investeert niets en ontvangt een omzetdeling (${staffelTxt}) plus het parkeergeld. De concessiegever draagt de CAPEX en de exploitatie en houdt de resterende netto-opbrengst — berekend met dezelfde parameters als de eigen investering ernaast.</p>
       </div>
       <div class="col"><h3>Eigen investering door de locatie-eigenaar</h3>
         ${kvTable([
@@ -238,8 +266,8 @@ function rapportHtml(ctx){
   </table>
   <p class="sm">Aannames: AC verkocht aan ${eur2(par.ac_verkoop_eur_kwh)}/kWh (CREG-niveau), DC aan ${eur2(par.dc_verkoop_eur_kwh)}/kWh. Energieaankoop ${eur2(par.spot_aankoop_eur_kwh)}/kWh (blended; laden op de spotmarkt, sturing van AC en batterij op de goedkoopste momenten). Geen netkosten verondersteld (bestaande aansluiting, batterij buffert de DC-piek). Model ${par.model_jaren} jaar; verkoopprijs groeit inflatie + ${Math.round(par.verkoop_spread*100)}%, aankoop volgt inflatie (${Math.round(par.inflatie*100)}%).</p>
 
-  ${bijlage('A','Scenario alleen AC', sizeA, mA, eigenA, concA)}
-  ${bijlage('B','Scenario AC + 1× DC 150 kVA + batterij', sizeB, mB, eigenB, concB)}
+  ${bijlage('A','Scenario alleen AC', sizeA, mA, eigenA, concA, concOpA)}
+  ${bijlage('B','Scenario AC + 1× DC 150 kVA + batterij', sizeB, mB, eigenB, concB, concOpB)}
 
   <div class="warn">⚠ Voorbehoud — Dit is een automatisch gegenereerde, indicatieve raming op basis van beperkt beschikbare gegevens (parkinggrootte en locatietype). Alle bedragen en volumes zijn richtwaarden die na een plaatsbezoek en een netcheck verfijnd worden. De aanname van nul netkosten geldt enkel bij een slimme configuratie en sturing die de maandpiek onder het bestaande toegangsvermogen houdt; dat wordt in een tweede versie geverifieerd.</div>
   <div class="foot">Gegenereerd door de Energie-Compas Lead Generator · ${new Date().toLocaleDateString('nl-BE')} · versie 1 (concept)</div>
