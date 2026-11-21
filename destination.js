@@ -20,7 +20,6 @@
 //  dit bestand kan de live diensten niet platleggen.
 // =====================================================================
 
-const puppeteer = require('puppeteer');
 const EXE = process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium';
 const OEKENE = 'oekene@gmail.com';
 
@@ -249,6 +248,7 @@ function rapportHtml(ctx){
 // ─── render ───────────────────────────────────────────────────────────
 async function renderPdf(html){
   let browser;
+  const puppeteer = require('puppeteer-core');   // zoals de rest van de proxy (geen bundled chromium)
   try {
     browser = await puppeteer.launch({ executablePath: EXE, headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-gpu','--disable-dev-shm-usage','--font-render-hinting=none'] });
     const page = await browser.newPage();
