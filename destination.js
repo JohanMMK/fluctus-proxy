@@ -229,7 +229,7 @@ function rapportHtml(ctx){
   *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#1b2430;font-size:11px;line-height:1.5}
   h1{color:#1F3864;font-size:20px;margin:0 0 2px} h2{color:#1F3864;font-size:15px;margin:18px 0 6px;border-bottom:2px solid #E2E8F2;padding-bottom:3px}
   h3{color:#1F3864;font-size:12px;margin:10px 0 4px} .sub{color:#5b6b85;font-size:11px;margin:0 0 10px}
-  .hero{width:100%;height:300px;object-fit:cover;border-radius:8px;margin:8px 0}
+  .hero{width:100%;height:320px;object-fit:cover;border-radius:8px;margin:8px 0}
   table.kv{border-collapse:collapse;width:100%;margin:4px 0} table.kv td{border:1px solid #E2E8F2;padding:4px 7px;vertical-align:top}
   table.kv td.r{text-align:right;font-weight:bold;white-space:nowrap} .two{display:flex;gap:12px;margin-top:6px} .col{flex:1}
   .sm{color:#5b6b85;font-size:10px;margin:4px 0} .tag{display:inline-block;background:#1F3864;color:#fff;border-radius:999px;font-size:10px;padding:2px 9px}
@@ -290,7 +290,7 @@ async function renderPdf(html){
 // ─── luchtfoto zoals EK: Esri World Imagery export (token-vrij) → base64 data-URI ──
 async function aerialDataUri(lat, lng, _fetch){
   try {
-    const z=18, w=720, h=360;
+    const z=19, w=720, h=340;   // ~215 m breed: parking + omliggende gebouwen/percelen duidelijk in beeld
     const R=6378137, x=R*lng*Math.PI/180, y=R*Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360));
     const res0=2*Math.PI*R/(256*Math.pow(2,z)), hw=w/2*res0, hh=h/2*res0;
     const url=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${(x-hw).toFixed(2)},${(y-hh).toFixed(2)},${(x+hw).toFixed(2)},${(y+hh).toFixed(2)}&bboxSR=3857&imageSR=3857&size=${w*2},${h*2}&format=jpg&f=image`;
