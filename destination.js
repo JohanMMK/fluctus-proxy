@@ -29,13 +29,12 @@ const DEFAULTS = {
   model_jaren: 15,
   inflatie: 0.02,                 // aankoopprijs volgt inflatie
   verkoop_spread: 0.01,           // verkoopprijs groeit inflatie + 1%
-  discontovoet: 0.08,             // voor NCW
-  // prijzen (€/kWh) — indicatief, te calibreren
-  ac_verkoop_eur_kwh: 0.35,       // ~CREG-index (thuistarief-niveau)
-  dc_verkoop_eur_kwh: 0.55,       // 550 €/MWh
-  spot_aankoop_eur_kwh: 0.09,     // gemiddelde spot bij slimme sturing
-  heffingen_eur_kwh: 0.05,        // energiefonds, accijnzen, meet-/datakost
-  sturing_eur_kwh: 0.01,
+  discontovoet: 0.10,             // LSDC/KFC
+  // prijzen (€/kWh) — LSDC/KFC-basis
+  ac_verkoop_eur_kwh: 0.35,       // ~CREG-index (geen AC in LSDC; thuistarief-niveau)
+  dc_verkoop_eur_kwh: 0.54,       // LSDC verkoopprijs
+  spot_aankoop_eur_kwh: 0.17,     // LSDC blended energieaankoop (steady state)
+  heffingen_eur_kwh: 0.0,         // in de blended aankoopprijs begrepen
   netkosten_eur_kwh: 0.0,         // hypothese: 0 (slimme config + batterijbuffer)
   // verbruik
   ac_kwh_sessie: 20,
@@ -45,15 +44,17 @@ const DEFAULTS = {
   ev_aandeel_parking: 0.20, ac_rotatiefactor: 3, ac_max_palen: 5,
   plaatsen_default: 60,           // als er geen parking gevonden is
   plaats_per_m2_dak: 25,          // fallback: gebouwoppervlak → ~plaatsen
-  // capex (€) — indicatief, te calibreren
+  // capex (€) — LSDC/KFC-basis
   capex_ac_paal: 3000,
-  capex_dc_150: 55000,
-  capex_batterij: 80000,          // C&I 125 kW / 250 kWh
-  capex_aansluiting_ems: 15000,
-  contingency: 0.10,
-  // opex (€/jaar)
-  onderhoud_per_paal: 400,
-  verzekering_pct_capex: 0.0147,
+  capex_dc_150: 48125,            // LSDC laadpaal-blok (incl. installatie, studie, survey)
+  capex_batterij: 55091,          // LSDC batterij-blok (batterij + ontkoppelbord + implementatie + Bebat)
+  capex_aansluiting_ems: 5000,    // basis-aansluiting (LSDC bundelt de DC-installatie al in capex_dc_150)
+  contingency: 0.0,               // LSDC-CAPEX = som van de componenten
+  // opex — vaste bedragen per jaar, zoals het LSDC-model
+  onderhoud_laadpalen_jaar: 2400, // LSDC onderhoud laadpaal
+  onderhoud_batterij_jaar: 800,   // LSDC onderhoud batterij (enkel scenario B)
+  sturing_batterij_jaar: 582.5,   // LSDC sturing batterij (enkel scenario B)
+  verzekering_pct_capex: 0.0147,  // LSDC verzekeringsfactor
   // inkomsten
   parkeergeld_eur_paal_dag: 8,
   parkeergeld_dagen_jaar: 300,
@@ -104,8 +105,8 @@ function scenarioModel(s, metDC, par){
   const acKwhJaar = s.acSessiesDag * 365 * par.ac_kwh_sessie;
   const dcKwhJaar = metDC ? s.dcSessiesDag * 365 * par.dc_kwh_sessie : 0;
 
-  // marge per kWh (verkoop - aankoop - heffingen - sturing - netkosten)
-  const kostKwh = par.spot_aankoop_eur_kwh + par.heffingen_eur_kwh + par.sturing_eur_kwh + par.netkosten_eur_kwh;
+  // marge per kWh (verkoop - aankoop - heffingen - netkosten); sturing/onderhoud zijn nu vaste jaarkosten
+  const kostKwh = par.spot_aankoop_eur_kwh + par.heffingen_eur_kwh + par.netkosten_eur_kwh;
   const acMargeKwh = par.ac_verkoop_eur_kwh - kostKwh;
   const dcMargeKwh = par.dc_verkoop_eur_kwh - kostKwh;
 
@@ -121,7 +122,7 @@ function scenarioModel(s, metDC, par){
 
   // opex (jaar 1)
   const nPalen = s.nAC + (metDC?1:0);
-  const onderhoud = nPalen*par.onderhoud_per_paal + (metDC?par.onderhoud_per_paal:0);
+  const onderhoud = par.onderhoud_laadpalen_jaar + (metDC ? (par.onderhoud_batterij_jaar + par.sturing_batterij_jaar) : 0);
   const verzekering = capex*par.verzekering_pct_capex;
   const parkeergeld = s.nAC * par.parkeergeld_eur_paal_dag * par.parkeergeld_dagen_jaar;
   const opex = onderhoud + verzekering;
@@ -235,7 +236,7 @@ function rapportHtml(ctx){
     <tr><td>Scenario A (AC)</td><td class="r">${eur(concA.totaal)}</td><td class="r">${eigenA.irr!=null?(Math.round(eigenA.irr*1000)/10)+' %':'—'}</td><td class="r">${eur(eigenA.totaal)}</td></tr>
     <tr><td>Scenario B (AC+DC)</td><td class="r">${eur(concB.totaal)}</td><td class="r">${eigenB.irr!=null?(Math.round(eigenB.irr*1000)/10)+' %':'—'}</td><td class="r">${eur(eigenB.totaal)}</td></tr>
   </table>
-  <p class="sm">Aannames: AC verkocht aan ${eur2(par.ac_verkoop_eur_kwh)}/kWh (CREG-niveau), DC aan ${eur2(par.dc_verkoop_eur_kwh)}/kWh. Laden op de spotmarkt (${eur2(par.spot_aankoop_eur_kwh)}/kWh gemiddeld), sturing van AC en batterij op de goedkoopste momenten. Geen netkosten verondersteld (bestaande aansluiting, batterij buffert de DC-piek). Model ${par.model_jaren} jaar; verkoopprijs groeit inflatie + ${Math.round(par.verkoop_spread*100)}%, aankoop volgt inflatie (${Math.round(par.inflatie*100)}%).</p>
+  <p class="sm">Aannames: AC verkocht aan ${eur2(par.ac_verkoop_eur_kwh)}/kWh (CREG-niveau), DC aan ${eur2(par.dc_verkoop_eur_kwh)}/kWh. Energieaankoop ${eur2(par.spot_aankoop_eur_kwh)}/kWh (blended; laden op de spotmarkt, sturing van AC en batterij op de goedkoopste momenten). Geen netkosten verondersteld (bestaande aansluiting, batterij buffert de DC-piek). Model ${par.model_jaren} jaar; verkoopprijs groeit inflatie + ${Math.round(par.verkoop_spread*100)}%, aankoop volgt inflatie (${Math.round(par.inflatie*100)}%).</p>
 
   ${bijlage('A','Scenario alleen AC', sizeA, mA, eigenA, concA)}
   ${bijlage('B','Scenario AC + 1× DC 150 kVA + batterij', sizeB, mB, eigenB, concB)}
