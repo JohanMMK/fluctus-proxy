@@ -290,10 +290,14 @@ async function renderPdf(html){
 // ─── luchtfoto zoals EK: Esri World Imagery export (token-vrij) → base64 data-URI ──
 async function aerialDataUri(lat, lng, _fetch){
   try {
-    const z=19, w=720, h=340;   // ~215 m breed: parking + omliggende gebouwen/percelen duidelijk in beeld
+    // grond-span bepaalt de uitsnede (parking + clubgebouw + omliggende percelen);
+    // de uitvoerresolutie blijft binnen wat de World_Imagery-export aankan (fijner dan ~z19 geeft HTTP 500).
+    const grondBreedte = 200, w = 760, h = 360;           // meter grondafstand horizontaal × uitvoerpixels
+    const latK = 1/Math.cos(lat*Math.PI/180);             // Web Mercator rekt met de breedtegraad (BE ~51°)
+    const mPx = grondBreedte/w;                            // grond-meter per pixel
     const R=6378137, x=R*lng*Math.PI/180, y=R*Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360));
-    const res0=2*Math.PI*R/(256*Math.pow(2,z)), hw=w/2*res0, hh=h/2*res0;
-    const url=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${(x-hw).toFixed(2)},${(y-hh).toFixed(2)},${(x+hw).toFixed(2)},${(y+hh).toFixed(2)}&bboxSR=3857&imageSR=3857&size=${w*2},${h*2}&format=jpg&f=image`;
+    const hw=w/2*mPx*latK, hh=h/2*mPx*latK;               // halve bbox in Mercator-meter
+    const url=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${(x-hw).toFixed(2)},${(y-hh).toFixed(2)},${(x+hw).toFixed(2)},${(y+hh).toFixed(2)}&bboxSR=3857&imageSR=3857&size=${w},${h}&format=jpg&f=image`;
     const r = await _fetch(url); if (!r.ok) return null;
     const ct = String(r.headers.get('content-type')||''); if (!ct.startsWith('image/')) return null;
     const buf = Buffer.from(await r.arrayBuffer());
