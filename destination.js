@@ -258,12 +258,55 @@ async function renderPdf(html){
   } finally { if (browser) try { await browser.close(); } catch(e){} }
 }
 
+// ─── luchtfoto zoals EK: Esri World Imagery export (token-vrij) → base64 data-URI ──
+async function aerialDataUri(lat, lng, _fetch){
+  try {
+    const z=18, w=720, h=360;
+    const R=6378137, x=R*lng*Math.PI/180, y=R*Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360));
+    const res0=2*Math.PI*R/(256*Math.pow(2,z)), hw=w/2*res0, hh=h/2*res0;
+    const url=`https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${(x-hw).toFixed(2)},${(y-hh).toFixed(2)},${(x+hw).toFixed(2)},${(y+hh).toFixed(2)}&bboxSR=3857&imageSR=3857&size=${w*2},${h*2}&format=jpg&f=image`;
+    const r = await _fetch(url); if (!r.ok) return null;
+    const ct = String(r.headers.get('content-type')||''); if (!ct.startsWith('image/')) return null;
+    const buf = Buffer.from(await r.arrayBuffer());
+    return 'data:'+ct+';base64,'+buf.toString('base64');
+  } catch(e){ return null; }
+}
+
+// ─── parameter-opslag (oekene calibreert vanuit de kaart) ──────────────
+const PARAM_PAD = 'config/destination-params.json';
+async function loadStored(deps){
+  try { const t = await deps.factuurDownload(PARAM_PAD, true); const j = JSON.parse(t); return (j && typeof j==='object' && !Array.isArray(j)) ? j : null; }
+  catch(e){ return null; }
+}
+
 // ─── mount ────────────────────────────────────────────────────────────
 module.exports = function mountDestination(app, deps){
   deps = deps || {};
   const managerGuard = deps.managerGuard;
-  const luchtfotoUrlFn = deps.luchtfotoUrl;
   const _fetch = deps.fetch || global.fetch;
+
+  // lees de effectieve parameters (DEFAULTS + opgeslagen overrides)
+  app.get('/api/destination-params', async (req, res) => {
+    try {
+      let u = null;
+      if (typeof managerGuard === 'function') { u = await managerGuard(req, res); if (!u) return; }
+      const stored = (typeof deps.factuurDownload==='function') ? await loadStored(deps) : null;
+      res.json({ ok:true, params: Object.assign({}, DEFAULTS, stored||{}), is_oekene: String((u&&u.email)||'').toLowerCase()===OEKENE });
+    } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+  });
+  // schrijf de parameters (enkel oekene)
+  app.post('/api/destination-params', async (req, res) => {
+    try {
+      let u = null;
+      if (typeof managerGuard === 'function') { u = await managerGuard(req, res); if (!u) return; }
+      if (String((u&&u.email)||'').toLowerCase() !== OEKENE) return res.status(403).json({ ok:false, error:'Enkel oekene@gmail.com kan de rapport-parameters wijzigen.' });
+      const p = (req.body && req.body.params && typeof req.body.params==='object') ? req.body.params : (req.body||{});
+      if (typeof p!=='object' || Array.isArray(p)) return res.status(400).json({ ok:false, error:'params moet een object zijn' });
+      if (typeof deps.factuurUpload === 'function') await deps.factuurUpload(Buffer.from(JSON.stringify(p),'utf8').toString('base64'), 'application/json', PARAM_PAD);
+      console.log(`[destination] parameters bijgewerkt door ${(u&&u.email)||'oekene'}`);
+      res.json({ ok:true, params: Object.assign({}, DEFAULTS, p) });
+    } catch (e) { res.status(500).json({ ok:false, error:e.message }); }
+  });
 
   app.post('/api/destination-rapport', async (req, res) => {
     try {
@@ -279,7 +322,8 @@ module.exports = function mountDestination(app, deps){
       const lat = +b.lat, lng = +b.lng;
       if (!isFinite(lat) || !isFinite(lng)) return res.status(400).json({ ok:false, error:'lat/lng ontbreken' });
       const gemeente = String(b.gemeente||'').slice(0,80);
-      const par = Object.assign({}, DEFAULTS, (b.params && typeof b.params==='object') ? b.params : {});
+      const stored = (typeof deps.factuurDownload==='function') ? await loadStored(deps) : null;
+      const par = Object.assign({}, DEFAULTS, stored||{}, (b.params && typeof b.params==='object') ? b.params : {});
 
       // parkinggrootte: uit de body (client kent de nabije bedrijfsparking) of GRB-dak als proxy
       let plaatsen = (+b.plaatsen>0) ? +b.plaatsen : 0;
@@ -292,8 +336,7 @@ module.exports = function mountDestination(app, deps){
       const mA = scenarioModel(sizeA, false, par);
       const mB = scenarioModel(sizeB, true,  par);
 
-      let luchtfoto = null;
-      if (typeof luchtfotoUrlFn === 'function') { try { luchtfoto = luchtfotoUrlFn(lat, lng); } catch(e){} }
+      let luchtfoto = await aerialDataUri(lat, lng, _fetch);   // EK-methode: Esri World Imagery export
 
       const html = rapportHtml({ naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par });
       const pdf = await renderPdf(html);

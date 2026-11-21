@@ -21719,7 +21719,7 @@ try { _EWB = require('./ewb.js')(app, { get reviewTo() { return process.env.EWB_
   catch (e) { console.error('[ewb] mount mislukt:', e.message); }
 // ─── v15.449.0 (Johan 21-11): DESTINATION-RAPPORT — generiek locatievoorstel vanuit de Lead Generator (enkel oekene) ──
 //   Module destination.js: POST /api/destination-rapport → PDF (AC / AC+DC scenario's, concessie + eigen financiering).
-try { require('./destination.js')(app, { managerGuard: _managerGuard, luchtfotoUrl: _scanLuchtfotoUrl, grbDak: _scanGrbDak, fetch: (u, o) => fetch(u, o) }); }
+try { require('./destination.js')(app, { managerGuard: _managerGuard, grbDak: _scanGrbDak, factuurDownload: _factuurDownload, factuurUpload: _factuurUpload, fetch: (u, o) => fetch(u, o) }); }
   catch (e) { console.error('[destination] mount mislukt:', e.message); }
 
 // ─── START ────────────────────────────────────────────────────────────────────
