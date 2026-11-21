@@ -29,11 +29,11 @@ const DEFAULTS = {
   model_jaren: 15,
   inflatie: 0.02,                 // aankoopprijs volgt inflatie
   verkoop_spread: 0.01,           // verkoopprijs groeit inflatie + 1%
-  discontovoet: 0.10,             // LSDC/KFC
-  // prijzen (€/kWh) — LSDC/KFC-basis
-  ac_verkoop_eur_kwh: 0.35,       // ~CREG-index (geen AC in LSDC; thuistarief-niveau)
-  dc_verkoop_eur_kwh: 0.54,       // LSDC verkoopprijs
-  spot_aankoop_eur_kwh: 0.17,     // LSDC blended energieaankoop (steady state)
+  discontovoet: 0.10,             // KFC
+  // prijzen (€/kWh) — KFC-basis
+  ac_verkoop_eur_kwh: 0.35,       // ~CREG-index (geen AC in KFC-basis; thuistarief-niveau)
+  dc_verkoop_eur_kwh: 0.54,       // KFC-basis verkoopprijs
+  spot_aankoop_eur_kwh: 0.17,     // KFC-basis blended energieaankoop (steady state)
   heffingen_eur_kwh: 0.0,         // in de blended aankoopprijs begrepen
   netkosten_eur_kwh: 0.0,         // hypothese: 0 (slimme config + batterijbuffer)
   // verbruik
@@ -44,17 +44,17 @@ const DEFAULTS = {
   ev_aandeel_parking: 0.20, ac_rotatiefactor: 3, ac_max_palen: 5,
   plaatsen_default: 60,           // als er geen parking gevonden is
   plaats_per_m2_dak: 25,          // fallback: gebouwoppervlak → ~plaatsen
-  // capex (€) — LSDC/KFC-basis
+  // capex (€) — KFC-basis
   capex_ac_paal: 3000,
-  capex_dc_150: 48125,            // LSDC laadpaal-blok (incl. installatie, studie, survey)
-  capex_batterij: 55091,          // LSDC batterij-blok (batterij + ontkoppelbord + implementatie + Bebat)
-  capex_aansluiting_ems: 5000,    // basis-aansluiting (LSDC bundelt de DC-installatie al in capex_dc_150)
-  contingency: 0.0,               // LSDC-CAPEX = som van de componenten
-  // opex — vaste bedragen per jaar, zoals het LSDC-model
-  onderhoud_laadpalen_jaar: 2400, // LSDC onderhoud laadpaal
-  onderhoud_batterij_jaar: 800,   // LSDC onderhoud batterij (enkel scenario B)
-  sturing_batterij_jaar: 582.5,   // LSDC sturing batterij (enkel scenario B)
-  verzekering_pct_capex: 0.0147,  // LSDC verzekeringsfactor
+  capex_dc_150: 48125,            // KFC-basis laadpaal-blok (incl. installatie, studie, survey)
+  capex_batterij: 55091,          // KFC-basis batterij-blok (batterij + ontkoppelbord + implementatie + Bebat)
+  capex_aansluiting_ems: 5000,    // basis-aansluiting (KFC-basis bundelt de DC-installatie al in capex_dc_150)
+  contingency: 0.0,               // KFC-CAPEX = som van de componenten
+  // opex — vaste bedragen per jaar, zoals het KFC-basismodel
+  onderhoud_laadpalen_jaar: 2400, // KFC-basis onderhoud laadpaal
+  onderhoud_batterij_jaar: 800,   // KFC-basis onderhoud batterij (enkel scenario B)
+  sturing_batterij_jaar: 582.5,   // KFC-basis sturing batterij (enkel scenario B)
+  verzekering_pct_capex: 0.0147,  // KFC-basis verzekeringsfactor
   // inkomsten
   parkeergeld_eur_paal_dag: 8,
   parkeergeld_dagen_jaar: 300,
