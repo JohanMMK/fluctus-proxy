@@ -346,7 +346,7 @@ async function aerialDataUri(lat, lng, _fetch){
   try {
     // grond-span bepaalt de uitsnede (parking + clubgebouw + omliggende percelen);
     // de uitvoerresolutie blijft binnen wat de World_Imagery-export aankan (fijner dan ~z19 geeft HTTP 500).
-    const grondBreedte = 360, w = 760, h = 360;           // meter grondafstand horizontaal × uitvoerpixels (ruimer overzicht)
+    const grondBreedte = 460, w = 760, h = 360;           // meter grondafstand horizontaal × uitvoerpixels (ruim overzicht)
     const latK = 1/Math.cos(lat*Math.PI/180);             // Web Mercator rekt met de breedtegraad (BE ~51°)
     const mPx = grondBreedte/w;                            // grond-meter per pixel
     const R=6378137, x=R*lng*Math.PI/180, y=R*Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360));
