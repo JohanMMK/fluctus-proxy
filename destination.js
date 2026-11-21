@@ -388,7 +388,6 @@ function rapportHtml(ctx){
   ${bijlageParams()}
 
   <div class="warn">⚠ Voorbehoud — Dit is een automatisch gegenereerde, indicatieve raming op basis van beperkt beschikbare gegevens (parkinggrootte en locatietype). Alle bedragen en volumes zijn richtwaarden die na een plaatsbezoek en een netcheck verfijnd worden. De aanname van nul netkosten geldt enkel bij een slimme configuratie en sturing die de maandpiek onder het bestaande toegangsvermogen houdt; dat wordt in een tweede versie geverifieerd.</div>
-  <div class="foot"><span><b>Betere Lader</b> · Energie-Compas Lead Generator</span><span>${esc(new Date().toLocaleDateString('nl-BE'))} · versie 1 (concept)</span></div>
   </body></html>`;
 }
 
@@ -400,7 +399,12 @@ async function renderPdf(html){
     browser = await puppeteer.launch({ executablePath: EXE, headless: true, args: ['--no-sandbox','--disable-setuid-sandbox','--disable-gpu','--disable-dev-shm-usage','--font-render-hinting=none'] });
     const page = await browser.newPage();
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 45000 });
-    const buf = await page.pdf({ format:'A4', printBackground:true, preferCSSPageSize:true });
+    // doorlopende paginakop met het Betere Lader-logo op ELKE pagina (puppeteer header/footer leven in de marge)
+    const logoUri = 'data:image/svg+xml;base64,'+Buffer.from(BL_LOGO).toString('base64');
+    const headerTemplate = `<div style="width:100%;padding:3mm 13mm 0;box-sizing:border-box;text-align:right"><img src="${logoUri}" style="height:14px;width:auto"></div>`;
+    const footerTemplate = `<div style="width:100%;padding:0 13mm 2mm;box-sizing:border-box;font-size:7px;color:#9AA3B0;display:flex;justify-content:space-between"><span>Betere Lader &middot; Energie-Compas Lead Generator</span><span>pagina <span class="pageNumber"></span>/<span class="totalPages"></span></span></div>`;
+    const buf = await page.pdf({ format:'A4', printBackground:true, displayHeaderFooter:true, headerTemplate, footerTemplate,
+      margin:{ top:'19mm', right:'13mm', bottom:'13mm', left:'13mm' } });
     return Buffer.from(buf);   // puppeteer-core 23 geeft Uint8Array terug; Express res.send wil een Buffer
   } finally { if (browser) try { await browser.close(); } catch(e){} }
 }
