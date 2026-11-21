@@ -21717,6 +21717,10 @@ app.post('/api/destination-raming', (req, res) => {
 let _EWB = null;   // 15.429.0: teruggave bewaren (renderSting/jingles voor de V&A-video)
 try { _EWB = require('./ewb.js')(app, { get reviewTo() { return process.env.EWB_REVIEW_TO || AUDIT_MAIL_TO; } }); }   // 15.448.0: getter → volgt een aangepaste AUDIT_MAIL_TO
   catch (e) { console.error('[ewb] mount mislukt:', e.message); }
+// ─── v15.449.0 (Johan 21-11): DESTINATION-RAPPORT — generiek locatievoorstel vanuit de Lead Generator (enkel oekene) ──
+//   Module destination.js: POST /api/destination-rapport → PDF (AC / AC+DC scenario's, concessie + eigen financiering).
+try { require('./destination.js')(app, { managerGuard: _managerGuard, luchtfotoUrl: _scanLuchtfotoUrl, grbDak: _scanGrbDak, fetch: (u, o) => fetch(u, o) }); }
+  catch (e) { console.error('[destination] mount mislukt:', e.message); }
 
 // ─── START ────────────────────────────────────────────────────────────────────
 // ─── v15.420.0 (Johan 14-11): VOERTUIGTABEL (merk → model per voertuigtype) voor de intake ────────────────────
