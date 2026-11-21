@@ -171,8 +171,9 @@ function concessieOperator(m, par){
 
 // ─── HTML-template (generiek, print A4) ───────────────────────────────
 function rapportHtml(ctx){
-  const { naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par } = ctx;
+  const { naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par, ligging } = ctx;
   const tl = TYPE_LABEL[type] || TYPE_LABEL.geen;
+  const lg = ligging || {};
   const eigenA=dcfEigen(mA,par), eigenB=dcfEigen(mB,par);
   const concA=concessieLocatie(mA,par), concB=concessieLocatie(mB,par);
   const concOpA=concessieOperator(mA,par), concOpB=concessieOperator(mB,par);
@@ -224,12 +225,59 @@ function rapportHtml(ctx){
     </div>`;
   }
 
+  // ── ligging: twee kaarten + legende + lijst van nabije bestemmingen ──
+  function legendeItem(kleur, label){ return `<span class="lg-it"><span class="lg-dot" style="background:#${kleur}"></span>${esc(label)}</span>`; }
+  function entLink(d){
+    const href = d.web ? (/^https?:/i.test(d.web)?d.web:'https://'+d.web)
+                       : 'https://www.google.com/maps/search/?api=1&query='+encodeURIComponent((d.naam||'')+' '+(d.adres||lg.gemeente||''));
+    return `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(d.naam)}</a>`;
+  }
+  const KINDLBL={ sport:'Sportclub', school:'School', zorg:'Zorginstelling' };
+  function destLijst(){
+    const ds = lg.dests || [];
+    if (!ds.length) return `<p class="sm">Geen sportclubs, scholen of zorginstellingen binnen ~1,2 km gevonden.</p>`;
+    return `<table class="kv ent"><tr><th>Bestemming</th><th>Type</th><th>Adres</th><th class="r">Afstand</th></tr>`
+      + ds.map(function(d){
+          return `<tr><td>${entLink(d)}${d.web?'':' <span class="sm">↗ kaart</span>'}</td>`
+               + `<td>${esc(KINDLBL[d.kind]||'')}${d.sub?(' · '+esc(d.sub)):''}</td>`
+               + `<td>${esc(d.adres||'—')}</td>`
+               + `<td class="r">${d.d} m</td></tr>`;
+        }).join('')
+      + `</table>`;
+  }
+  function liggingSectie(){
+    if (!lg.belgie && !lg.omgeving) return '';
+    const legende = [
+      legendeItem(KLEUR.locatie,'deze locatie'),
+      lg.telInfra&&lg.telInfra.parkings?legendeItem(KLEUR.parking,'andere parkings'):'',
+      lg.telInfra&&lg.telInfra.cabines?legendeItem(KLEUR.cabine,'MS-cabines'):'',
+      lg.telInfra&&lg.telInfra.laadpalen?legendeItem(KLEUR.laadpaal,'laadpalen'):'',
+      (lg.dests||[]).some(d=>d.kind==='sport')?legendeItem(KLEUR.sport,'sportclub'):'',
+      (lg.dests||[]).some(d=>d.kind==='school')?legendeItem(KLEUR.school,'school'):'',
+      (lg.dests||[]).some(d=>d.kind==='zorg')?legendeItem(KLEUR.zorg,'zorg'):'',
+    ].filter(Boolean).join('');
+    return `<div class="kaarten">
+      ${lg.belgie?`<div class="k-be"><img src="${lg.belgie}" alt="ligging in België"><div class="k-cap">Ligging in België</div></div>`:''}
+      ${lg.omgeving?`<div class="k-omg"><img src="${lg.omgeving}" alt="omgeving"><div class="k-cap">Omgeving (~1 km) — parkings, MS-cabines, laadpalen en bestemmingen</div></div>`:''}
+    </div>
+    ${legende?`<div class="legende">${legende}</div>`:''}`;
+  }
+
   return `<!doctype html><html lang="nl"><head><meta charset="utf-8"><style>
   @page { size:A4; margin:16mm 14mm; }
   *{box-sizing:border-box} body{font-family:Arial,Helvetica,sans-serif;color:#1b2430;font-size:11px;line-height:1.5}
   h1{color:#1F3864;font-size:20px;margin:0 0 2px} h2{color:#1F3864;font-size:15px;margin:18px 0 6px;border-bottom:2px solid #E2E8F2;padding-bottom:3px}
   h3{color:#1F3864;font-size:12px;margin:10px 0 4px} .sub{color:#5b6b85;font-size:11px;margin:0 0 10px}
   .hero{width:100%;height:320px;object-fit:cover;border-radius:8px;margin:8px 0}
+  .kaarten{display:flex;gap:12px;margin:8px 0 4px;align-items:stretch}
+  .k-be{flex:0 0 31%} .k-omg{flex:1}
+  .kaarten img{width:100%;border-radius:8px;border:1px solid #E2E8F2;display:block}
+  .k-be img{height:300px;object-fit:cover} .k-omg img{height:300px;object-fit:cover}
+  .k-cap{color:#5b6b85;font-size:9.5px;margin-top:3px}
+  .legende{display:flex;flex-wrap:wrap;gap:4px 14px;margin:6px 0 2px;font-size:10px;color:#3a475c}
+  .lg-it{display:inline-flex;align-items:center;gap:5px} .lg-dot{width:9px;height:9px;border-radius:50%;border:1px solid #fff;box-shadow:0 0 0 1px #c9d3e4}
+  table.ent th{background:#F2F6FC;color:#1F3864;text-align:left;font-size:10px;padding:4px 7px;border:1px solid #E2E8F2}
+  table.ent td{font-size:10.5px} table.ent a{color:#05803B;text-decoration:none;font-weight:bold}
   table.kv{border-collapse:collapse;width:100%;margin:4px 0} table.kv td{border:1px solid #E2E8F2;padding:4px 7px;vertical-align:top}
   table.kv td.r{text-align:right;font-weight:bold;white-space:nowrap} .two{display:flex;gap:12px;margin-top:6px} .col{flex:1}
   .sm{color:#5b6b85;font-size:10px;margin:4px 0} .tag{display:inline-block;background:#1F3864;color:#fff;border-radius:999px;font-size:10px;padding:2px 9px}
@@ -237,18 +285,24 @@ function rapportHtml(ctx){
   .warn{background:#FFF7E6;border:1px solid #F0C36D;border-radius:6px;padding:8px;color:#8a5a00;font-size:10px;margin-top:10px}
   </style></head><body>
   <h1>Destination-laadvoorstel — ${esc(naam)}</h1>
-  <div class="sub"><span class="tag">${esc(tl.label)}</span> &middot; ${esc(gemeente||'')} &middot; ${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}</div>
+  <div class="sub"><span class="tag">${esc(tl.label)}</span> &middot; ${esc(lg.adres||gemeente||'')} &middot; ${(+lat).toFixed(5)}, ${(+lng).toFixed(5)}</div>
   ${luchtfoto?`<img class="hero" src="${luchtfoto}" alt="luchtfoto">`:''}
 
   <h2>1. De locatie</h2>
   <p>${esc(tl.oms)}</p>
   ${kvTable([
+    lg.adres?['Adres', esc(lg.adres)]:['Gemeente', esc(gemeente||'—')],
     ['Parking (geschat aantal plaatsen)', String(sizeA.plaatsen)],
     ['EV-aandeel parking (aanname)', Math.round(par.ev_aandeel_parking*100)+' %'],
     ['Voorgestelde AC-laadpunten', sizeA.nAC+'×'],
   ])}
+  ${liggingSectie()}
 
-  <h2>2. Twee operationele scenario's</h2>
+  <h2>2. Waar parkeerders naartoe gaan</h2>
+  <p class="sm">Bestemmingen in de buurt die de parking voeden — sportclubs, scholen en zorginstellingen binnen ~1,2 km. Klik een naam voor de website of de locatie op de kaart.</p>
+  ${destLijst()}
+
+  <h2>3. Twee operationele scenario's</h2>
   <div class="two">
     <div class="col"><h3>Scenario A — alleen AC</h3>
       ${kvTable([['AC-laadpunten', sizeA.nAC+'×'],['AC-laadverkeer', Math.round(mA.acKwhJaar).toLocaleString('nl-BE')+' kWh/jaar'],['Jaaromzet', eur(mA.omzet)],['Investering', eur(mA.capex)]])}
@@ -258,7 +312,7 @@ function rapportHtml(ctx){
     </div>
   </div>
 
-  <h2>3. Financiële samenvatting</h2>
+  <h2>4. Financiële samenvatting</h2>
   <table class="kv">
     <tr><td></td><td class="r">Concessie — opbrengst locatie (15 j)</td><td class="r">Eigen investering — IRR</td><td class="r">Eigen — netto (15 j)</td></tr>
     <tr><td>Scenario A (AC)</td><td class="r">${eur(concA.totaal)}</td><td class="r">${eigenA.irr!=null?(Math.round(eigenA.irr*1000)/10)+' %':'—'}</td><td class="r">${eur(eigenA.totaal)}</td></tr>
@@ -292,7 +346,7 @@ async function aerialDataUri(lat, lng, _fetch){
   try {
     // grond-span bepaalt de uitsnede (parking + clubgebouw + omliggende percelen);
     // de uitvoerresolutie blijft binnen wat de World_Imagery-export aankan (fijner dan ~z19 geeft HTTP 500).
-    const grondBreedte = 200, w = 760, h = 360;           // meter grondafstand horizontaal × uitvoerpixels
+    const grondBreedte = 280, w = 760, h = 360;           // meter grondafstand horizontaal × uitvoerpixels (iets ruimer)
     const latK = 1/Math.cos(lat*Math.PI/180);             // Web Mercator rekt met de breedtegraad (BE ~51°)
     const mPx = grondBreedte/w;                            // grond-meter per pixel
     const R=6378137, x=R*lng*Math.PI/180, y=R*Math.log(Math.tan(Math.PI/4 + lat*Math.PI/360));
@@ -303,6 +357,154 @@ async function aerialDataUri(lat, lng, _fetch){
     const buf = Buffer.from(await r.arrayBuffer());
     return 'data:'+ct+';base64,'+buf.toString('base64');
   } catch(e){ return null; }
+}
+
+// ─── ligging: adres + kaarten + nabije infrastructuur en bestemmingen ──
+// Alles null-/leeg-veilig: ontbreekt de token of een bron, dan valt dat stuk
+// gewoon weg en rendert de rest van het rapport normaal.
+const MAPBOX   = process.env.MAPBOX_TOKEN || '';
+const GEM_BASE = 'https://johanmmk.github.io/gemeenten/';
+const ENT_BASE = 'https://www.energie-compas.eu/apps/data/';
+const DAG = 864e5;
+let _statsCache = null, _statsAt = 0;
+const _parkCache = {};
+let _entCache = null, _entAt = 0;
+
+function haversine(aLat,aLng,bLat,bLng){
+  const R=6371000, dLa=(bLat-aLat)*Math.PI/180, dLo=(bLng-aLng)*Math.PI/180;
+  const s=Math.sin(dLa/2)**2 + Math.cos(aLat*Math.PI/180)*Math.cos(bLat*Math.PI/180)*Math.sin(dLo/2)**2;
+  return 2*R*Math.asin(Math.sqrt(s));
+}
+function _norm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,''); }
+
+// JS-literal ([...] of {...}) scannen vanaf een marker (zoals gemeentekaart.html)
+function literalNa(src, marker){
+  let i = src.indexOf(marker); if (i<0) return null; i += marker.length;
+  while (i<src.length && /\s/.test(src[i])) i++;
+  const open=src[i]; if (open!=='[' && open!=='{') return null;
+  const close = open==='[' ? ']' : '}'; let depth=0, inStr=false, q='';
+  for (let j=i;j<src.length;j++){ const c=src[j];
+    if (inStr){ if (c==='\\'){ j++; continue; } if (c===q) inStr=false; }
+    else { if (c==='"'||c==="'"){ inStr=true; q=c; } else if (c===open) depth++; else if (c===close){ depth--; if (depth===0) return src.slice(i,j+1); } }
+  } return null;
+}
+
+async function reverseGeocode(lat,lng,_fetch){
+  if (!MAPBOX) return null;
+  try {
+    const u=`https://api.mapbox.com/geocoding/v5/mapbox.places/${lng},${lat}.json?language=nl&limit=1&types=address,poi,place&access_token=${MAPBOX}`;
+    const r=await _fetch(u); if (!r.ok) return null; const j=await r.json();
+    const f=(j.features||[])[0]; if (!f) return null;
+    let gemeente='', pc='';
+    for (const c of (f.context||[])){ const id=String(c.id||''); if (id.startsWith('place')&&!gemeente) gemeente=c.text; if (id.startsWith('postcode')&&!pc) pc=c.text; }
+    const straat=[f.text, f.address].filter(Boolean).join(' ');
+    return { adres: f.place_name||'', straat, gemeente, pc };
+  } catch(e){ return null; }
+}
+
+async function gemeenteSlug(gemeenteNaam,_fetch){
+  if (!gemeenteNaam) return null;
+  try {
+    if (!_statsCache || Date.now()-_statsAt>DAG){
+      const r=await _fetch(GEM_BASE+'gemeenten_stats.json',{cache:'no-cache'});
+      if (r.ok){ _statsCache=await r.json(); _statsAt=Date.now(); }
+    }
+    if (!_statsCache) return null;
+    const want=_norm(gemeenteNaam);
+    for (const k in _statsCache){ const v=_statsCache[k]; if (v && _norm(v.naam)===want) return v.slug||v.naam; }
+    return null;
+  } catch(e){ return null; }
+}
+
+async function parkingInfra(slug,_fetch){
+  if (!slug) return { sites:[], cabines:[], chargers:[] };
+  try {
+    const c=_parkCache[slug]; if (c && Date.now()-c.at<DAG) return c.data;
+    const u=GEM_BASE+'Kaart_bedrijfsparkings_'+encodeURIComponent(slug)+'.html';
+    const r=await _fetch(u,{cache:'no-cache'}); if (!r.ok) throw 0;
+    const h=await r.text();
+    const parse=m=>{ const lit=literalNa(h,m); if (!lit) return []; try{ const a=JSON.parse(lit); return Array.isArray(a)?a:[]; }catch(e){ return []; } };
+    const data={ sites:parse('sites='), cabines:parse('cabines='), chargers:parse('chargers=') };
+    _parkCache[slug]={ at:Date.now(), data }; return data;
+  } catch(e){ return { sites:[], cabines:[], chargers:[] }; }
+}
+
+async function entityData(_fetch){
+  if (_entCache && Date.now()-_entAt<DAG) return _entCache;
+  const grab=async f=>{ try{ const r=await _fetch(ENT_BASE+f,{cache:'no-cache'}); if (!r.ok) return []; const j=await r.json(); return Array.isArray(j)?j:[]; }catch(e){ return []; } };
+  try {
+    const [sport,zorg,scholen]=await Promise.all([grab('sportclub_leads.json'),grab('zorg_leads.json'),grab('scholen.json')]);
+    _entCache={ sport,zorg,scholen }; _entAt=Date.now(); return _entCache;
+  } catch(e){ return { sport:[], zorg:[], scholen:[] }; }
+}
+
+// nabije bestemmingen (sportclub/school/zorg) binnen radiusM, de locatie zelf uitgesloten
+function nearbyDest(ent, lat, lng, radiusM, capPer){
+  const NETLBL={ go:'GO!', gemeente:'gemeente', katholiek:'katholiek', overig:'onderwijs' };
+  const out=[];
+  const add=(arr, kind, sf)=>{
+    const near=[];
+    for (const e of (arr||[])){ const la=+e.lat, lo=+e.lng; if (!isFinite(la)||!isFinite(lo)) continue;
+      const d=haversine(lat,lng,la,lo); if (d>radiusM || d<10) continue;   // d<10 m = de locatie zelf
+      near.push({ kind, naam:String(e.n||'—'), adres:[e.g,e.pc].filter(Boolean).join(' '), web:String(e.web||''), sub:sf(e), lat:la, lng:lo, d:Math.round(d) });
+    }
+    near.sort((a,b)=>a.d-b.d); out.push(...near.slice(0,capPer));
+  };
+  add(ent.sport,   'sport',  e=>(e.s||[]).join(', ')||'sportclub');
+  add(ent.scholen, 'school', e=>NETLBL[e.net]||'onderwijs');
+  add(ent.zorg,    'zorg',   e=>e.t||'zorg');
+  return out;
+}
+
+// Mapbox Static Images → base64 data-URI
+function _pin(size, icon, color, lng, lat){ return `pin-${size}${icon?'-'+icon:''}+${color}(${(+lng).toFixed(5)},${(+lat).toFixed(5)})`; }
+async function mapboxStatic(style, overlays, lng, lat, zoom, w, h, _fetch){
+  if (!MAPBOX) return null;
+  try {
+    const ov = overlays ? overlays+'/' : '';
+    const u=`https://api.mapbox.com/styles/v1/mapbox/${style}/static/${ov}${lng},${lat},${zoom}/${w}x${h}@2x?access_token=${MAPBOX}`;
+    const r=await _fetch(u); if (!r.ok) return null;
+    const ct=String(r.headers.get('content-type')||''); if (!ct.startsWith('image/')) return null;
+    const buf=Buffer.from(await r.arrayBuffer());
+    return 'data:'+ct+';base64,'+buf.toString('base64');
+  } catch(e){ return null; }
+}
+
+// kleuren van de omgevingskaart (ook in de legende)
+const KLEUR = { locatie:'C0392B', parking:'1F3864', cabine:'E0A800', laadpaal:'05803B', sport:'8E44AD', school:'2980B9', zorg:'16A085' };
+
+async function liggingData(lat, lng, gemeenteHint, _fetch){
+  const geo = await reverseGeocode(lat,lng,_fetch);
+  const gemeente = (geo && geo.gemeente) || gemeenteHint || '';
+  const slug = await gemeenteSlug(gemeente,_fetch);
+  const infraAll = await parkingInfra(slug,_fetch);
+  const ent = await entityData(_fetch);
+
+  // nabije infra (voor de kaart) — binnen ~1 km
+  const near = (arr, laf, lof, r)=> (arr||[]).map(x=>({ x, d:haversine(lat,lng,laf(x),lof(x)) })).filter(o=>o.d>=0 && o.d<=r).sort((a,b)=>a.d-b.d).map(o=>o.x);
+  const sitesN   = near(infraAll.sites,   s=>+s.lat, s=>+s.lng, 1000).slice(0,10);
+  const cabinesN = near(infraAll.cabines, c=>+c.la,  c=>+c.lo,  1000).slice(0,8);
+  const chargersN= near(infraAll.chargers,c=>+c.la,  c=>+c.lo,  1000).slice(0,8);
+  const dests    = nearbyDest(ent, lat, lng, 1200, 7);
+
+  // overlays voor de omgevingskaart (locatie bovenaan laatst)
+  const ov=[];
+  sitesN.forEach(s=>ov.push(_pin('s','parking',KLEUR.parking,s.lng,s.lat)));
+  cabinesN.forEach(c=>ov.push(_pin('s','',KLEUR.cabine,c.lo,c.la)));
+  chargersN.forEach(c=>ov.push(_pin('s','charging-station',KLEUR.laadpaal,c.lo,c.la)));
+  dests.forEach(d=>{ const ic=d.kind==='sport'?'pitch':d.kind==='school'?'school':'hospital'; ov.push(_pin('s',ic,KLEUR[d.kind],d.lng,d.lat)); });
+  ov.push(_pin('l','star',KLEUR.locatie,lng,lat));
+
+  const [belgie, omgeving] = await Promise.all([
+    mapboxStatic('light-v11', _pin('l','star',KLEUR.locatie,lng,lat), lng, lat, 6.4, 300, 380, _fetch),
+    mapboxStatic('streets-v12', ov.join(','), lng, lat, 14, 660, 460, _fetch),
+  ]);
+
+  return {
+    adres: geo ? (geo.adres || [geo.straat, geo.pc, geo.gemeente].filter(Boolean).join(', ')) : '',
+    gemeente, belgie, omgeving, dests,
+    telInfra: { parkings:sitesN.length, cabines:cabinesN.length, laadpalen:chargersN.length },
+  };
 }
 
 // ─── parameter-opslag (oekene calibreert vanuit de kaart) ──────────────
@@ -369,9 +571,13 @@ module.exports = function mountDestination(app, deps){
       const mA = scenarioModel(sizeA, false, par);
       const mB = scenarioModel(sizeB, true,  par);
 
-      let luchtfoto = await aerialDataUri(lat, lng, _fetch);   // EK-methode: Esri World Imagery export
+      // luchtfoto (Esri) + ligging (adres, kaarten, nabije infra/bestemmingen) parallel
+      const [luchtfoto, ligging] = await Promise.all([
+        aerialDataUri(lat, lng, _fetch).catch(()=>null),
+        liggingData(lat, lng, gemeente, _fetch).catch(()=>({})),
+      ]);
 
-      const html = rapportHtml({ naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par });
+      const html = rapportHtml({ naam, type, gemeente: (ligging&&ligging.gemeente)||gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par, ligging });
       const pdf = await renderPdf(html);
 
       res.set('Content-Type','application/pdf');
