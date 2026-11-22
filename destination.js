@@ -178,6 +178,9 @@ function rapportHtml(ctx){
   const { naam, type, gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par, ligging } = ctx;
   const tl = TYPE_LABEL[type] || TYPE_LABEL.geen;
   const lg = ligging || {};
+  const mode = ctx.mode || 'pdf';   // 'screen' = HTML-pagina met printbalk (klikbaar); 'pdf' = voor puppeteer
+  const logoUri = 'data:image/svg+xml;base64,' + Buffer.from(BL_LOGO).toString('base64');
+  function mapsLink(txt, la, lo){ if(!txt) return '—'; const q=(isFinite(la)&&isFinite(lo))?(la+','+lo):txt; return '<a href="https://www.google.com/maps/search/?api=1&query='+encodeURIComponent(q)+'" target="_blank" rel="noopener">'+esc(txt)+'</a>'; }
   const eigenA=dcfEigen(mA,par), eigenB=dcfEigen(mB,par);
   const concA=concessieLocatie(mA,par), concB=concessieLocatie(mB,par);
   const concOpA=concessieOperator(mA,par), concOpB=concessieOperator(mB,par);
@@ -296,7 +299,7 @@ function rapportHtml(ctx){
       + ds.map(function(d){
           return `<tr><td>${entLink(d)}${d.operator?('<br><span class="sm">'+esc(d.operator)+'</span>'):''}</td>`
                + `<td>${esc(KINDLBL[d.kind]||'')}${d.sub?(' · '+esc(d.sub)):''}</td>`
-               + `<td>${esc(d.adres||'—')}</td>`
+               + `<td>${d.adres?mapsLink(d.adres, d.lat, d.lng):'—'}</td>`
                + `<td class="sm">${contactCel(d)}</td>`
                + `<td class="r">${d.d} m</td></tr>`;
         }).join('')
@@ -350,7 +353,14 @@ function rapportHtml(ctx){
   .foot{color:var(--muted);font-size:9px;margin-top:16px;border-top:1px solid var(--lijn);padding-top:7px;display:flex;justify-content:space-between;gap:12px}
   .foot b{color:var(--navy)}
   .warn{background:#FFF7E6;border:1px solid #F0C36D;border-radius:6px;padding:8px;color:#8a5a00;font-size:10px;margin-top:10px}
+  table.ent a,table.kv a{color:#05803B;text-decoration:none;font-weight:bold}
+  .printbar{display:flex;align-items:center;justify-content:space-between;gap:12px;background:var(--navy);color:#fff;padding:9px 14px;border-radius:8px;margin:0 0 12px;font-size:12px;position:sticky;top:8px;z-index:50}
+  .printbar button{background:var(--acc);color:#fff;border:none;border-radius:7px;padding:8px 14px;font-size:13px;font-weight:bold;cursor:pointer;white-space:nowrap}
+  .print-logo{display:none}
+  @media print{ .printbar{display:none!important} .print-logo{display:block;position:fixed;top:4mm;right:6mm;z-index:999} .print-logo img{height:9mm;width:auto} }
+  @media screen{ body{max-width:820px;margin:0 auto;padding:0 18px 48px} .kop{margin-top:14px} }
   </style></head><body>
+  ${mode==='screen'?`<div class="printbar"><span>Voorstel voor <b>${esc(naam)}</b> &middot; adressen, websites en telefoonnummers zijn klikbaar</span><button onclick="window.print()">Bewaar als PDF / druk af</button></div><div class="print-logo"><img src="${logoUri}" alt="Betere Lader"></div>`:''}
   <div class="kop">
     <div class="logo">${BL_LOGO}</div>
     <div class="ey">Destination-laadvoorstel · ${esc(new Date().toLocaleDateString('nl-BE'))}</div>
@@ -362,7 +372,7 @@ function rapportHtml(ctx){
   <h2><span class="nr">1</span>De locatie</h2>
   <p>${esc(tl.oms)}</p>
   ${kvTable([
-    lg.adres?['Adres', esc(lg.adres)]:['Gemeente', esc(gemeente||'—')],
+    lg.adres?['Adres', mapsLink(lg.adres, lat, lng)]:['Gemeente', esc(gemeente||'—')],
     ['Parking (geschat aantal plaatsen)', String(sizeA.plaatsen)],
     ['EV-aandeel parking (aanname)', Math.round(par.ev_aandeel_parking*100)+' %'],
     ['Voorgestelde AC-laadpunten', sizeA.nAC+'×'],
@@ -698,9 +708,16 @@ module.exports = function mountDestination(app, deps){
         liggingData(lat, lng, gemeente, _fetch).catch(()=>({})),
       ]);
 
-      const html = rapportHtml({ naam, type, gemeente: (ligging&&ligging.gemeente)||gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par, ligging });
-      const pdf = await renderPdf(html);
+      const wantPdf = String(b.format||'').toLowerCase() === 'pdf';
+      const ctx = { naam, type, gemeente: (ligging&&ligging.gemeente)||gemeente, lat, lng, luchtfoto, sizeA, sizeB, mA, mB, par, ligging };
 
+      if (!wantPdf) {
+        // HTML-pagina met printbalk (zoals Betere Lader): klikbare adressen/websites/telefoon, knop → window.print()
+        const html = rapportHtml(Object.assign({}, ctx, { mode:'screen' }));
+        res.set('Content-Type','text/html; charset=utf-8');
+        return res.send(html);
+      }
+      const pdf = await renderPdf(rapportHtml(ctx));
       res.set('Content-Type','application/pdf');
       res.set('Content-Disposition', `inline; filename="Destination_${naam.replace(/[^A-Za-z0-9]+/g,'_')}.pdf"`);
       return res.send(pdf);
