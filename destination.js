@@ -282,14 +282,22 @@ function rapportHtml(ctx){
     return `<a href="${esc(href)}" target="_blank" rel="noopener">${esc(d.naam)}</a>`;
   }
   const KINDLBL={ sport:'Sportclub', school:'School', zorg:'Zorginstelling' };
+  function contactCel(d){
+    const bits=[];
+    if (d.tel){ const tn=String(d.tel).replace(/[^0-9+]/g,''); bits.push(`<a href="tel:${esc(tn)}">${esc(d.tel)}</a>`); }
+    if (d.email) bits.push(`<a href="mailto:${esc(d.email)}">${esc(d.email)}</a>`);
+    if (d.web){ const href=/^https?:/i.test(d.web)?d.web:'https://'+d.web; bits.push(`<a href="${esc(href)}" target="_blank" rel="noopener">website</a>`); }
+    return bits.join('<br>') || '—';
+  }
   function destLijst(){
     const ds = lg.dests || [];
     if (!ds.length) return `<p class="sm">Geen sportclubs, scholen of zorginstellingen binnen ~1,2 km gevonden.</p>`;
-    return `<table class="kv ent"><tr><th>Bestemming</th><th>Type</th><th>Adres</th><th class="r">Afstand</th></tr>`
+    return `<table class="kv ent"><tr><th>Bestemming</th><th>Type</th><th>Adres</th><th>Contact</th><th class="r">Afstand</th></tr>`
       + ds.map(function(d){
-          return `<tr><td>${entLink(d)}${d.web?'':' <span class="sm">↗ kaart</span>'}</td>`
+          return `<tr><td>${entLink(d)}${d.operator?('<br><span class="sm">'+esc(d.operator)+'</span>'):''}</td>`
                + `<td>${esc(KINDLBL[d.kind]||'')}${d.sub?(' · '+esc(d.sub)):''}</td>`
                + `<td>${esc(d.adres||'—')}</td>`
+               + `<td class="sm">${contactCel(d)}</td>`
                + `<td class="r">${d.d} m</td></tr>`;
         }).join('')
       + `</table>`;
@@ -524,6 +532,44 @@ function nearbyDest(ent, lat, lng, radiusM, capPer){
   return out;
 }
 
+// Verrijk de nabije bestemmingen met adres/website/telefoon/e-mail uit OpenStreetMap
+// (één Overpass-query over de omgeving; null-veilig). Matcht op nabijheid + naam.
+async function enrichDests(dests, lat, lng, _fetch){
+  if (!dests || !dests.length) return dests;
+  try {
+    const dLat=0.013, dLng=0.013/Math.max(0.3, Math.cos(lat*Math.PI/180));   // ~1,4 km bbox
+    const s=(lat-dLat).toFixed(5), w=(lng-dLng).toFixed(5), n=(lat+dLat).toFixed(5), e=(lng+dLng).toFixed(5);
+    const q='[out:json][timeout:25];(node["name"]('+s+','+w+','+n+','+e+');way["name"]('+s+','+w+','+n+','+e+'););out center tags;';
+    const r = await _fetch('https://overpass-api.de/api/interpreter', { method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:'data='+encodeURIComponent(q) });
+    if (!r.ok) return dests;
+    const j = await r.json(); const els=(j&&j.elements)||[];
+    const pts = els.map(function(el){ const la=el.lat!=null?el.lat:(el.center&&el.center.lat); const lo=el.lon!=null?el.lon:(el.center&&el.center.lon); return { la, lo, t:el.tags||{} }; })
+                   .filter(function(p){ return isFinite(p.la)&&isFinite(p.lo); });
+    const norm = x => String(x||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]+/g,'');
+    dests.forEach(function(d){
+      const dn=norm(d.naam); let best=null, bscore=Infinity;
+      for (const p of pts){ const dist=haversine(d.lat,d.lng,p.la,p.lo); if (dist>70) continue;
+        const pn=norm(p.t.name); const nameOk = pn && (pn===dn || pn.indexOf(dn)>=0 || dn.indexOf(pn)>=0);
+        const score = dist - (nameOk?45:0);
+        if (score<bscore){ bscore=score; best=p; }
+      }
+      if (!best) return;
+      const t=best.t;
+      const web   = t.website||t['contact:website']||t.url||'';
+      const tel   = t.phone||t['contact:phone']||t['contact:mobile']||'';
+      const email = t.email||t['contact:email']||'';
+      const straat=[t['addr:street'],t['addr:housenumber']].filter(Boolean).join(' ');
+      const adr   =[straat,[t['addr:postcode'],t['addr:city']].filter(Boolean).join(' ')].filter(Boolean).join(', ');
+      if (web && !d.web) d.web=web;
+      if (tel) d.tel=tel;
+      if (email) d.email=email;
+      if (adr) d.adres=adr;
+      if (t.operator) d.operator=t.operator;
+    });
+    return dests;
+  } catch(e){ return dests; }
+}
+
 // Mapbox Static Images → base64 data-URI
 function _pin(size, icon, color, lng, lat){ return `pin-${size}${icon?'-'+icon:''}+${color}(${(+lng).toFixed(5)},${(+lat).toFixed(5)})`; }
 async function mapboxStatic(style, overlays, lng, lat, zoom, w, h, _fetch){
@@ -566,7 +612,14 @@ async function liggingData(lat, lng, gemeenteHint, _fetch){
   const [belgie, omgeving] = await Promise.all([
     mapboxStatic('light-v11', _pin('l','star',KLEUR.locatie,lng,lat), lng, lat, 6.4, 300, 380, _fetch),
     mapboxStatic('streets-v12', ov.join(','), lng, lat, 14, 660, 460, _fetch),
+    enrichDests(dests, lat, lng, _fetch),   // adres/website/tel/e-mail uit OSM (vult dests aan)
   ]);
+  // adres-fallback via Mapbox reverse-geocode voor bestemmingen zonder adres (beperkt tot latency)
+  const missing = dests.filter(d=>!d.adres).slice(0,10);
+  await Promise.all(missing.map(async function(d){
+    const g = await reverseGeocode(d.lat, d.lng, _fetch);
+    if (g) d.adres = g.straat ? [g.straat, [g.pc,g.gemeente].filter(Boolean).join(' ')].filter(Boolean).join(', ') : (g.adres||'');
+  }));
 
   return {
     adres: geo ? (geo.adres || [geo.straat, geo.pc, geo.gemeente].filter(Boolean).join(', ')) : '',
