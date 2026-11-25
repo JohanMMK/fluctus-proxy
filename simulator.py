@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
-# Versie:        v1.28.0 (2026-11-19, Johan): KADE UIT DE DC-LAADBUFFER — met een DC-buffer en slim laden levert de buffer aan de lader
+# Versie:        v1.29.0 (2026-11-25, Johan): INJECTIEGRENS VAN DE CABINE — max_injectie_kw_hard (server 15.473.0: min(omvormers +
+#                batterij, cabine_kva)) geldt nu ook in de passieve dispatch (geen sturing / zelfconsumptie zonder sturing): het
+#                overschot boven de grens telt als afgeremde PV. De maand-arbitrage-LP mag afremmen zodra het PV-overschot de grens
+#                overschrijdt (anders Infeasible). Zonder opgegeven cabine: ongewijzigd.
+#                v1.28.0 (2026-11-19, Johan): KADE UIT DE DC-LAADBUFFER — met een DC-buffer en slim laden levert de buffer aan de lader
 #                eerst aan de kade-sessies (snelladen tijdens laden/lossen; buffervermogen + SOC), dan de vrije aansluiting, dan de
 #                AC-batterij. Om de SOC chronologisch te laten kloppen loopt dit geval dag per dag over alle pleinen (binnen de dag
 #                op het begin van het venster: kade overdag vóór de nachtsessie), met bijladen na de dag en op rustdagen (weekend).
@@ -1906,6 +1910,9 @@ def lp_dispatch_month_arb(
     monthly_peak = pulp.LpVariable('monthly_peak', 0, _gin_cap)
     # v1.16.0: afremmen IN de LP (enkel als contract['_lp_pv_curt']) → opslaan gaat vóór afremmen.
     _mag_curt = bool(contract.get('_lp_pv_curt', False))
+    # v1.29.0: overschrijdt het PV-overschot de fysieke injectiegrens (cabine), dan MOET de LP kunnen afremmen (anders Infeasible)
+    if (not _mag_curt) and max_injectie_hard < 1e8 and any((pv_kw[t] - consumption_kw[t]) > max_injectie_hard for t in range(H)):
+        _mag_curt = True
     pv_curt = [pulp.LpVariable(f'pvc_{t}', 0, max(0.0, pv_kw[t])) for t in range(H)] if _mag_curt else None
 
     prob += soc[0] == soc_start_kwh
@@ -3833,6 +3840,10 @@ def _run_simulation_kern(inp: dict) -> dict:
         hard_afn = inp['aansluiting'].get('max_afname_kw_hard', float('inf'))
         zacht_inj = inp['aansluiting'].get('max_injectie_kw_zacht', float('inf'))
         hard_inj = inp['aansluiting'].get('max_injectie_kw_hard', float('inf'))
+        # v1.29.0: begrenzen in de passieve dispatch ENKEL als de cabine opgegeven is (server 15.473.0: aansluiting.cabine_kva > 0)
+        #   — zonder cabine blijft het oude gedrag (gemeten injectie bestaande PV ongemoeid, ook bij een kleine omvormer-schatting).
+        _cab_grens = float(inp['aansluiting'].get('cabine_kva', 0) or 0) > 0
+        _inj_grens = hard_inj if _cab_grens else float('inf')
         # v1.19.0 (Johan 24-10): optioneel ZELFCONSUMPTIE ZONDER STURING (inp['zelfconsumptie_dom'], enkel het klantrapport-
         #   scenario «installatie zonder spotsturing»): de batterij laadt met het PV-overschot (ook bestaande PV uit het gemeten
         #   injectieprofiel) en ontlaadt bij afname — geen prijs, geen netladen. Zo toont de factuur «geen» de echte
@@ -3865,8 +3876,13 @@ def _run_simulation_kern(inp: dict) -> dict:
                     grid_in_all.append(netto); grid_out_all.append(0.0)
                     over_afn_zacht_all.append(max(0, netto - zacht_afn)); over_afn_hard_all.append(max(0, netto - hard_afn))
                     over_inj_zacht_all.append(0.0); over_inj_hard_all.append(0.0)
+                    _pv_curt_arb_all.append(0.0)   # v1.29.0
                 else:
                     injectie = -netto
+                    # v1.29.0: injectie fysiek begrensd (cabine) → overschot boven de grens = afgeremde PV
+                    _cut = max(0.0, injectie - _inj_grens) if _inj_grens < 1e8 else 0.0
+                    injectie -= _cut
+                    _pv_curt_arb_all.append(_cut)
                     grid_in_all.append(0.0); grid_out_all.append(injectie)
                     over_afn_zacht_all.append(0.0); over_afn_hard_all.append(0.0)
                     over_inj_zacht_all.append(max(0, injectie - zacht_inj)); over_inj_hard_all.append(max(0, injectie - hard_inj))
@@ -3879,8 +3895,13 @@ def _run_simulation_kern(inp: dict) -> dict:
                 over_afn_hard_all.append(max(0, netto - hard_afn))
                 over_inj_zacht_all.append(0.0)
                 over_inj_hard_all.append(0.0)
+                _pv_curt_arb_all.append(0.0)   # v1.29.0
             else:
                 injectie = -netto
+                # v1.29.0 (Johan 25-11, Demasure): injectie fysiek begrensd (cabine) → overschot boven de grens = afgeremde PV
+                _cut = max(0.0, injectie - _inj_grens) if _inj_grens < 1e8 else 0.0
+                injectie -= _cut
+                _pv_curt_arb_all.append(_cut)
                 grid_in_all.append(0.0)
                 grid_out_all.append(injectie)
                 over_afn_zacht_all.append(0.0)
