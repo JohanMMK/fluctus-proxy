@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 # ============================================================================
 # FLUCTUS BATTERY DISPATCH SIMULATOR
+# Versie:        v1.30.0 (2026-11-26, Johan): BTW PARTICULIER — inp['btw_klant_pct'] (server 15.474.0, enkel particulier vanuit EK):
+#                de jaarfactuur rekent de afnameposten × (1 + pct/100), injectie-energie en energiefonds btw-vrij; subtotaal_excl_btw
+#                = klantkost incl. btw, subtotaal_zonder_btw = excl. De sturing (LP) rekent nog excl. btw. Zonder het veld: identiek.
 # Versie:        v1.29.0 (2026-11-25, Johan): INJECTIEGRENS VAN DE CABINE — max_injectie_kw_hard (server 15.473.0: min(omvormers +
 #                batterij, cabine_kva)) geldt nu ook in de passieve dispatch (geen sturing / zelfconsumptie zonder sturing): het
 #                overschot boven de grens telt als afgeremde PV. De maand-arbitrage-LP mag afremmen zodra het PV-overschot de grens
@@ -3231,6 +3234,49 @@ def bereken_jaarfactuur(
     }
 
 
+# v1.30.0 (Johan 26-11): BTW PARTICULIER. Een particulier betaalt btw op de stroomfactuur (6 %, residentieel) en kan die niet
+#   recupereren; de injectie-opbrengst van een particulier is btw-vrij. Met inp['btw_klant_pct'] > 0 rekent de jaarfactuur
+#   wat de klant ECHT betaalt: elke afnamepost (A afname, B, C, D, E behalve het energiefonds) × (1 + pct/100); de injectie-
+#   energie (A injectie_energie_spot, markdown_injectie, imbalance_injectie) blijft ongemoeid. 'subtotaal_excl_btw' wordt
+#   dan de klantkost INCL. btw (zodat elke afgeleide — besparing, factuur, laadkost — in dezelfde eenheid rekent); het echte
+#   bedrag excl. btw staat in 'subtotaal_zonder_btw'. Zonder het veld (bedrijf): identiek aan v1.29.0.
+_BTW_A_INJECTIE = ('injectie_energie_spot', 'markdown_injectie', 'imbalance_injectie')
+def _pas_btw_klant_toe(factuur: dict, pct: float) -> dict:
+    try:
+        pct = float(pct or 0.0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    if pct <= 0 or not isinstance(factuur, dict):
+        return factuur
+    f = 1.0 + pct / 100.0
+    g = factuur.get('groepen') or {}
+    excl = float(factuur.get('subtotaal_excl_btw') or 0.0)
+    for gk in ('A_energiekost', 'B_netgebruik_afname', 'C_netgebruik_injectie', 'D_transport', 'E_heffingen'):
+        G = g.get(gk)
+        if not isinstance(G, dict):
+            continue
+        for k, v in list(G.items()):
+            if k.startswith('_') or not isinstance(v, (int, float)):
+                continue
+            if gk == 'A_energiekost' and k in _BTW_A_INJECTIE:
+                continue
+            if gk == 'E_heffingen' and k == 'energiefonds_vlaanderen':
+                continue
+            G[k] = v * f
+        G['_subtotaal'] = sum(v for k, v in G.items() if not k.startswith('_') and isinstance(v, (int, float)))
+    incl = sum(float((g.get(gk) or {}).get('_subtotaal') or 0.0) for gk in
+               ('A_energiekost', 'B_netgebruik_afname', 'C_netgebruik_injectie', 'D_transport', 'E_heffingen'))
+    factuur['subtotaal_zonder_btw'] = excl
+    factuur['subtotaal_excl_btw'] = incl          # = klantkost incl. btw (zie hierboven)
+    factuur['btw_bedrag'] = incl - excl
+    factuur['totaal_incl_btw'] = incl
+    factuur['btw_klant_pct'] = pct
+    _inj_netkost = float((g.get('C_netgebruik_injectie') or {}).get('_subtotaal') or 0.0)
+    factuur['injectie_netkost_eur'] = _inj_netkost
+    factuur['injectie_opbrengst_eur'] = float(factuur.get('injectie_energie_opbrengst_eur') or 0.0) - _inj_netkost
+    return factuur
+
+
 # =============================================================================
 # HOOFDSIMULATIE
 # =============================================================================
@@ -4289,6 +4335,8 @@ def _run_simulation_kern(inp: dict) -> dict:
                         if (inp.get('piek_realisatie') is not None and (batt.get('kw', 0) or 0) > 0) else None),
         piek_realisatie=(inp.get('piek_realisatie') if (batt.get('kw', 0) or 0) > 0 else None),
     )
+    if inp.get('btw_klant_pct'):   # v1.30.0: particulier → klantkost incl. btw
+        factuur = _pas_btw_klant_toe(factuur, inp.get('btw_klant_pct'))
 
     # v1.16.0: PV die de LP afremde (maand-arbitrage of BSP) hoort niet bij de benutte PV → aftrekken + als afgeremd tellen.
     _lpc = _pv_curt_arb_all if len(_pv_curt_arb_all) == N else (pv_curtailed_kw_bsp_all if len(pv_curtailed_kw_bsp_all) == N else None)
@@ -4450,6 +4498,8 @@ def _run_simulation_kern(inp: dict) -> dict:
             'subtotaal_excl_btw': factuur['subtotaal_excl_btw'],
             'btw_bedrag': factuur['btw_bedrag'],
             'totaal_incl_btw': factuur['totaal_incl_btw'],
+            'btw_klant_pct': factuur.get('btw_klant_pct', 0.0),            # v1.30.0
+            'subtotaal_zonder_btw': factuur.get('subtotaal_zonder_btw', factuur['subtotaal_excl_btw']),   # v1.30.0
             'maandpieken_afname_kw': factuur['maandpieken_afname_kw'],
             'maandpieken_injectie_kw': factuur['maandpieken_injectie_kw'],
             'toegangsvermogen_kw': factuur['toegangsvermogen_kw'],
