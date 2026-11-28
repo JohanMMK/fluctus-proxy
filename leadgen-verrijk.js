@@ -1,5 +1,6 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.2.2: kwp_bevestigd:true (knop «✅ Bevestigd») zet de eigen kWp op bron «adviseur», ook als het getal niet wijzigde.
 // v1.2.1: bewaren schrijft enkel gewijzigde velden (ongewijzigde GRB-kWp blijft «grb»).
 // v1.2.0 (Johan 28-11): OPSLAG + BELLIJST — tabel leadgen_leads (Supabase, uniek per slug+site_id).
 //   Google-inhoud (naam/adres/telefoon/website/kWp van Google) in kolom «google» met google_tot = +30 dagen; een uurlijkse
@@ -35,7 +36,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.2.1';
+const VERSIE = '1.2.2';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -471,12 +472,17 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         const nw = upd[kk] == null ? null : (kk === 'kwp_eigen' ? upd[kk] : String(upd[kk]));
         if (oud === nw) { delete upd[kk]; if (kk === 'kwp_eigen') delete upd.kwp_bron; }
       });
+      // v1.2.2: «✅ Bevestigd» — adviseur bevestigt de eigen kWp (ook ongewijzigd) → bron «adviseur».
+      if (b.kwp_bevestigd === true) {
+        const kv = upd.kwp_eigen !== undefined ? upd.kwp_eigen : (rij.kwp_eigen == null ? null : Math.round(+rij.kwp_eigen));
+        if (kv != null && rij.kwp_bron !== 'adviseur') { upd.kwp_eigen = kv; upd.kwp_bron = 'adviseur'; }
+      }
       if (!Object.keys(upd).length) return res.json({ ok: true, lead: rijUit(rij) });
       Object.assign(upd, { bijgewerkt_door: u.id, bijgewerkt_door_naam: naamVan(u), bijgewerkt_op: nuIso() });
       const out = await sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: upd });
       await logRij(u, { site: rij.site, site_id: rij.site_id, slug: rij.slug, gemeente: rij.gemeente, lead_id: id,
                         velden: Object.keys(upd).filter(k => !/^bijgewerkt/.test(k)), belstatus: upd.belstatus || null,
-                        tel_bevestigd: 'tel_bevestigd' in upd ? !!upd.tel_bevestigd : undefined }, rij.site || rij.gemeente, 'lead_belresultaat');
+                        tel_bevestigd: 'tel_bevestigd' in upd ? !!upd.tel_bevestigd : undefined, kwp_bevestigd: upd.kwp_bron === 'adviseur' || undefined }, rij.site || rij.gemeente, 'lead_belresultaat');
       res.json({ ok: true, lead: rijUit((out && out[0]) || Object.assign(rij, upd)) });
     } catch (e) { console.warn('[leadgen-verrijk] lead bijwerken:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout', melding: 'Bewaren mislukt.' }); }
   });
