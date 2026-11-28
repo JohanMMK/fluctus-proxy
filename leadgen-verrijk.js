@@ -1,5 +1,6 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.2.1: bewaren schrijft enkel gewijzigde velden (ongewijzigde GRB-kWp blijft «grb»).
 // v1.2.0 (Johan 28-11): OPSLAG + BELLIJST — tabel leadgen_leads (Supabase, uniek per slug+site_id).
 //   Google-inhoud (naam/adres/telefoon/website/kWp van Google) in kolom «google» met google_tot = +30 dagen; een uurlijkse
 //   opruimer zet «google» op null zodra google_tot voorbij is. place_id en EIGEN gegevens blijven: tel_bevestigd (door de klant
@@ -34,7 +35,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.2.0';
+const VERSIE = '1.2.1';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -463,6 +464,13 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       if ('kwp_eigen' in b) { const k = b.kwp_eigen === '' || b.kwp_eigen == null ? null : Math.round(+b.kwp_eigen);
         if (k != null && !(k >= 0 && k < 100000)) return res.status(400).json({ ok: false, error: 'kwp' });
         upd.kwp_eigen = k; upd.kwp_bron = k == null ? null : 'adviseur'; }
+      // Enkel echte wijzigingen bewaren (ongewijzigde GRB-kWp blijft bron «grb»).
+      Object.keys(upd).forEach(kk => {
+        if (kk === 'kwp_bron') return;
+        const oud = rij[kk] == null ? null : (kk === 'kwp_eigen' ? Math.round(+rij[kk]) : String(rij[kk]));
+        const nw = upd[kk] == null ? null : (kk === 'kwp_eigen' ? upd[kk] : String(upd[kk]));
+        if (oud === nw) { delete upd[kk]; if (kk === 'kwp_eigen') delete upd.kwp_bron; }
+      });
       if (!Object.keys(upd).length) return res.json({ ok: true, lead: rijUit(rij) });
       Object.assign(upd, { bijgewerkt_door: u.id, bijgewerkt_door_naam: naamVan(u), bijgewerkt_op: nuIso() });
       const out = await sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: upd });
