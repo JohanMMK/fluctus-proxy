@@ -1,5 +1,5 @@
 'use strict';
-// Uitlegvideo «Drie deuren, twee sporen» (ewb.js v1.6.0) — samenwerking installateur (EPC) × energie-adviseur (Elindus).
+// Uitlegvideo «Drie deuren, twee sporen» (ewb.js v1.6.0; 1.6.1: korte slotzinnen aan de vorige zin geplakt — de stem liet ze weg) — samenwerking installateur (EPC) × energie-adviseur (Elindus).
 // Zelfde opbouw en stijl als uitleg-flows.js: elk beeld = 1120×630 HTML (campagnefoto + infografiek) + één stuk spreektekst (rol «docu»).
 // Inhoud = brochure «Go-to-market — van factuur naar bindende EPC-offerte» + videoprompt 28-11 (KB).
 // Leadkanalen: Elindus-profiel (vóór de call), mail (vóór of na het bezoek), WhatsApp (tijdens het bezoek).
@@ -80,7 +80,7 @@ function beelden({ AB, qr }) {
   const kol = (kop, kl, items, sub) => `<div class="kaart" style="flex:1;padding:14px 12px;border-color:${kl}">
       <div style="font-size:15px;font-weight:700;color:#fff">${kop}</div><div style="font-size:11.5px;color:#9fb0c8;margin-bottom:10px">${sub}</div>
       ${items.map(t => `<div style="display:flex;gap:7px;align-items:center;font-size:13px;margin-top:6px">${ic('check', 14, kl, 2.6)}<span>${t}</span></div>`).join('')}</div>`;
-  L.push({ titel: 'Twee sporen, één platform', tekst: 'Twee vakmensen, één klant. De installateur zorgt voor laadpalen, een batterij en zonnepanelen. De energie-adviseur zorgt voor het juiste contract. Energie-Compas en Betere Lader werken achter de schermen voor allebei: de data, de studie en het ontwerp. De klant ziet twee aparte gesprekken.',
+  L.push({ titel: 'Twee sporen, één platform', tekst: 'Twee vakmensen, één klant. De installateur zorgt voor laadpalen, een batterij en zonnepanelen. De energie-adviseur zorgt voor het juiste contract. Energie-Compas en Betere Lader werken achter de schermen voor allebei: de data, de studie en het ontwerp, terwijl de klant twee aparte gesprekken ziet.',
     html: basis(`<div class="ey">Twee sporen, één platform</div><h1>Twee vakmensen,<br>één klant</h1>
       <div style="display:flex;gap:10px;margin-top:22px">
         ${kol('Hardware', HW, ['Laadpalen', 'Batterij', 'Zonnepanelen'], 'installateur')}
@@ -161,7 +161,7 @@ function beelden({ AB, qr }) {
   // 8 · Het bezoek: elk zijn verhaal
   const spoor = (kop, wie, kl, items) => `<div class="kaart" style="flex:1;border-color:${kl}"><div style="font-size:15px;font-weight:700">${kop}</div><div style="font-size:12px;color:#9fb0c8;margin-bottom:8px">${wie}</div>
       ${items.map(t => `<div style="display:flex;gap:8px;align-items:flex-start;font-size:13px;margin-top:6px;line-height:1.3">${ic('check', 14, kl, 2.6)}<span>${t}</span></div>`).join('')}</div>`;
-  L.push({ titel: 'Het bezoek', tekst: 'Zo heb je bij elk bezoek meer dan een doodgewoon verhaal. De installateur toont wat de aansluiting kan dragen, en wanneer een batterij of zonnepanelen echt iets opleveren. De energie-adviseur toont wat een dynamisch contract met toegang tot intraday en onbalans opbrengt. Vraagt de klant naar het andere vak, dan bevestig je. Je verkoopt het niet.',
+  L.push({ titel: 'Het bezoek', tekst: 'Zo heb je bij elk bezoek meer dan een doodgewoon verhaal. De installateur toont wat de aansluiting kan dragen, en wanneer een batterij of zonnepanelen echt iets opleveren. De energie-adviseur toont wat een dynamisch contract met toegang tot intraday en onbalans opbrengt. Vraagt de klant naar het andere vak, dan bevestig je het, maar je verkoopt het niet.',
     html: basis(`<div class="ey">Het bezoek</div><h1 style="font-size:30px">Meer dan een<br>doodgewoon verhaal</h1>
       <div style="display:flex;gap:10px;margin-top:20px">
         ${spoor('Hardware', 'installateur', HW, ['Wat de aansluiting kan dragen', 'Wanneer batterij of PV echt opbrengt'])}
@@ -177,7 +177,7 @@ function beelden({ AB, qr }) {
       <div style="display:flex;align-items:center;gap:14px;margin-top:20px">${ecLogo(AB, 18)}${blLogo(AB, 22)}<span class="wm">EME</span><span class="wm">Voltmaster</span></div>`, { AB, bg: 'kmo-transitie-3', pos: 'right center' }) });
 
   // 10 · Boodschap
-  L.push({ titel: 'Boodschap', tekst: 'Twee vakmensen, één dossier, één doel: goedkopere megawatturen en goedkopere kilometers, all-in. Elk bij zijn vak. Samen sneller.',
+  L.push({ titel: 'Boodschap', tekst: 'Twee vakmensen, één dossier, één doel: goedkopere megawatturen en goedkopere kilometers, all-in: elk bij zijn vak, en samen sneller.',
     html: basis(`<div style="margin:auto 0"><div class="lgr">${ecLogo(AB, 28)}</div>
       <div style="font-size:40px;font-weight:800;line-height:1.18">Twee vakmensen.<br>Eén dossier.</div>
       <div style="margin-top:18px;font-size:24px;font-weight:700;color:${GROEN};line-height:1.3">Goedkopere MWh en km,<br>all-in.</div>
