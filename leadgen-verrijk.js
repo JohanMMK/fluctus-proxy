@@ -1,5 +1,9 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.3.0 (Johan 28-11): CRM-begin — kolommen volgende_actie + actie_datum op leadgen_leads, tabel leadgen_lead_log
+//   (logboek per lead: notities per datum + automatische regels bij status/actie-wijziging). GET/POST /api/leadgen/lead/:id/log.
+//   Lijst: ?todo=1 = actie gepland t/m vandaag (sortering op actie_datum). Verrijken met {force:true} (+ eigen zoekterm)
+//   negeert cache/opslag → opnieuw zoeken bij Google (betaald), bv. als Google het verkeerde bedrijf koos.
 // v1.2.3: verrijken van een parking die al in leadgen_leads staat met geldige Google-inhoud (≤ 30 d) gebruikt die opslag
 //   (bron «opslag», gratis) — ook als een andere adviseur ze verrijkte. Geen dubbele Google-kost.
 // v1.2.2: kwp_bevestigd:true (knop «✅ Bevestigd») zet de eigen kWp op bron «adviseur», ook als het getal niet wijzigde.
@@ -38,7 +42,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.2.3';
+const VERSIE = '1.3.0';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -258,11 +262,12 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       await tellersLaden();
       const mgr = isManager(u);
       const ck = `${lat.toFixed(4)},${lng.toFixed(4)}|${zoek.toLowerCase()}`;
-      const hit = cacheGet(ck);
+      const force = b.force === true;
+      const hit = force ? null : cacheGet(ck);
       const tellers = () => ({ dag: TEL.dag[u.id] || 0, dag_max: mgr ? null : dagMax(), maand: TEL.maand || 0, maand_max: maandMax() || null, solar: TEL.solar, solar_max: solarMax() || null });
 
       let uitkomst, cache = false;
-      const dbh = hit ? null : await dbTreffer(ctx).catch(() => null);   // v1.2.3: al verrijkt (door wie dan ook) en Google-data nog geldig → gratis uit de opslag
+      const dbh = (hit || force) ? null : await dbTreffer(ctx).catch(() => null);   // v1.2.3: al verrijkt (door wie dan ook) en Google-data nog geldig → gratis uit de opslag
       if (hit || dbh) { uitkomst = hit || dbh; cache = true; }
       else {
         if (!mgr && dagMax() && (TEL.dag[u.id] || 0) >= dagMax())
@@ -323,8 +328,10 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
 
   // ════════════════════════════════════ v1.2.0 OPSLAG + BELLIJST ════════════════════════════════════
   const TABEL = 'leadgen_leads';
+  const LOGTABEL = 'leadgen_lead_log';
   const GOOGLE_DAGEN = 30;
   const kwpPerM2 = () => { const v = parseFloat(process.env.LEADGEN_KWP_PER_M2); return isFinite(v) && v > 0 ? v : 0.12; };
+  const ACTIES = ['bellen', 'terugbellen', 'mail_sturen', 'offerte_maken', 'offerte_opvolgen', 'bezoek', 'afspraak', 'factuur_opvragen'];
   const BELSTATUS = ['nieuw', 'geen_antwoord', 'terugbellen', 'interesse', 'afspraak', 'geen_interesse', 'ongeldig_nummer'];
   const naamVan = (u) => (u && (u.naam || u.email)) || null;
   const nuIso = () => new Date().toISOString();
@@ -433,11 +440,13 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     if (q.tot && /^\d{4}-\d{2}-\d{2}$/.test(q.tot)) f.push(`laatst_op=lte.${q.tot}T23:59:59`);
     if (q.status && BELSTATUS.includes(q.status)) f.push(`belstatus=eq.${q.status}`);
     if (q.open === '1') f.push('belstatus=in.(nieuw,geen_antwoord,terugbellen,interesse)');
+    if (q.todo === '1') f.push(`actie_datum=lte.${new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Brussels' }).slice(0, 10)}`);
     return f;
   }
   async function leadsOphalen(u, q) {
     const f = filterQuery(u, q);
-    const rijen = await sbRest(`${TABEL}?select=*&order=laatst_op.desc&limit=2000${f.length ? '&' + f.join('&') : ''}`) || [];
+    const ord = q.todo === '1' || q.sort === 'actie' ? 'actie_datum.asc.nullslast,laatst_op.desc' : 'laatst_op.desc';
+    const rijen = await sbRest(`${TABEL}?select=*&order=${ord}&limit=2000${f.length ? '&' + f.join('&') : ''}`) || [];
     const naam = String(q.naam || '').trim().toLowerCase();
     const minKwp = parseFloat(q.minkwp);
     return rijen.map(r => rijUit(r)).filter(r => {
@@ -462,7 +471,7 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         if (r.eerst_door) m[r.eerst_door] = { id: r.eerst_door, naam: r.eerst_door_naam };
         if (r.laatst_door) m[r.laatst_door] = { id: r.laatst_door, naam: r.laatst_door_naam };
         return m; }, {})) : null;
-      res.json({ ok: true, leads, adviseurs, belstatus: BELSTATUS, manager: isManager(u), google_dagen: GOOGLE_DAGEN });
+      res.json({ ok: true, leads, adviseurs, belstatus: BELSTATUS, acties: ACTIES, manager: isManager(u), google_dagen: GOOGLE_DAGEN });
     } catch (e) { console.warn('[leadgen-verrijk] leads:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout', melding: 'Kon de verrijkte leads niet laden.' }); }
   });
 
@@ -477,6 +486,8 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       const txt = (v, n) => (v == null ? null : String(v).trim().slice(0, n) || null);
       if ('belstatus' in b) { if (!BELSTATUS.includes(b.belstatus)) return res.status(400).json({ ok: false, error: 'belstatus' }); upd.belstatus = b.belstatus; }
       if ('notitie' in b) upd.notitie = txt(b.notitie, 1000);
+      if ('volgende_actie' in b) { const a = txt(b.volgende_actie, 40); if (a && !ACTIES.includes(a)) return res.status(400).json({ ok: false, error: 'actie' }); upd.volgende_actie = a; }
+      if ('actie_datum' in b) { const d = txt(b.actie_datum, 10); if (d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) return res.status(400).json({ ok: false, error: 'datum' }); upd.actie_datum = d; }
       if ('contactpersoon' in b) upd.contactpersoon = txt(b.contactpersoon, 120);
       if ('eigen_naam' in b) upd.eigen_naam = txt(b.eigen_naam, 160);
       if ('tel_bevestigd' in b) { const t = txt(b.tel_bevestigd, 40); if (t && !/^[+\d][\d\s./()-]{5,}$/.test(t)) return res.status(400).json({ ok: false, error: 'telefoon' }); upd.tel_bevestigd = t; }
@@ -495,7 +506,21 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         const kv = upd.kwp_eigen !== undefined ? upd.kwp_eigen : (rij.kwp_eigen == null ? null : Math.round(+rij.kwp_eigen));
         if (kv != null && rij.kwp_bron !== 'adviseur') { upd.kwp_eigen = kv; upd.kwp_bron = 'adviseur'; }
       }
-      if (!Object.keys(upd).length) return res.json({ ok: true, lead: rijUit(rij) });
+      const logTekst = txt(b.log_tekst, 2000);
+      if (!Object.keys(upd).length && !logTekst) return res.json({ ok: true, lead: rijUit(rij) });
+      // Logboek: automatische regels bij status/actie + vrije notitie
+      const regels = [];
+      if (upd.belstatus) regels.push({ soort: 'status', tekst: `Status: ${rij.belstatus || 'nieuw'} → ${upd.belstatus}` });
+      if ('volgende_actie' in upd || 'actie_datum' in upd) {
+        const a = 'volgende_actie' in upd ? upd.volgende_actie : rij.volgende_actie, d = 'actie_datum' in upd ? upd.actie_datum : rij.actie_datum;
+        regels.push({ soort: 'actie', tekst: a ? `Volgende actie: ${a.replace(/_/g, ' ')}${d ? ' op ' + d.split('-').reverse().join('/') : ''}` : 'Volgende actie gewist' });
+      }
+      if ('tel_bevestigd' in upd && upd.tel_bevestigd) regels.push({ soort: 'bevestigd', tekst: `Telefoon bevestigd: ${upd.tel_bevestigd}` });
+      if (upd.kwp_bron === 'adviseur') regels.push({ soort: 'bevestigd', tekst: `Eigen kWp bevestigd: ${upd.kwp_eigen}` });
+      if (logTekst) regels.push({ soort: 'notitie', tekst: logTekst, datum: /^\d{4}-\d{2}-\d{2}$/.test(String(b.log_datum || '')) ? b.log_datum : undefined });
+      if (regels.length) await sbRest(LOGTABEL, { method: 'POST', headers: { Prefer: 'return=minimal' },
+        body: regels.map(r => Object.assign({ lead_id: id, door: u.id, door_naam: naamVan(u) }, r)) }).catch(e => console.warn('[leadgen-verrijk] logboek:', e.message));
+      if (!Object.keys(upd).length) { const nu = (await sbRest(`${TABEL}?id=eq.${id}&select=*&limit=1`) || [])[0] || rij; return res.json({ ok: true, lead: rijUit(nu) }); }
       Object.assign(upd, { bijgewerkt_door: u.id, bijgewerkt_door_naam: naamVan(u), bijgewerkt_op: nuIso() });
       const out = await sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: upd });
       await logRij(u, { site: rij.site, site_id: rij.site_id, slug: rij.slug, gemeente: rij.gemeente, lead_id: id,
@@ -542,19 +567,31 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     } catch (e) { console.warn('[leadgen-verrijk] ververs:', e.message); res.status(502).json({ ok: false, error: 'places_fout', melding: 'Verversen mislukt.' }); }
   });
 
+  app.get('/api/leadgen/lead/:id/log', async (req, res) => {
+    try {
+      const u = await vraagGebruiker(req, res); if (!u) return;
+      const id = parseInt(req.params.id, 10);
+      const rij = (await sbRest(`${TABEL}?id=eq.${id}&select=id,eerst_door,laatst_door&limit=1`) || [])[0];
+      if (!rij) return res.status(404).json({ ok: false, error: 'niet_gevonden' });
+      if (!magZien(u, rij)) return res.status(403).json({ ok: false, error: 'geen_toegang' });
+      const log = await sbRest(`${LOGTABEL}?lead_id=eq.${id}&select=*&order=datum.desc,ts.desc&limit=500`) || [];
+      res.json({ ok: true, log, acties: ACTIES });
+    } catch (e) { console.warn('[leadgen-verrijk] log lezen:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout' }); }
+  });
+
   // CSV: standaard ENKEL eigen gegevens; ?google=1 voegt de Google-velden toe als tijdelijke werklijst (gelogd).
   app.get('/api/leadgen/leads.csv', async (req, res) => {
     try {
       const u = await vraagGebruiker(req, res); if (!u) return;
       const q = req.query || {}, metG = q.google === '1';
       const leads = await leadsOphalen(u, q);
-      const kol = ['gemeente', 'parking', 'bedrijf (eigen)', 'telefoon (bevestigd door klant)', 'contactpersoon', 'belstatus', 'notitie', 'kWp (eigen)', 'kWp-bron', 'dak m² (GRB)', 'verrijkt op', 'door', 'lat', 'lng'];
+      const kol = ['gemeente', 'parking', 'bedrijf (eigen)', 'telefoon (bevestigd door klant)', 'contactpersoon', 'belstatus', 'notitie', 'volgende actie', 'actie op', 'kWp (eigen)', 'kWp-bron', 'dak m² (GRB)', 'verrijkt op', 'door', 'lat', 'lng'];
       if (metG) kol.push('Google: bedrijf', 'Google: telefoon', 'Google: website', 'Google: kWp', 'Google: geldig tot');
       const cel = v => { const t = v == null ? '' : String(v); return /[;"\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
       const lijnen = [kol.join(';')];
       for (const r of leads) {
         const g = r.google || {};
-        const rij = [r.gemeente, r.site, r.eigen_naam, r.tel_bevestigd, r.contactpersoon, r.belstatus, r.notitie, r.kwp_eigen, r.kwp_bron, r.dak_m2_grb,
+        const rij = [r.gemeente, r.site, r.eigen_naam, r.tel_bevestigd, r.contactpersoon, r.belstatus, r.notitie, r.volgende_actie ? r.volgende_actie.replace(/_/g, ' ') : '', r.actie_datum || '', r.kwp_eigen, r.kwp_bron, r.dak_m2_grb,
                      r.laatst_op ? String(r.laatst_op).slice(0, 10) : '', r.laatst_door_naam, r.lat, r.lng];
         if (metG) rij.push(g.naam, g.telefoon_int || g.telefoon, g.website, g.solar ? g.solar.kwp : '', r.google ? String(r.google_tot).slice(0, 10) : '');
         lijnen.push(rij.map(cel).join(';'));
