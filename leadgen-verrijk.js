@@ -1,5 +1,12 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.2.0 (Johan 28-11): OPSLAG + BELLIJST — tabel leadgen_leads (Supabase, uniek per slug+site_id).
+//   Google-inhoud (naam/adres/telefoon/website/kWp van Google) in kolom «google» met google_tot = +30 dagen; een uurlijkse
+//   opruimer zet «google» op null zodra google_tot voorbij is. place_id en EIGEN gegevens blijven: tel_bevestigd (door de klant
+//   bevestigd bij het bellen), contactpersoon, belstatus, notitie, eigen_naam, kwp_eigen (GRB-dak × LEADGEN_KWP_PER_M2 = 0,12, of
+//   ingevuld door de adviseur), dak_m2_grb. Endpoints: GET /api/leadgen/leads (filters), POST /api/leadgen/lead/:id (eigen velden),
+//   POST /api/leadgen/lead/:id/ververs (Google opnieuw, telt mee in de limieten), GET /api/leadgen/leads.csv (standaard enkel
+//   eigen gegevens; ?google=1 = tijdelijke werklijst). Adviseur ziet de leads die hij verrijkte; managers alles.
 // v1.1.0 (Johan 28-11): SOLAR — dezelfde klik vraagt ook Google Solar API buildingInsights:findClosest op (dichtste
 //   gebouw bij de parking): max. aantal panelen, kWp, dakoppervlak, zonuren, geschatte jaaropbrengst (AC ≈ DC × 0,85).
 //   SKU Solar API Building Insights (Essentials). NOT_FOUND = gratis. Eigen maandlimiet LEADGEN_SOLAR_MAAND (standaard
@@ -27,7 +34,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.1.0';
+const VERSIE = '1.2.0';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -215,11 +222,11 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     return { gevonden: false, betaald: false };
   }
 
-  async function logRij(u, details, klantNaam) {
+  async function logRij(u, details, klantNaam, actie) {
     try {
       await sbRest('app_activity_log', {
         method: 'POST', headers: { 'Prefer': 'return=minimal' },
-        body: { user_id: u.id, app_id: APP_ID, actie: 'lead_verrijkt', klant_naam: klantNaam ? String(klantNaam).slice(0, 200) : null, details },
+        body: { user_id: u.id, app_id: APP_ID, actie: actie || 'lead_verrijkt', klant_naam: klantNaam ? String(klantNaam).slice(0, 200) : null, details },
       });
     } catch (e) { console.warn('[leadgen-verrijk] log faalde:', e.message); }
   }
@@ -270,7 +277,7 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
           TEL.dag[u.id]--;
           return res.status(502).json({ ok: false, error: 'places_fout', melding: 'Google gaf een fout. Probeer later opnieuw.' });
         }
-        uitkomst = Object.assign({}, pl.fout ? { gevonden: false, bron: 'places_fout', betaald: false, places_fout: true } : pl, { solar: so });
+        uitkomst = Object.assign({}, pl.fout ? { gevonden: false, bron: 'places_fout', betaald: false, places_fout: true } : pl, { solar: so, t: Date.now() });
         if (uitkomst.betaald) TEL.maand = (TEL.maand || 0) + 1;
         if (so.betaald) TEL.solar++;
         if (!pl.fout && !so.fout) cacheSet(ck, uitkomst);
@@ -298,12 +305,242 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         solar_gevonden: !!so.gevonden, solar_betaald: !cache && !!so.betaald,
       }), ctx.site || ctx.gemeente);
 
-      return res.json({ ok: true, gevonden: !!resultaat, resultaat, solar, cache, bron: uitkomst.bron, teller: tellers(), versie: VERSIE });
+      let lead_id = null;
+      try { lead_id = await leadBewaar(u, ctx, resultaat, solar, uitkomst.t); } catch (e) { console.warn('[leadgen-verrijk] lead bewaren faalde:', e.message); }
+
+      return res.json({ ok: true, gevonden: !!resultaat, resultaat, solar, cache, bron: uitkomst.bron, teller: tellers(), lead_id, versie: VERSIE });
     } catch (e) {
       console.warn('[leadgen-verrijk] fout:', e.message);
       return res.status(502).json({ ok: false, error: 'places_fout', melding: 'Google Places gaf een fout. Probeer later opnieuw.' });
     }
   });
+
+
+  // ════════════════════════════════════ v1.2.0 OPSLAG + BELLIJST ════════════════════════════════════
+  const TABEL = 'leadgen_leads';
+  const GOOGLE_DAGEN = 30;
+  const kwpPerM2 = () => { const v = parseFloat(process.env.LEADGEN_KWP_PER_M2); return isFinite(v) && v > 0 ? v : 0.12; };
+  const BELSTATUS = ['nieuw', 'geen_antwoord', 'terugbellen', 'interesse', 'afspraak', 'geen_interesse', 'ongeldig_nummer'];
+  const naamVan = (u) => (u && (u.naam || u.email)) || null;
+  const nuIso = () => new Date().toISOString();
+  const totIso = () => new Date(Date.now() + GOOGLE_DAGEN * 864e5).toISOString();
+  const enc = encodeURIComponent;
+
+  function googleBlok(resultaat, solar) {
+    const g = {};
+    if (resultaat) Object.assign(g, { naam: resultaat.naam, adres: resultaat.adres, telefoon: resultaat.telefoon, telefoon_int: resultaat.telefoon_int,
+                                      website: resultaat.website, maps: resultaat.maps, status: resultaat.status, afstand_m: resultaat.afstand_m, ver: resultaat.ver });
+    if (solar && solar.gevonden) g.solar = solar;
+    return Object.keys(g).length ? g : null;
+  }
+
+  // Eigen dakschatting uit het GRB (Vlaanderen): grootste gebouw (hoofd- of bijgebouw) ≤ 100 m van het parkingpunt.
+  function _ringOpp(ring) {
+    const R = 6371000, t = Math.PI / 180, c = Math.cos(ring[0][1] * t);
+    let s = 0; for (let i = 0; i < ring.length - 1; i++) { const [x1, y1] = ring[i], [x2, y2] = ring[i + 1]; s += (x1 * c) * y2 - (x2 * c) * y1; }
+    return Math.abs(s / 2) * (R * t) * (R * t);
+  }
+  async function grbDak(lat, lng) {
+    const d = 0.0011, dl = 0.0016;
+    const url = 'https://geo.api.vlaanderen.be/GRB/wfs?service=WFS&version=2.0.0&request=GetFeature&typeNames=GRB:GBG&outputFormat=application/json&count=80&srsName=EPSG:4326'
+      + `&bbox=${lat - d},${lng - dl},${lat + d},${lng + dl},urn:ogc:def:crs:EPSG::4326`;
+    const r = await doFetch(url); if (!r.ok) return null;
+    const j = await r.json(); const fs = (j && j.features) || [];
+    let best = null;
+    for (const f of fs) {
+      const g = f.geometry; if (!g) continue;
+      const rings = g.type === 'Polygon' ? [g.coordinates[0]] : g.type === 'MultiPolygon' ? g.coordinates.map(p => p[0]) : [];
+      if (!rings.length || !rings[0] || rings[0].length < 4) continue;
+      const opp = rings.reduce((a, ri) => a + _ringOpp(ri), 0);
+      const r0 = rings[0]; const cx = r0.reduce((a, q) => a + q[0], 0) / r0.length, cy = r0.reduce((a, q) => a + q[1], 0) / r0.length;
+      const af = afstand(lat, lng, cy, cx);
+      if (af > 100) continue;
+      if (!best || opp > best.opp) best = { opp, af };
+    }
+    if (!best || best.opp < 80) return null;
+    const dak = Math.round(best.opp);
+    return { dak_m2_grb: dak, kwp_eigen: Math.round(dak * kwpPerM2()), kwp_bron: 'grb' };
+  }
+
+  async function leadBewaar(u, ctx, resultaat, solar, opgehaaldOp) {
+    if (!ctx.slug || !ctx.site_id) return null;
+    const bestaand = await sbRest(`${TABEL}?slug=eq.${enc(ctx.slug)}&site_id=eq.${enc(ctx.site_id)}&select=id,kwp_eigen,kwp_bron,eerst_door&limit=1`).catch(() => null);
+    const oud = bestaand && bestaand[0];
+    const rij = {
+      slug: ctx.slug, site_id: ctx.site_id, site: ctx.site || null, gemeente: ctx.gemeente, nis: ctx.nis, lat: ctx.lat, lng: ctx.lng,
+      place_id: resultaat ? resultaat.place_id : null, google: googleBlok(resultaat, solar),
+      google_tot: new Date((opgehaaldOp || Date.now()) + GOOGLE_DAGEN * 864e5).toISOString(),   // 30 dagen vanaf het échte ophalen bij Google
+      laatst_door: u.id, laatst_door_naam: naamVan(u), laatst_op: nuIso(),
+    };
+    let id;
+    if (oud) {
+      if (!rij.place_id) delete rij.place_id;
+      await sbRest(`${TABEL}?id=eq.${oud.id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: rij });
+      id = oud.id;
+    } else {
+      Object.assign(rij, { eerst_door: u.id, eerst_door_naam: naamVan(u), eerst_op: nuIso() });
+      const out = await sbRest(TABEL, { method: 'POST', headers: { Prefer: 'return=representation' }, body: rij });
+      id = out && out[0] && out[0].id;
+    }
+    // Eigen kWp uit het GRB (enkel als er nog geen eigen schatting van een adviseur is) — op de achtergrond.
+    if (id && (!oud || oud.kwp_bron !== 'adviseur')) {
+      grbDak(ctx.lat, ctx.lng).then(g => g && sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: g }))
+        .catch(e => console.warn('[leadgen-verrijk] GRB-dak faalde:', e.message));
+    }
+    return id;
+  }
+
+  function magZien(u, rij) { return isManager(u) || rij.eerst_door === u.id || rij.laatst_door === u.id; }
+  function rijUit(rij, metGoogle) {
+    const geldig = rij.google && rij.google_tot && new Date(rij.google_tot) > new Date();
+    const o = Object.assign({}, rij);
+    o.google = (geldig && metGoogle !== false) ? rij.google : null;
+    o.google_verlopen = !geldig;
+    return o;
+  }
+  async function vraagGebruiker(req, res) {
+    const u = await resolveUser(req);
+    if (!u) { res.status(401).json({ ok: false, error: 'niet_ingelogd' }); return null; }
+    if (!(await heeftAppToegang(u, APP_ID))) { res.status(403).json({ ok: false, error: 'geen_toegang' }); return null; }
+    return u;
+  }
+  function filterQuery(u, q) {
+    const f = [];
+    if (!isManager(u)) f.push(`or=(eerst_door.eq.${u.id},laatst_door.eq.${u.id})`);
+    else if (q.door && /^[0-9a-f-]{36}$/i.test(q.door)) f.push(`or=(eerst_door.eq.${q.door},laatst_door.eq.${q.door})`);
+    if (q.slug) f.push(`slug=eq.${enc(String(q.slug).slice(0, 80))}`);
+    if (q.van && /^\d{4}-\d{2}-\d{2}$/.test(q.van)) f.push(`laatst_op=gte.${q.van}T00:00:00`);
+    if (q.tot && /^\d{4}-\d{2}-\d{2}$/.test(q.tot)) f.push(`laatst_op=lte.${q.tot}T23:59:59`);
+    if (q.status && BELSTATUS.includes(q.status)) f.push(`belstatus=eq.${q.status}`);
+    if (q.open === '1') f.push('belstatus=in.(nieuw,geen_antwoord,terugbellen,interesse)');
+    return f;
+  }
+  async function leadsOphalen(u, q) {
+    const f = filterQuery(u, q);
+    const rijen = await sbRest(`${TABEL}?select=*&order=laatst_op.desc&limit=2000${f.length ? '&' + f.join('&') : ''}`) || [];
+    const naam = String(q.naam || '').trim().toLowerCase();
+    const minKwp = parseFloat(q.minkwp);
+    return rijen.map(r => rijUit(r)).filter(r => {
+      if (naam) {
+        const hooi = [r.site, r.eigen_naam, r.gemeente, r.contactpersoon, r.google && r.google.naam].filter(Boolean).join(' ').toLowerCase();
+        if (!hooi.includes(naam)) return false;
+      }
+      if (q.tel === '1' && !(r.tel_bevestigd || (r.google && r.google.telefoon))) return false;
+      if (isFinite(minKwp) && minKwp > 0) {
+        const k = r.kwp_eigen != null ? +r.kwp_eigen : (r.google && r.google.solar ? +r.google.solar.kwp : null);
+        if (k == null || k < minKwp) return false;
+      }
+      return true;
+    });
+  }
+
+  app.get('/api/leadgen/leads', async (req, res) => {
+    try {
+      const u = await vraagGebruiker(req, res); if (!u) return;
+      const leads = await leadsOphalen(u, req.query || {});
+      const adviseurs = isManager(u) ? Object.values(leads.reduce((m, r) => {
+        if (r.eerst_door) m[r.eerst_door] = { id: r.eerst_door, naam: r.eerst_door_naam };
+        if (r.laatst_door) m[r.laatst_door] = { id: r.laatst_door, naam: r.laatst_door_naam };
+        return m; }, {})) : null;
+      res.json({ ok: true, leads, adviseurs, belstatus: BELSTATUS, manager: isManager(u), google_dagen: GOOGLE_DAGEN });
+    } catch (e) { console.warn('[leadgen-verrijk] leads:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout', melding: 'Kon de verrijkte leads niet laden.' }); }
+  });
+
+  app.post('/api/leadgen/lead/:id', async (req, res) => {
+    try {
+      const u = await vraagGebruiker(req, res); if (!u) return;
+      const id = parseInt(req.params.id, 10); if (!id) return res.status(400).json({ ok: false, error: 'id' });
+      const rij = (await sbRest(`${TABEL}?id=eq.${id}&select=*&limit=1`) || [])[0];
+      if (!rij) return res.status(404).json({ ok: false, error: 'niet_gevonden' });
+      if (!magZien(u, rij)) return res.status(403).json({ ok: false, error: 'geen_toegang' });
+      const b = req.body || {}, upd = {};
+      const txt = (v, n) => (v == null ? null : String(v).trim().slice(0, n) || null);
+      if ('belstatus' in b) { if (!BELSTATUS.includes(b.belstatus)) return res.status(400).json({ ok: false, error: 'belstatus' }); upd.belstatus = b.belstatus; }
+      if ('notitie' in b) upd.notitie = txt(b.notitie, 1000);
+      if ('contactpersoon' in b) upd.contactpersoon = txt(b.contactpersoon, 120);
+      if ('eigen_naam' in b) upd.eigen_naam = txt(b.eigen_naam, 160);
+      if ('tel_bevestigd' in b) { const t = txt(b.tel_bevestigd, 40); if (t && !/^[+\d][\d\s./()-]{5,}$/.test(t)) return res.status(400).json({ ok: false, error: 'telefoon' }); upd.tel_bevestigd = t; }
+      if ('kwp_eigen' in b) { const k = b.kwp_eigen === '' || b.kwp_eigen == null ? null : Math.round(+b.kwp_eigen);
+        if (k != null && !(k >= 0 && k < 100000)) return res.status(400).json({ ok: false, error: 'kwp' });
+        upd.kwp_eigen = k; upd.kwp_bron = k == null ? null : 'adviseur'; }
+      if (!Object.keys(upd).length) return res.json({ ok: true, lead: rijUit(rij) });
+      Object.assign(upd, { bijgewerkt_door: u.id, bijgewerkt_door_naam: naamVan(u), bijgewerkt_op: nuIso() });
+      const out = await sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: upd });
+      await logRij(u, { site: rij.site, site_id: rij.site_id, slug: rij.slug, gemeente: rij.gemeente, lead_id: id,
+                        velden: Object.keys(upd).filter(k => !/^bijgewerkt/.test(k)), belstatus: upd.belstatus || null,
+                        tel_bevestigd: 'tel_bevestigd' in upd ? !!upd.tel_bevestigd : undefined }, rij.site || rij.gemeente, 'lead_belresultaat');
+      res.json({ ok: true, lead: rijUit((out && out[0]) || Object.assign(rij, upd)) });
+    } catch (e) { console.warn('[leadgen-verrijk] lead bijwerken:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout', melding: 'Bewaren mislukt.' }); }
+  });
+
+  app.post('/api/leadgen/lead/:id/ververs', async (req, res) => {
+    try {
+      const u = await vraagGebruiker(req, res); if (!u) return;
+      const k = key(); if (!k) return res.status(503).json({ ok: false, error: 'geen_key', melding: 'Google-sleutel ontbreekt op de server.' });
+      const id = parseInt(req.params.id, 10);
+      const rij = (await sbRest(`${TABEL}?id=eq.${id}&select=*&limit=1`) || [])[0];
+      if (!rij) return res.status(404).json({ ok: false, error: 'niet_gevonden' });
+      if (!magZien(u, rij)) return res.status(403).json({ ok: false, error: 'geen_toegang' });
+      await tellersLaden();
+      const mgr = isManager(u);
+      if (!mgr && dagMax() && (TEL.dag[u.id] || 0) >= dagMax()) return res.status(429).json({ ok: false, error: 'daglimiet', melding: `Daglimiet bereikt (${dagMax()} per dag).` });
+      if (maandMax() && (TEL.maand || 0) >= maandMax()) return res.status(429).json({ ok: false, error: 'maandlimiet', melding: `Maandlimiet van ${maandMax()} bereikt.` });
+      TEL.dag[u.id] = (TEL.dag[u.id] || 0) + 1;
+      const solarMag = !solarUit() && !(solarMax() && TEL.solar >= solarMax());
+      const [pl, so] = await Promise.all([
+        rij.place_id ? (_newUit ? detailsLegacy(k, rij.place_id) : detailsNew(k, rij.place_id)).then(p => ({ gevonden: true, betaald: true, p })).catch(e => ({ fout: e.message }))
+                     : opzoeken(k, rij.lat, rij.lng, rij.site || '').catch(e => ({ fout: e.message })),
+        solarMag ? solarOpzoeken(k, rij.lat, rij.lng).catch(e => ({ fout: e.message })) : Promise.resolve({ overgeslagen: true }),
+      ]);
+      if (pl.betaald) TEL.maand = (TEL.maand || 0) + 1;
+      if (so.betaald) TEL.solar++;
+      let resultaat = null;
+      if (pl.gevonden && pl.p) { const p = pl.p; const af = (p.lat != null) ? afstand(rij.lat, rij.lng, p.lat, p.lng) : null;
+        resultaat = { naam: p.naam, adres: p.adres, telefoon: p.telefoon, telefoon_int: p.telefoon_int, website: p.website, maps: p.maps, status: p.status, afstand_m: af, ver: af != null && af > 400, place_id: p.place_id }; }
+      const solar = so.gevonden ? { gevonden: true, kwp: so.kwp, panelen: so.panelen, paneel_w: so.paneel_w, dak_m2: so.dak_m2, paneel_m2: so.paneel_m2, zonuren: so.zonuren,
+                                    kwh_jaar: so.kwh_jaar, kwh_per_kwp: so.kwh_per_kwp, afstand_m: so.afstand_m, ver: so.afstand_m != null && so.afstand_m > 150, kwaliteit: so.kwaliteit, beeld: so.beeld } : null;
+      const upd = { google: googleBlok(resultaat, solar), google_tot: totIso(), laatst_door: u.id, laatst_door_naam: naamVan(u), laatst_op: nuIso() };
+      if (resultaat && resultaat.place_id) upd.place_id = resultaat.place_id;
+      const out = await sbRest(`${TABEL}?id=eq.${id}`, { method: 'PATCH', headers: { Prefer: 'return=representation' }, body: upd });
+      await logRij(u, { site: rij.site, site_id: rij.site_id, slug: rij.slug, gemeente: rij.gemeente, lat: rij.lat, lng: rij.lng, lead_id: id, ververs: true,
+                        gevonden: !!resultaat, place_id: resultaat ? resultaat.place_id : null, heeft_tel: !!(resultaat && resultaat.telefoon), heeft_web: !!(resultaat && resultaat.website),
+                        bron: pl.fout ? 'places_fout' : (_newUit ? 'places_legacy' : 'places_new'), betaald: !!pl.betaald, cache: false,
+                        solar_gevonden: !!so.gevonden, solar_betaald: !!so.betaald }, rij.site || rij.gemeente);
+      res.json({ ok: true, lead: rijUit((out && out[0]) || Object.assign(rij, upd)) });
+    } catch (e) { console.warn('[leadgen-verrijk] ververs:', e.message); res.status(502).json({ ok: false, error: 'places_fout', melding: 'Verversen mislukt.' }); }
+  });
+
+  // CSV: standaard ENKEL eigen gegevens; ?google=1 voegt de Google-velden toe als tijdelijke werklijst (gelogd).
+  app.get('/api/leadgen/leads.csv', async (req, res) => {
+    try {
+      const u = await vraagGebruiker(req, res); if (!u) return;
+      const q = req.query || {}, metG = q.google === '1';
+      const leads = await leadsOphalen(u, q);
+      const kol = ['gemeente', 'parking', 'bedrijf (eigen)', 'telefoon (bevestigd door klant)', 'contactpersoon', 'belstatus', 'notitie', 'kWp (eigen)', 'kWp-bron', 'dak m² (GRB)', 'verrijkt op', 'door', 'lat', 'lng'];
+      if (metG) kol.push('Google: bedrijf', 'Google: telefoon', 'Google: website', 'Google: kWp', 'Google: geldig tot');
+      const cel = v => { const t = v == null ? '' : String(v); return /[;"\n\r]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+      const lijnen = [kol.join(';')];
+      for (const r of leads) {
+        const g = r.google || {};
+        const rij = [r.gemeente, r.site, r.eigen_naam, r.tel_bevestigd, r.contactpersoon, r.belstatus, r.notitie, r.kwp_eigen, r.kwp_bron, r.dak_m2_grb,
+                     r.laatst_op ? String(r.laatst_op).slice(0, 10) : '', r.laatst_door_naam, r.lat, r.lng];
+        if (metG) rij.push(g.naam, g.telefoon_int || g.telefoon, g.website, g.solar ? g.solar.kwp : '', r.google ? String(r.google_tot).slice(0, 10) : '');
+        lijnen.push(rij.map(cel).join(';'));
+      }
+      await logRij(u, { export: true, met_google: metG, aantal: leads.length }, null, 'lead_export');
+      const naam = `bellijst_${new Date().toISOString().slice(0, 10)}${metG ? '_TIJDELIJK' : ''}.csv`;
+      res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+      res.setHeader('Content-Disposition', `attachment; filename="${naam}"`);
+      res.send('﻿' + (metG ? '# Tijdelijke werklijst met Google-gegevens: na gebruik verwijderen (max. 30 dagen).\n' : '') + lijnen.join('\r\n'));
+    } catch (e) { console.warn('[leadgen-verrijk] csv:', e.message); res.status(502).json({ ok: false, error: 'opslag_fout' }); }
+  });
+
+  // Opruimer: Google-inhoud weg na 30 dagen (één PATCH per uur, enkel rijen die nog Google-inhoud hebben).
+  async function opruimen() {
+    try { await sbRest(`${TABEL}?google=not.is.null&google_tot=lt.${enc(nuIso())}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: { google: null } }); }
+    catch (e) { console.warn('[leadgen-verrijk] opruimen:', e.message); }
+  }
+  if (!deps.geenTimers) { setTimeout(opruimen, 60 * 1000); const tm = setInterval(opruimen, 3600 * 1000); if (tm.unref) tm.unref(); }
 
   app.get('/api/leadgen/verrijk/status', async (req, res) => {
     const u = await resolveUser(req);
