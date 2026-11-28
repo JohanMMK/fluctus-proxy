@@ -1601,15 +1601,17 @@ async function run({ files, postcodes, tarieven, apiKey, model, retries = 2 }) {
   const _maandpiekKw  = parseFloat((bron && bron.maandpiekKw) || 0) || 0;
   const _capaciteitKw = parseFloat((bron && bron.capaciteitKw) || 0) || 0;
   const heeftPiekmeting = (_maandpiekKw > 0) || (_capaciteitKw > 0);   // enkel een GEMETEN piek in kW = digitale kwartiermeter
-  const meterType = heeftPiekmeting ? 'digitaal' : 'analoog';
+  // v1.5.2 (Johan 28-11): een VOORSCHOTFACTUUR draagt geen meterstanden, netkosten-detail of piek → daaruit kan je het
+  //   metertype NIET afleiden (een 285 MWh-KMO kreeg «Analoge meter gedetecteerd»). Voorschot zonder gemeten piek → 'onbekend'.
+  const meterType = heeftPiekmeting ? 'digitaal' : (_voorschot.is_voorschot ? 'onbekend' : 'analoog');
 
   const baseCase = {
     ...parsed,
     is_voorschot: _voorschot.is_voorschot,
     voorschot_reden: _voorschot.voorschot_reden,
     factuurType,
-    meterType,               // v1.5.0: 'digitaal' | 'analoog'
-    heeftPiekmeting,         // v1.5.0: false = geen gemeten piek → standaardprofiel, geen kwartierdata/mandaat
+    meterType,               // v1.5.0: 'digitaal' | 'analoog'; v1.5.2: 'onbekend' bij een voorschotfactuur
+    heeftPiekmeting: (heeftPiekmeting || !_voorschot.is_voorschot) ? heeftPiekmeting : null,   // v1.5.0: false = geen gemeten piek; v1.5.2: null = onbekend (voorschot)
     aansluitVermogenKva,
     totaalExclBtw: totaalExclBtwFinal,
     totaalInclBtw: totaalInclBtwFinal,
