@@ -1,5 +1,9 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.1.0 (Johan 28-11): SOLAR — dezelfde klik vraagt ook Google Solar API buildingInsights:findClosest op (dichtste
+//   gebouw bij de parking): max. aantal panelen, kWp, dakoppervlak, zonuren, geschatte jaaropbrengst (AC ≈ DC × 0,85).
+//   SKU Solar API Building Insights (Essentials). NOT_FOUND = gratis. Eigen maandlimiet LEADGEN_SOLAR_MAAND (standaard
+//   1.000); LEADGEN_SOLAR=0 zet enkel het zon-deel uit. Google ziet geen bestaande panelen: «potentieel» = heel het dak.
 // v1.0.0 (Johan 28-11): knop «📞 Verrijken» in de Lead Generator (gemeentekaart) → telefoon + website + Google-naam
 //   van het bedrijf bij een parking. Registreert WIE verrijkt (app_activity_log, actie 'lead_verrijkt', server-side).
 //
@@ -23,7 +27,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.0.0';
+const VERSIE = '1.1.0';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -33,12 +37,14 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
   const doFetch = deps.fetch || ((u, o) => fetch(u, o));
 
   const CACHE = new Map();             // sleutel → { t, val }
-  const TEL = { maand: null, maandKey: '', dag: {}, dagKey: '', geladen: false, laden: null };
+  const TEL = { solar: 0, maand: null, maandKey: '', dag: {}, dagKey: '', geladen: false, laden: null };
 
   const key = () => process.env.GOOGLE_PLACES_KEY || process.env.GOOGLE_MAPS_KEY || '';
   const dagMax = () => { const v = parseInt(process.env.LEADGEN_VERRIJK_DAG, 10); return isFinite(v) && v >= 0 ? v : 40; };
   const maandMax = () => { const v = parseInt(process.env.LEADGEN_VERRIJK_MAAND, 10); return isFinite(v) && v >= 0 ? v : 950; };
   const uit = () => String(process.env.LEADGEN_VERRIJK || '1') === '0';
+  const solarUit = () => String(process.env.LEADGEN_SOLAR || '1') === '0';
+  const solarMax = () => { const v = parseInt(process.env.LEADGEN_SOLAR_MAAND, 10); return isFinite(v) && v >= 0 ? v : 1000; };
 
   function nuBrussel() {
     const s = new Date().toLocaleString('sv-SE', { timeZone: 'Europe/Brussels' });   // «2026-11-28 17:10:00»
@@ -54,17 +60,18 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     if (TEL.geladen) return;
     if (!TEL.laden) {
       TEL.laden = (async () => {
-        let maand = 0; const dag = {};
+        let maand = 0, solar = 0; const dag = {};
         try {
           const rijen = await sbRest(`app_activity_log?app_id=eq.${APP_ID}&actie=eq.lead_verrijkt&ts=gte.${encodeURIComponent(maandStartIso(n.maand))}&select=user_id,ts,details&limit=20000`) || [];
           for (const r of rijen) {
             const d = r.details || {};
             if (d.betaald) maand++;
+            if (d.solar_betaald) solar++;
             const rd = new Date(r.ts).toLocaleString('sv-SE', { timeZone: 'Europe/Brussels' }).slice(0, 10);
             if (rd === n.dag && !d.cache) dag[r.user_id] = (dag[r.user_id] || 0) + 1;
           }
         } catch (e) { console.warn('[leadgen-verrijk] tellers laden faalde:', e.message); }
-        TEL.maand = maand; TEL.dag = dag; TEL.geladen = true;
+        TEL.maand = maand; TEL.solar = solar; TEL.dag = dag; TEL.geladen = true;
       })().finally(() => { TEL.laden = null; });
     }
     await TEL.laden;
@@ -177,6 +184,37 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     return { gevonden: true, bron: 'places_legacy', betaald: true, p: await detailsLegacy(k, ids[0]) };
   }
 
+
+  // ── Solar API — dichtste gebouw bij de parking
+  async function solarOpzoeken(k, lat, lng) {
+    for (const q of ['MEDIUM', 'LOW']) {
+      const u = `https://solar.googleapis.com/v1/buildingInsights:findClosest?location.latitude=${lat}&location.longitude=${lng}&requiredQuality=${q}&key=${k}`;
+      const r = await doFetch(u);
+      if (r.status === 404) continue;                       // NOT_FOUND = gratis → lagere kwaliteit proberen
+      if (!r.ok) throw new Error(`solar HTTP ${r.status}: ${(await r.text()).slice(0, 200)}`);
+      const j = await r.json();
+      const sp = j.solarPotential || {};
+      const nPan = +sp.maxArrayPanelsCount || 0, wPan = +sp.panelCapacityWatts || 400;
+      const cfgs = Array.isArray(sp.solarPanelConfigs) ? sp.solarPanelConfigs : [];
+      const maxCfg = cfgs.length ? cfgs[cfgs.length - 1] : null;
+      const kwp = Math.round(nPan * wPan / 100) / 10;
+      const dcKwh = maxCfg ? +maxCfg.yearlyEnergyDcKwh || 0 : 0;
+      const acKwh = Math.round(dcKwh * 0.85);
+      const c = j.center || {};
+      const d = j.imageryDate || {};
+      return {
+        gevonden: nPan > 0, betaald: true, kwaliteit: j.imageryQuality || q,
+        panelen: nPan, paneel_w: wPan, kwp, dak_m2: sp.wholeRoofStats ? Math.round(+sp.wholeRoofStats.areaMeters2 || 0) : null,
+        paneel_m2: sp.maxArrayAreaMeters2 != null ? Math.round(+sp.maxArrayAreaMeters2) : null,
+        zonuren: sp.maxSunshineHoursPerYear != null ? Math.round(+sp.maxSunshineHoursPerYear) : null,
+        kwh_jaar: acKwh || null, kwh_per_kwp: kwp && acKwh ? Math.round(acKwh / kwp) : null,
+        afstand_m: (c.latitude != null) ? afstand(lat, lng, c.latitude, c.longitude) : null,
+        beeld: d.year ? `${d.year}-${String(d.month || 1).padStart(2, '0')}` : null,
+      };
+    }
+    return { gevonden: false, betaald: false };
+  }
+
   async function logRij(u, details, klantNaam) {
     try {
       await sbRest('app_activity_log', {
@@ -210,7 +248,7 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       const mgr = isManager(u);
       const ck = `${lat.toFixed(4)},${lng.toFixed(4)}|${zoek.toLowerCase()}`;
       const hit = cacheGet(ck);
-      const tellers = () => ({ dag: TEL.dag[u.id] || 0, dag_max: mgr ? null : dagMax(), maand: TEL.maand || 0, maand_max: maandMax() || null });
+      const tellers = () => ({ dag: TEL.dag[u.id] || 0, dag_max: mgr ? null : dagMax(), maand: TEL.maand || 0, maand_max: maandMax() || null, solar: TEL.solar, solar_max: solarMax() || null });
 
       let uitkomst, cache = false;
       if (hit) { uitkomst = hit; cache = true; }
@@ -219,10 +257,23 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
           return res.status(429).json({ ok: false, error: 'daglimiet', melding: `Daglimiet bereikt (${dagMax()} verrijkingen per dag).`, teller: tellers() });
         if (maandMax() && (TEL.maand || 0) >= maandMax())
           return res.status(429).json({ ok: false, error: 'maandlimiet', melding: `Maandlimiet van ${maandMax()} verrijkingen bereikt (gratis Google-quotum). Vraag een beheerder om LEADGEN_VERRIJK_MAAND te verhogen.`, teller: tellers() });
-        uitkomst = await opzoeken(k, lat, lng, zoek);
-        if (uitkomst.betaald) TEL.maand = (TEL.maand || 0) + 1;
         TEL.dag[u.id] = (TEL.dag[u.id] || 0) + 1;
-        cacheSet(ck, uitkomst);
+        // Places en Solar tegelijk; een fout in het ene deel laat het andere deel staan.
+        const solarMag = !solarUit() && !(solarMax() && TEL.solar >= solarMax());
+        const [pl, so] = await Promise.all([
+          opzoeken(k, lat, lng, zoek).catch(e => ({ fout: e.message })),
+          solarMag ? solarOpzoeken(k, lat, lng).catch(e => ({ fout: e.message })) : Promise.resolve({ overgeslagen: true }),
+        ]);
+        if (pl.fout) console.warn('[leadgen-verrijk] places fout:', pl.fout);
+        if (so.fout) console.warn('[leadgen-verrijk] solar fout:', so.fout);
+        if (pl.fout && (so.fout || so.overgeslagen)) {
+          TEL.dag[u.id]--;
+          return res.status(502).json({ ok: false, error: 'places_fout', melding: 'Google gaf een fout. Probeer later opnieuw.' });
+        }
+        uitkomst = Object.assign({}, pl.fout ? { gevonden: false, bron: 'places_fout', betaald: false, places_fout: true } : pl, { solar: so });
+        if (uitkomst.betaald) TEL.maand = (TEL.maand || 0) + 1;
+        if (so.betaald) TEL.solar++;
+        if (!pl.fout && !so.fout) cacheSet(ck, uitkomst);
       }
 
       let resultaat = null;
@@ -232,15 +283,22 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         resultaat = { naam: p.naam, adres: p.adres, telefoon: p.telefoon, telefoon_int: p.telefoon_int, website: p.website,
                       maps: p.maps, status: p.status, afstand_m: af, ver: af != null && af > 400, place_id: p.place_id };
       }
+      const so = uitkomst.solar || {};
+      const solar = so.gevonden ? { kwp: so.kwp, panelen: so.panelen, paneel_w: so.paneel_w, dak_m2: so.dak_m2, paneel_m2: so.paneel_m2,
+                                    zonuren: so.zonuren, kwh_jaar: so.kwh_jaar, kwh_per_kwp: so.kwh_per_kwp, afstand_m: so.afstand_m,
+                                    ver: so.afstand_m != null && so.afstand_m > 150, kwaliteit: so.kwaliteit, beeld: so.beeld }
+                                : { gevonden: false, fout: !!so.fout, overgeslagen: !!so.overgeslagen };
+      if (so.gevonden) solar.gevonden = true;
 
       // Registratie: wie, waar, wat gevonden — geen telefoonnummer of website in de log (Google-voorwaarden).
       await logRij(u, Object.assign({}, ctx, {
         zoek, gevonden: !!resultaat, place_id: resultaat ? resultaat.place_id : null,
         heeft_tel: !!(resultaat && resultaat.telefoon), heeft_web: !!(resultaat && resultaat.website),
         afstand_m: resultaat ? resultaat.afstand_m : null, bron: uitkomst.bron, betaald: !cache && !!uitkomst.betaald, cache,
+        solar_gevonden: !!so.gevonden, solar_betaald: !cache && !!so.betaald,
       }), ctx.site || ctx.gemeente);
 
-      return res.json({ ok: true, gevonden: !!resultaat, resultaat, cache, bron: uitkomst.bron, teller: tellers(), versie: VERSIE });
+      return res.json({ ok: true, gevonden: !!resultaat, resultaat, solar, cache, bron: uitkomst.bron, teller: tellers(), versie: VERSIE });
     } catch (e) {
       console.warn('[leadgen-verrijk] fout:', e.message);
       return res.status(502).json({ ok: false, error: 'places_fout', melding: 'Google Places gaf een fout. Probeer later opnieuw.' });
@@ -253,7 +311,8 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
     await tellersLaden();
     res.json({ ok: true, versie: VERSIE, key: !!key(), uit: uit(), api: _newUit ? 'legacy' : 'new',
                maand: TEL.maandKey, betaald_deze_maand: TEL.maand || 0, maand_max: maandMax() || null,
-               dag_max: dagMax(), per_gebruiker_vandaag: TEL.dag, cache: CACHE.size });
+               dag_max: dagMax(), per_gebruiker_vandaag: TEL.dag, cache: CACHE.size,
+               solar_uit: solarUit(), solar_deze_maand: TEL.solar, solar_max: solarMax() || null });
   });
 
   console.log(`[leadgen-verrijk] v${VERSIE} gemount — POST /api/leadgen/verrijk`);
