@@ -1,5 +1,7 @@
 'use strict';
 // ─── LEAD GENERATOR — VERRIJKEN via Google Places (module leadgen-verrijk.js) ─────────────────────────────────────
+// v1.2.3: verrijken van een parking die al in leadgen_leads staat met geldige Google-inhoud (≤ 30 d) gebruikt die opslag
+//   (bron «opslag», gratis) — ook als een andere adviseur ze verrijkte. Geen dubbele Google-kost.
 // v1.2.2: kwp_bevestigd:true (knop «✅ Bevestigd») zet de eigen kWp op bron «adviseur», ook als het getal niet wijzigde.
 // v1.2.1: bewaren schrijft enkel gewijzigde velden (ongewijzigde GRB-kWp blijft «grb»).
 // v1.2.0 (Johan 28-11): OPSLAG + BELLIJST — tabel leadgen_leads (Supabase, uniek per slug+site_id).
@@ -36,7 +38,7 @@
 //   onbeperkt) · LEADGEN_VERRIJK_MAAND (betaalde calls per kalendermaand, iedereen samen, standaard 950 = binnen het
 //   gratis quotum; 0 = geen limiet) · LEADGEN_VERRIJK=0 zet de knop server-side uit.
 
-const VERSIE = '1.2.2';
+const VERSIE = '1.2.3';
 const APP_ID = 'gemeenteplan';
 const CACHE_TTL = 30 * 24 * 3600 * 1000;
 const CACHE_MAX = 5000;
@@ -260,7 +262,8 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       const tellers = () => ({ dag: TEL.dag[u.id] || 0, dag_max: mgr ? null : dagMax(), maand: TEL.maand || 0, maand_max: maandMax() || null, solar: TEL.solar, solar_max: solarMax() || null });
 
       let uitkomst, cache = false;
-      if (hit) { uitkomst = hit; cache = true; }
+      const dbh = hit ? null : await dbTreffer(ctx).catch(() => null);   // v1.2.3: al verrijkt (door wie dan ook) en Google-data nog geldig → gratis uit de opslag
+      if (hit || dbh) { uitkomst = hit || dbh; cache = true; }
       else {
         if (!mgr && dagMax() && (TEL.dag[u.id] || 0) >= dagMax())
           return res.status(429).json({ ok: false, error: 'daglimiet', melding: `Daglimiet bereikt (${dagMax()} verrijkingen per dag).`, teller: tellers() });
@@ -288,7 +291,7 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
       let resultaat = null;
       if (uitkomst.gevonden && uitkomst.p) {
         const p = uitkomst.p;
-        const af = (p.lat != null && p.lng != null) ? afstand(lat, lng, p.lat, p.lng) : null;
+        const af = (p.lat != null && p.lng != null) ? afstand(lat, lng, p.lat, p.lng) : (p._afstand != null ? p._afstand : null);
         resultaat = { naam: p.naam, adres: p.adres, telefoon: p.telefoon, telefoon_int: p.telefoon_int, website: p.website,
                       maps: p.maps, status: p.status, afstand_m: af, ver: af != null && af > 400, place_id: p.place_id };
       }
@@ -390,6 +393,21 @@ module.exports = function mountLeadgenVerrijk(app, deps) {
         .catch(e => console.warn('[leadgen-verrijk] GRB-dak faalde:', e.message));
     }
     return id;
+  }
+
+  // v1.2.3: bestaande lead met geldige Google-inhoud → zelfde vorm als een opzoeking, zonder Google-call.
+  async function dbTreffer(ctx) {
+    if (!ctx.slug || !ctx.site_id) return null;
+    const rij = (await sbRest(`${TABEL}?slug=eq.${enc(ctx.slug)}&site_id=eq.${enc(ctx.site_id)}&select=place_id,google,google_tot&limit=1`) || [])[0];
+    if (!rij || !rij.google || !rij.google_tot || new Date(rij.google_tot) <= new Date()) return null;
+    const g = rij.google;
+    const heeftP = !!(g.naam || g.telefoon || g.website);
+    return {
+      gevonden: heeftP, bron: 'opslag', betaald: false, t: new Date(rij.google_tot).getTime() - GOOGLE_DAGEN * 864e5,
+      p: heeftP ? { place_id: rij.place_id, naam: g.naam, adres: g.adres, telefoon: g.telefoon, telefoon_int: g.telefoon_int, website: g.website,
+                    maps: g.maps, status: g.status, lat: null, lng: null, _afstand: g.afstand_m } : null,
+      solar: g.solar ? Object.assign({ gevonden: true, betaald: false }, g.solar) : { gevonden: false },
+    };
   }
 
   function magZien(u, rij) { return isManager(u) || rij.eerst_door === u.id || rij.laatst_door === u.id; }
