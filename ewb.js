@@ -32,7 +32,7 @@ const os = require('os');
 const path = require('path');
 const { execFile } = require('child_process');
 
-const EWB_VERSIE = '1.4.1'; // 1.4.1 (19-11): opnieuw genereren (force) na publicatie behoudt gepubliceerd/publicatie/LinkedIn-velden — anders publiceerde de klok de aflevering opnieuw (tweede mail naar de lijst) en postte LinkedIn opnieuw. // 1.4.0 (Johan 19-11): UNSPLASH-VERMELDING volgens de API-richtlijnen — «Foto van <fotograaf> op Unsplash» met links (utm_source=energie_compas&utm_medium=referral) naar het profiel van de fotograaf en naar Unsplash: in de dagrecord (dag.fotos), /api/ewb/vandaag (fotos), de mail en de LinkedIn-tekst; in de video «Foto: <naam> op Unsplash». // 1.3.3: controlemail — poster en «Bekijk de video» openen de voorvertoning van die aflevering (?d=…&preview=1&s=…) i.p.v. de publieke pagina (daar stond vóór publicatie / in proefmodus nog niets) // 1.3.2: stemcontrole negeert accenten (vóór = voor), «een» blijft lidwoord // 1.3.1: «Het voorbije etmaal» → «De voorbije 24 uur» (stemcontrole vond onduidelijke uitspraak); afkortingen in de transcriptie (mm, GW, …) genormaliseerd // 1.3.0: automatische stemcontrole (ASR): elke stemopname uitgeschreven en woord voor woord vergeleken met de tekst; resultaat in de vetomail, in /run en bij uitlegvideo's (mail «uitlegvideo klaar») // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
+const EWB_VERSIE = '1.5.0'; // 1.5.0 (Johan 28-11): UITLEGVIDEO «Van factuur naar groeipad» (UITLEG.flows) — eigen beelden (campagnefoto + infografiek, uitleg-flows.js) i.p.v. schermafbeeldingen van een app; langzame zoom per beeld; stem «docu» (UITLEG_STEM_FLOWS, tempo UITLEG_TEMPO_FLOWS, standaard 1.05); cijfers = laadcheck van de KMO-demofactuur; eindbeeld «Start met een demo» + QR naar WhatsApp. POST /api/uitleg/flows/maak. // 1.4.1 (19-11): opnieuw genereren (force) na publicatie behoudt gepubliceerd/publicatie/LinkedIn-velden — anders publiceerde de klok de aflevering opnieuw (tweede mail naar de lijst) en postte LinkedIn opnieuw. // 1.4.0 (Johan 19-11): UNSPLASH-VERMELDING volgens de API-richtlijnen — «Foto van <fotograaf> op Unsplash» met links (utm_source=energie_compas&utm_medium=referral) naar het profiel van de fotograaf en naar Unsplash: in de dagrecord (dag.fotos), /api/ewb/vandaag (fotos), de mail en de LinkedIn-tekst; in de video «Foto: <naam> op Unsplash». // 1.3.3: controlemail — poster en «Bekijk de video» openen de voorvertoning van die aflevering (?d=…&preview=1&s=…) i.p.v. de publieke pagina (daar stond vóór publicatie / in proefmodus nog niets) // 1.3.2: stemcontrole negeert accenten (vóór = voor), «een» blijft lidwoord // 1.3.1: «Het voorbije etmaal» → «De voorbije 24 uur» (stemcontrole vond onduidelijke uitspraak); afkortingen in de transcriptie (mm, GW, …) genormaliseerd // 1.3.0: automatische stemcontrole (ASR): elke stemopname uitgeschreven en woord voor woord vergeleken met de tekst; resultaat in de vetomail, in /run en bij uitlegvideo's (mail «uitlegvideo klaar») // 1.2.2: uitlegvideo opent met het bewegende kompas + begintune en een gesproken aankondiging // 1.2.1: uitlegvideo energiemarkt + scène «evolutie terugverdientijd over 4 jaar» // 1.2.0: uitlegvideo energiemarkt-app door de server (screenshots live app + stem), GET /api/uitleg/:app, POST /api/uitleg/:app/maak; /api/ewb/vandaag toont managers ook de proefaflevering // 1.1.1: spotprijs (geel, eigen schaal) in de productiemixgrafiek // 1.1.0: AVONDEDITIE 18u50 (zo–vr; genereren 17:00, LinkedIn volgende ochtend 7u30), inhoud over de volgende dag, groeten met «energiedag» // 1.0.15: reden voor duurdere dag uit de cijfers van díe dag (wind/zon/kou); «vrieskou» enkel bij max ≤ 0 °C // 1.0.14: eindbeeld gesproken «Vraag een analyse op maat.» + wisselende groet (energieke dag; vrijdag weekend) // 1.0.13: stem genormaliseerd op -16 LUFS, jingle op 45 % (EWB_JINGLE_VOLUME) // 1.0.12: openingsanimatie kompas + eigen jingle (assets/ewb-begin.mp3, ewb-einde.mp3; EWB_JINGLE=uit schakelt uit), spreektekst ingekort (zelfde tempo): zon/wind-cijfers, goedkope uren in prijsblok, gasopslag/import/check gisteren enkel als opvallend, kortere besparings- en weekzin, eindbeeld 5 s // 1.0.11: QR onder de foto (niet meer over het gezicht), mixlegende = getekende reeksen (wind gegroepeerd, biomassa, overig) // 1.0.10: besparing als % energiekost per km (4 goedkoopste vs 4 duurste komende uren) // 1.0.9: kortere actie- en CTA-zinnen, tempo 1.22 // 1.0.8: actie als vraag-zin, besparing per 100 km, QR-code met klaargezette mail // 1.0.7: beeld wisselt per deel (weer · thema · advies · campagnefoto bij de CTA) // 1.0.6: adviezen over de komende uren (incl. morgen indien bekend), verleden gedimd; drie stemmen (presentator/adviseur/afsluiter) // 1.0.5: gasprijs sinds 1/1/2024 (IMF/FRED maandgemiddelde + eigen TTF-log) in beeld en tekst // 1.0.4: verhaal van de dag → thematisch sfeerbeeld (Unsplash) achter het blok Net en markt // 1.0.3: tempo 1.15, check van gisteren enkel bij een foute verwachting // 1.0.2: stem per blok + warmere instructies (stem marin), eindbeeld met adres (niet uitgesproken), weerbeeld als achtergrond // 1.0.1: spreektekst «2 uur», atempo 1.15 (EWB_TEMPO), kortere zinnen — doel 60–90 s
 const TZ = 'Europe/Brussels';
 const W = 1080, H = 1350, FPS = 30;
 const CTA_MAIL = 'dossier@energie-compas.eu';
@@ -1094,7 +1094,20 @@ ${metStop || ''}
   //   Opnieuw maken na een wijziging aan de app: POST /api/uitleg/energiemarkt/maak (manager).
   //   Resultaat: Supabase «ewb»/uitleg/<app>.mp4; GET /api/uitleg/<app> geeft de link (gebruikt door de app-modal).
   ROL_INSTR.gids = 'Je bent een vriendelijke Vlaamse productgids die een collega rustig en helder door een app leidt. Natuurlijk, warm en duidelijk, met korte pauzes tussen de zinnen. Nederlands met een Vlaamse tongval.';
+  ROL_INSTR.docu = 'Je bent een professionele Vlaamse voice-over voor een bedrijfsfilm. Rustig, zelfzeker en helder; warm maar zakelijk. Je spreekt een ondernemer of adviseur aan met je. Duidelijke articulatie, natuurlijke klemtonen op de kernwoorden, korte pauzes tussen de zinnen, nooit gehaast. Nederlands met een lichte Vlaamse tongval, geen Nederlands accent. Spreek de merknamen Betere Lader en Energie-Compas duidelijk uit. De slotzin «Minder investeren, meer besparen, meer vertrouwen. Energie voor iedereen.» krijgt rust en overtuiging.';
   const UITLEG = {
+    // v1.5.0: eigen beelden (uitleg-flows.js) — geen url, wel beelden()
+    flows: {
+      naam: 'Van factuur naar groeipad',
+      rol: 'docu', beweeg: true, poster: 0,
+      stem: () => process.env.UITLEG_STEM_FLOWS || process.env.UITLEG_STEM || 'cedar',
+      tempo: () => +process.env.UITLEG_TEMPO_FLOWS || 1.05,
+      beelden: async () => {
+        const QR = require('qrcode');
+        const qr = await QR.toDataURL('https://wa.me/32483627958?text=demo', { margin: 1, width: 600, color: { dark: '#101a30', light: '#ffffff' } });
+        return require('./uitleg-flows.js').beelden({ AB: (process.env.EWB_ASSET_BASE || 'https://app.energie-compas.eu').replace(/\/$/, ''), qr });
+      }
+    },
     energiemarkt: {
       naam: 'De energiemarkt-app',
       intro: 'In drie minuten loop je door de energiemarkt-app: de spot- en onbalansprijzen, de productiemix met import en gas, de dagelijkse spread, en hoe je de waarde en de terugverdientijd van zonnepanelen en een batterij berekent.',
@@ -1148,7 +1161,8 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
     if (uitlegBezig) throw new Error('al bezig: ' + uitlegBezig);
     uitlegBezig = appId; const t0 = Date.now();
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uitleg-'));
-    _stemmen = { gids: process.env.UITLEG_STEM || 'cedar' };
+    const ROLU = U.rol || 'gids';
+    _stemmen = { gids: process.env.UITLEG_STEM || 'cedar' }; if (U.stem) _stemmen[ROLU] = U.stem();
     const segs = []; let metStem = true;
     try {
       const puppeteer = require('puppeteer-core');
@@ -1158,6 +1172,16 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
         const page = await browser.newPage(); await page.setViewport({ width: UW, height: UH, deviceScaleFactor: UDSF });
         // v1.2.2: bewegend kompas uit het logo + begintune, dan titelkaart met gesproken aankondiging
         try { const sv = await renderSting(page, {}, dir, { a: 'Uitleg', b: U.naam, bw: UW, bh: UH }); beelden.push({ video: sv, dur: STING_S }); } catch (e) { log('uitleg sting:', e.message); }
+        if (U.beelden) { // v1.5.0: eigen HTML-beelden
+          const L = await U.beelden(); if (U.beweeg) await page.setViewport({ width: UW, height: UH, deviceScaleFactor: 2880 / UW }); // zoom → beeld in 2880×1620 (na de sting: die blijft 1920×1080)
+          for (let i = 0; i < L.length; i++) {
+            await page.setContent(L[i].html, { waitUntil: 'load', timeout: 20000 }).catch(e => log('uitleg beeld:', e.message));
+            await page.evaluate(() => Promise.race([Promise.all([document.fonts ? document.fonts.ready : 0, ...[...document.images].map(im => im.complete ? 0 : new Promise(r => { im.onload = im.onerror = r; }))]), new Promise(r => setTimeout(r, 8000))])).catch(() => {});
+            await new Promise(r => setTimeout(r, 300));
+            const img = path.join(dir, `f${String(i).padStart(2, '0')}.jpg`);
+            await page.screenshot({ path: img, type: 'jpeg', quality: 92 }); beelden.push({ img, tekst: L[i].tekst, titel: L[i].titel, eind: !!L[i].eind, beweeg: !!U.beweeg && !L[i].eind, i });
+          }
+        } else {
         await page.setContent(uitlegKaart(U.naam, 'Een rondleiding langs alle onderdelen'), { waitUntil: 'load', timeout: 15000 }).catch(() => {});
         await page.screenshot({ path: path.join(dir, 'k0.jpg'), type: 'jpeg', quality: 90 }); beelden.push({ img: path.join(dir, 'k0.jpg'), tekst: U.intro || null, min: 2.6 });
         await page.goto(U.url, { waitUntil: 'networkidle2', timeout: 90000 }).catch(e => log('uitleg goto:', e.message));
@@ -1180,9 +1204,10 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
         }
         await page.setContent(uitlegKaart('Wat betekent dit voor jouw bedrijf?', 'Vraag een analyse op maat: mail je energiefactuur naar', true), { waitUntil: 'load', timeout: 15000 }).catch(() => {});
         await page.screenshot({ path: path.join(dir, 'k1.jpg'), type: 'jpeg', quality: 90 }); beelden.push({ img: path.join(dir, 'k1.jpg'), tekst: U.slot, eind: true });
+        }
       } finally { await browser.close().catch(() => {}); }
       // stem + segmenten
-      const tempo = Math.min(1.3, Math.max(1, +process.env.UITLEG_TEMPO || 1.12));
+      const tempo = Math.min(1.3, Math.max(1, (U.tempo ? U.tempo() : 0) || +process.env.UITLEG_TEMPO || 1.12));
       const al = [], uitlegAsr = [];
       for (let i = 0; i < beelden.length; i++) {
         const b = beelden[i]; let dur = b.min || 2.5, wav = null;
@@ -1193,7 +1218,7 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
         if (b.tekst && metStem) {
           const ap = path.join(dir, `a${i}.mp3`);
           try {
-            if (await tts(b.tekst, ap, 'gids')) {
+            if (await tts(b.tekst, ap, ROLU)) {
               const ap2 = ap.replace('.mp3', '.t.mp3'); await run('ffmpeg', ['-y', '-i', ap, '-filter:a', `atempo=${tempo}`, ap2]);
               dur = (await duur(ap2)) + 0.6 + (b.eind ? 3.5 : 0); wav = ap2; uitlegAsr.push({ blok: b.titel || (b.eind ? 'Slot' : 'Aankondiging'), verwacht: b.tekst, pad: ap2 });
             } else metStem = false;
@@ -1201,6 +1226,10 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
         }
         if (!wav) dur = Math.max(dur, b.tekst ? Math.max(4, b.tekst.split(/\s+/).length / 2.6) : dur);
         const out = path.join(dir, `v${i}.mp4`), tmp = path.join(dir, `v${i}.tmp.mp4`);
+        if (b.beweeg) { // v1.5.0: langzame zoom (afwisselend in/uit), zachte overgang
+          const N = Math.ceil(dur * FPS) + 2, Z = 0.035, z = b.i % 2 ? `${1 + Z}-${Z}*on/${N}` : `1+${Z}*on/${N}`;
+          await run('ffmpeg', ['-y', '-i', b.img, '-vf', `zoompan=z='${z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=${N}:s=1920x1080:fps=${FPS},format=yuv420p,trim=duration=${dur.toFixed(3)},fade=t=in:st=0:d=0.4,setpts=PTS-STARTPTS`, '-r', String(FPS), '-c:v', 'libx264', '-crf', '20', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', tmp]);
+        } else
         await run('ffmpeg', ['-y', '-framerate', String(FPS), '-i', b.img, '-vf', `scale=1920:1080,format=yuv420p,loop=-1:1,trim=duration=${dur.toFixed(3)},fade=t=in:st=0:d=0.3,setpts=PTS-STARTPTS`, '-r', String(FPS), '-c:v', 'libx264', '-crf', '22', '-preset', 'veryfast', '-pix_fmt', 'yuv420p', tmp]);
         fs.renameSync(tmp, out); segs.push({ out, dur });
         const w = path.join(dir, `w${i}.wav`);
@@ -1223,7 +1252,7 @@ img{height:84px;margin-bottom:34px}.e{color:#05B050;font-weight:600;letter-spaci
       if (process.env.EWB_UITLEG_LOKAAL) { fs.copyFileSync(eind, path.join(process.env.EWB_UITLEG_LOKAAL, appId + '.mp4')); beelden.filter(b => b.img).forEach((b, i) => fs.copyFileSync(b.img, path.join(process.env.EWB_UITLEG_LOKAAL, `beeld${i}.jpg`))); return { lokaal: true, duur: T }; } // enkel lokale test
       const vp = `uitleg/${appId}.mp4`, pp = `uitleg/${appId}.jpg`;
       await sbPut('ewb', vp, fs.readFileSync(eind), 'video/mp4');
-      { const pb = beelden.filter(b => b.img); await sbPut('ewb', pp, fs.readFileSync((pb[1] || pb[0]).img), 'image/jpeg'); }
+      { const pb = beelden.filter(b => b.img); await sbPut('ewb', pp, fs.readFileSync((U.poster != null ? pb[U.poster] : pb[1] || pb[0]).img), 'image/jpeg'); }
       const asr = metStem ? await asrControle(uitlegAsr) : null;
       const st = await state(); st.uitleg = st.uitleg || {};
       st.uitleg[appId] = { video: publiekeUrl(vp) + '?v=' + Date.now(), poster: publiekeUrl(pp) + '?v=' + Date.now(), duur: T, metStem, gemaakt: new Date().toISOString(), versie: EWB_VERSIE, stem: _stemmen.gids, asr };
